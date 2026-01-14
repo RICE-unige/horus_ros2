@@ -342,7 +342,22 @@ void MessageRouter::handle_topic_list_command(int client_fd)
   for (const auto& [topic, types] : topic_names_and_types) {
     response["topics"].push_back(topic);
     if (!types.empty()) {
-      response["types"].push_back(types[0]);
+      // PATCH: Denormalize type name for Unity (remove /msg/ or /srv/)
+      // Unity expects "std_msgs/String", ROS 2 gives "std_msgs/msg/String"
+      std::string type = types[0];
+      std::string denormalized = type;
+      
+      size_t msg_pos = type.find("/msg/");
+      if (msg_pos != std::string::npos) {
+        denormalized = type.substr(0, msg_pos) + "/" + type.substr(msg_pos + 5);
+      } else {
+        size_t srv_pos = type.find("/srv/");
+        if (srv_pos != std::string::npos) {
+          denormalized = type.substr(0, srv_pos) + "/" + type.substr(srv_pos + 5);
+        }
+      }
+      
+      response["types"].push_back(denormalized);
     } else {
       response["types"].push_back("unknown");
     }
