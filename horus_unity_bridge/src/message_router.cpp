@@ -388,8 +388,12 @@ void MessageRouter::send_handshake(int client_fd)
   
   nlohmann::json handshake;
   handshake["version"] = "v0.7.0";
-  handshake["metadata"]["protocol"] = "ROS2";
-  handshake["metadata"]["bridge"] = "HORUS";
+  
+  // FIX: Flatten metadata to string for Unity compatibility
+  nlohmann::json metadata;
+  metadata["protocol"] = "ROS2";
+  metadata["bridge"] = "HORUS";
+  handshake["metadata"] = metadata.dump();
   
   std::string json_str = handshake.dump();
   std::vector<uint8_t> data(json_str.begin(), json_str.end());
