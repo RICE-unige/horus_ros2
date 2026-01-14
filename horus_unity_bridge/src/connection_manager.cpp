@@ -369,6 +369,11 @@ void ConnectionManager::handle_client_write(int client_fd)
       stats_.bytes_sent += bytes_sent;
     }
   }
+
+  // If queue is empty, remove EPOLLOUT to prevent busy loop
+  if ((*conn_ptr)->send_queue.empty()) {
+    modify_epoll(client_fd, EPOLLIN | EPOLLET);
+  }
 }
 
 void ConnectionManager::disconnect_client(int client_fd)
