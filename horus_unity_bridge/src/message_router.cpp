@@ -28,6 +28,7 @@ MessageRouter::MessageRouter()
         }
       }
       if (send_callback_ && target_fd != -1) {
+        std::lock_guard<std::mutex> lock(send_mutex_);
         // First send __response command with srv_id
         nlohmann::json response_cmd;
         response_cmd["srv_id"] = srv_id;
@@ -259,6 +260,7 @@ void MessageRouter::handle_unity_service_command(int client_fd, const std::strin
   {
     // Send request to Unity client
     if (send_callback_) {
+      std::lock_guard<std::mutex> lock(send_mutex_);
       // Send __request command with srv_id first
       nlohmann::json req_cmd;
       req_cmd["srv_id"] = srv_id;

@@ -119,6 +119,7 @@ private:
   // Map service request IDs to client FDs for routing responses
   std::unordered_map<uint32_t, int> service_response_client_;
   std::mutex service_response_mutex_;
+  std::mutex send_mutex_; // Protects socket writes for atomicity
   
   // Utility
   void send_error_to_client(int client_fd, const std::string& error_message);
