@@ -63,8 +63,12 @@ bool TopicManager::register_subscriber(const std::string& topic,
   std::lock_guard<std::mutex> lock(subscribers_mutex_);
   
   // Check if already registered
-  if (subscribers_.find(topic) != subscribers_.end()) {
-    return true;  // Already exists
+  auto it = subscribers_.find(topic);
+  if (it != subscribers_.end()) {
+    // FIX: Update callback for reconnecting clients
+    it->second.callback = callback;
+    RCLCPP_INFO(node_->get_logger(), "Updated subscriber callback: %s", topic.c_str());
+    return true;
   }
   
   try {
@@ -79,8 +83,18 @@ bool TopicManager::register_subscriber(const std::string& topic,
       [this, topic, callback](std::shared_ptr<rclcpp::SerializedMessage> msg) {
         // Convert serialized message to vector
         const auto& rcl_msg = msg->get_rcl_serialized_message();
-        std::vector<uint8_t> data(rcl_msg.buffer, 
-                                  rcl_msg.buffer + rcl_msg.buffer_length);
+        
+        // PATCH: Strip CDR Header (4 bytes) for StringMsg on Registration Topic
+        // Unity ROS-TCP-Connector expects [Len][Bytes], but ROS 2 CDR is [Header][Len][Bytes]
+        size_t offset = 0;
+        if (topic.find("/horus/registration") != std::string::npos && rcl_msg.buffer_length > 4) {
+             offset = 4;
+        }
+
+        std::vector<uint8_t> data;
+        if (rcl_msg.buffer_length > offset) {
+            data.assign(rcl_msg.buffer + offset, rcl_msg.buffer + rcl_msg.buffer_length);
+        }
         
         // Call the callback
         callback(topic, data);
