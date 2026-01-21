@@ -86,15 +86,24 @@ bool TopicManager::register_subscriber(const std::string& topic,
         
         // PATCH: Strip CDR Header (4 bytes) for StringMsg on Registration Topic
         // Unity ROS-TCP-Connector expects [Len][Bytes], but ROS 2 CDR is [Header][Len][Bytes]
-        size_t offset = 0;
-        if (topic.find("/horus/registration") != std::string::npos && rcl_msg.buffer_length > 4) {
-             offset = 4;
+        // Check for registration topic more loosely to avoid mismatch issues
+        bool is_reg = (topic.find("registration") != std::string::npos);
+        
+        if (is_reg) {
+            std::stringstream ss;
+            ss << "DEBUG_MSG [" << topic << "] Len: " << rcl_msg.buffer_length << " Bytes: ";
+            for(size_t i=0; i< std::min((size_t)8, rcl_msg.buffer_length); ++i) {
+                ss << std::hex << (int)rcl_msg.buffer[i] << " ";
+            }
+            RCLCPP_ERROR(node_->get_logger(), "%s", ss.str().c_str());
         }
 
+        // Send the raw message (ROS 2 CDR formatted)
+        // Unity ROS-TCP-Connector in ROS2 mode expects this header and will skip it.
+        // If Unity is in ROS1 mode, it will misinterpret it (ArgumentOutOfRangeException).
+        
         std::vector<uint8_t> data;
-        if (rcl_msg.buffer_length > offset) {
-            data.assign(rcl_msg.buffer + offset, rcl_msg.buffer + rcl_msg.buffer_length);
-        }
+        data.assign(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
         
         // Call the callback
         callback(topic, data);
