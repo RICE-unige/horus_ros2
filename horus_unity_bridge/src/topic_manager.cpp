@@ -76,10 +76,17 @@ bool TopicManager::register_subscriber(const std::string& topic,
     std::string normalized_type = normalize_message_type(message_type);
     
     // Create generic subscription with callback
+    // PATCH: Force Transient Local QoS for tf_static topics
+    rclcpp::QoS final_qos = qos;
+    if (topic.length() >= 9 && topic.substr(topic.length() - 9) == "tf_static") {
+        final_qos.transient_local();
+        RCLCPP_INFO(node_->get_logger(), "Forcing Transient Local QoS for static TF topic: %s", topic.c_str());
+    }
+
     auto sub = node_->create_generic_subscription(
       topic,
       normalized_type,
-      qos,
+      final_qos,
       [this, topic, callback](std::shared_ptr<rclcpp::SerializedMessage> msg) {
         // Convert serialized message to vector
         const auto& rcl_msg = msg->get_rcl_serialized_message();
