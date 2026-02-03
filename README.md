@@ -15,7 +15,7 @@ This repository contains the ROS 2 packages for the HORUS system, managing the b
 
 ## 📦 Packages
 
-- **`horus_unity_bridge`**: TCPServer node inspired by `ROS-TCP-Endpoint`, optimized for C++ and fully compatible with the Unity `ROS-TCP-Connector`.
+- **`horus_unity_bridge`**: TCP server node inspired by `ROS-TCP-Endpoint`, optimized for C++ and fully compatible with the Unity `ROS-TCP-Connector` (Unity connects as a client).
 - **`horus_interfaces`**: Custom ROS 2 message and service definitions (`RobotConfig`, `RobotStatus`, etc.).
 - **`horus_backend`**: Core backend logic for robot registration and state management.
 - **`horus_unity_bridge_test`**: Testing utilities and simulation mocks.
@@ -23,13 +23,13 @@ This repository contains the ROS 2 packages for the HORUS system, managing the b
 ## 🏗️ Architecture
 
 ```
-HORUS SDK (Client)
-    ↓ (TCP 10000 / Service Calls)
-HORUS Unity Bridge (ROS 2)
-    ↓ (Topics / Services)
+HORUS MR App (Unity, TCP client)
+    ↑ (TCP 10000)
+HORUS Unity Bridge (ROS 2 TCP server)
+    ↔ (Topics / Services)
 HORUS Backend Node
-    ↓ (Registration / State)
-Robot Systems
+    ↔ (Registration / State)
+HORUS SDK (Robot/PC)
 ```
 
 ## 🚀 Building
@@ -88,5 +88,4 @@ University of Genoa, Italy
 
 - [HORUS SDK (Main Repo)](https://github.com/RICE-unige/horus_sdk)
 - [Unity ROS-TCP-Connector](https://github.com/Unity-Technologies/ROS-TCP-Connector) (Unity client compatible with this bridge)
-
 
