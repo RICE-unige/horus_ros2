@@ -184,7 +184,7 @@ void BackendNode::display_startup_info()
 
 bool BackendNode::check_unity_endpoint_status()
 {
-  // Check if Unity TCP endpoint is available by attempting a connection
+  // Check if Unity bridge is available by attempting a connection
   int sock = socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) {
     return false;

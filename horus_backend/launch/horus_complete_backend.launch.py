@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
+import os
 
 
 def generate_launch_description():
@@ -52,18 +55,15 @@ def generate_launch_description():
         arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
     )
 
-    # ROS-TCP-Endpoint for Unity communication
-    ros_tcp_endpoint_node = Node(
-        package='ros_tcp_endpoint',
-        executable='default_server_endpoint',
-        name='ros_tcp_endpoint',
-        output='screen',
-        parameters=[
-            {
-                'ROS_IP': '0.0.0.0',
-                'ROS_TCP_PORT': LaunchConfiguration('unity_tcp_port'),
-            }
-        ],
+    # HORUS Unity Bridge for Unity communication
+    unity_bridge_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(
+                get_package_share_directory('horus_unity_bridge'),
+                'launch',
+                'unity_bridge.launch.py',
+            )
+        ),
         condition=IfCondition(LaunchConfiguration('enable_unity_bridge')),
     )
 
@@ -75,6 +75,6 @@ def generate_launch_description():
             verbose_arg,
             enable_unity_bridge_arg,
             horus_backend_node,
-            ros_tcp_endpoint_node,
+            unity_bridge_launch,
         ]
     )
