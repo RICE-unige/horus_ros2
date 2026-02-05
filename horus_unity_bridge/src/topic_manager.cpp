@@ -66,9 +66,18 @@ bool TopicManager::register_subscriber(const std::string& topic,
   auto it = subscribers_.find(topic);
   if (it != subscribers_.end()) {
     // FIX: Update callback for reconnecting clients
-    it->second.callback = callback;
-    RCLCPP_INFO(node_->get_logger(), "Updated subscriber callback: %s", topic.c_str());
-    return true;
+    // For tf_static, re-create the subscription to re-deliver latched data.
+    if (topic.length() >= 9 && topic.substr(topic.length() - 9) == "tf_static") {
+      subscribers_.erase(it);
+      if (stats_.active_subscribers > 0) {
+        stats_.active_subscribers--;
+      }
+      RCLCPP_INFO(node_->get_logger(), "Recreating subscriber for static TF on reconnect: %s", topic.c_str());
+    } else {
+      it->second.callback = callback;
+      RCLCPP_INFO(node_->get_logger(), "Updated subscriber callback: %s", topic.c_str());
+      return true;
+    }
   }
   
   try {
