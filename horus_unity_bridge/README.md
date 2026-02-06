@@ -5,12 +5,23 @@ It is built to be a drop-in replacement that works natively with the **Unity ROS
 
 One process hosts the epoll-based TCP bridge, topic router, and service manager, delivering sub-millisecond routing while preserving the original Unity protocol semantics.
 
+## Prerequisites
+
+- ROS 2 Humble or Jazzy
+- `nlohmann-json3-dev`
+- WebRTC build dependencies (Linux bridge host):
+  - `pkg-config`
+  - `libgstreamer1.0-dev`
+  - `libgstreamer-plugins-base1.0-dev`
+  - `libopencv-dev`
+- Internet access on first configure (CMake fetches `libdatachannel` automatically)
+
 ## Quick Start
 
 ```bash
 # Build inside the HORUS ROS 2 workspace
 cd ~/horus_ros2
-colcon build --packages-select horus_unity_bridge
+colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON
 source install/setup.bash
 
 # Run the bridge (listens on tcp/10000 by default)
@@ -18,6 +29,12 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 ```
 
 Supply parameters through `config/bridge_config.yaml` or `--ros-args`.  
+To build without WebRTC, use:
+
+```bash
+colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=OFF
+```
+
 Important knobs: `tcp_ip`, `tcp_port`, socket buffer sizes, queue depth, worker thread count, and default QoS profiles.
 
 ## Using the Bridge
@@ -43,7 +60,7 @@ Topic data is published via ROS generic publishers/subscriptions and services ar
 Build the optional `horus_unity_bridge_test` package to access ROS publishers, service servers, and Unity client simulators:
 
 ```bash
-colcon build --packages-select horus_unity_bridge horus_unity_bridge_test
+colcon build --packages-select horus_unity_bridge horus_unity_bridge_test --cmake-args -DENABLE_WEBRTC=ON
 source install/setup.bash
 
 # Example
