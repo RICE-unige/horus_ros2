@@ -9,12 +9,34 @@ One process hosts the epoll-based TCP bridge, topic router, and service manager,
 
 - ROS 2 Humble or Jazzy
 - `nlohmann-json3-dev`
+- `libunwind-dev`
 - WebRTC build dependencies (Linux bridge host):
   - `pkg-config`
   - `libgstreamer1.0-dev`
   - `libgstreamer-plugins-base1.0-dev`
+  - `libgstreamer-plugins-bad1.0-dev`
   - `libopencv-dev`
+  - `libunwind-dev` (transitive dep required by GStreamer's pkg-config — without it CMake silently disables WebRTC)
 - Internet access on first configure (CMake fetches `libdatachannel` automatically)
+
+Install all at once:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  nlohmann-json3-dev \
+  libunwind-dev \
+  pkg-config \
+  libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev \
+  libgstreamer-plugins-bad1.0-dev \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly \
+  gstreamer1.0-libav \
+  libopencv-dev
+```
 
 ## Quick Start
 
@@ -36,6 +58,31 @@ colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=O
 ```
 
 Important knobs: `tcp_ip`, `tcp_port`, socket buffer sizes, queue depth, worker thread count, and default QoS profiles.
+
+## WebRTC Negotiation Behavior
+
+For camera streaming sessions, the bridge now derives video media parameters from the incoming Unity offer before setting the remote description:
+
+- selects the active video `mid` from the offered video m-section,
+- selects H264 payload type from the same section (prefers `packetization-mode=1` when available),
+- applies the selected payload type to both SDP track description and `rtph264pay` so SDP/PT and outgoing RTP stay aligned.
+
+Session startup signaling behavior:
+
+- `type="ready"` is emitted only after `handle_offer(...)` negotiation succeeds,
+- failed negotiation emits `type="error"` and the session is cleaned up.
+
+This avoids "WebRTC connected but no decodable frames" when Unity and bridge disagree on m-line/MID or payload mapping.
+
+## WebRTC Media Telemetry
+
+Bridge runtime logs include media-path diagnostics:
+
+- negotiated offer summary (`mid`, candidate H264 payloads, selected payload type),
+- first outbound RTP header (`pt`, `ssrc`, `sequence`),
+- periodic counters for samples pulled and RTP packets/bytes sent.
+
+Use these together with Unity inbound RTP stats (`bytesReceived`, `framesDecoded`) to isolate transport-vs-decoder failures quickly.
 
 ## Using the Bridge
 
