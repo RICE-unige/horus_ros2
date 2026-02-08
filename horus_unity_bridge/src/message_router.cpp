@@ -744,7 +744,20 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
     webrtc_sessions_[session_id] = session;
   }
 
-  session->manager->handle_offer(sdp);
+  if (!session->manager->handle_offer(sdp)) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "Failed to negotiate WebRTC offer for session '%s' topic '%s'",
+      session_id.c_str(),
+      stream_topic.c_str());
+    nlohmann::json err;
+    err["session_id"] = session_id;
+    err["type"] = "error";
+    err["error"] = "Bridge failed to negotiate WebRTC offer";
+    publish_webrtc_signal(err);
+    remove_webrtc_session(session_id);
+    return;
+  }
 
   nlohmann::json ready;
   ready["session_id"] = session_id;

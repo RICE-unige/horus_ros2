@@ -7,6 +7,34 @@
 #include <algorithm>
 #include <cstddef>
 #include <chrono>
+#include <cctype>
+#include <unordered_set>
+#include <utility>
+
+namespace
+{
+
+std::string to_lower_copy(const std::string& value)
+{
+  std::string out = value;
+  std::transform(out.begin(), out.end(), out.begin(), [](unsigned char ch) {
+    return static_cast<char>(std::tolower(ch));
+  });
+  return out;
+}
+
+std::vector<std::string> split_space_tokens(const std::string& value)
+{
+  std::istringstream stream(value);
+  std::vector<std::string> tokens;
+  std::string token;
+  while (stream >> token) {
+    tokens.push_back(token);
+  }
+  return tokens;
+}
+
+}  // namespace
 
 namespace horus_unity_bridge
 {
@@ -18,7 +46,7 @@ WebRTCManager::WebRTCManager()
 WebRTCManager::~WebRTCManager()
 {
   stop_pipeline();
-  
+
   if (appsrc_) {
     gst_object_unref(GST_OBJECT(appsrc_));
     appsrc_ = nullptr;
@@ -31,7 +59,7 @@ WebRTCManager::~WebRTCManager()
     gst_object_unref(GST_OBJECT(pipeline_));
     pipeline_ = nullptr;
   }
-  
+
   if (peer_connection_) {
     peer_connection_->close();
     peer_connection_.reset();
@@ -42,7 +70,7 @@ WebRTCManager::~WebRTCManager()
 bool WebRTCManager::initialize(const Settings& settings)
 {
   settings_ = settings;
-  
+
   try {
     gst_init(nullptr, nullptr);
     create_peer_connection();
@@ -58,7 +86,7 @@ bool WebRTCManager::initialize(const Settings& settings)
     std::cerr << "WebRTC initialization failed: " << e.what() << std::endl;
     return false;
   }
-  
+
   initialized_ = true;
   return true;
 }
@@ -148,13 +176,21 @@ void WebRTCManager::create_peer_connection()
               << " type=" << candidate_type
               << " sdp='" << candidate_sdp << "'" << std::endl;
 
+    // When we are delaying the answer until ICE gathering completes, suppress
+    // individual candidate signals.  All gathered candidates will be embedded
+    // in the answer SDP that is published once gathering finishes.
+    if (settings_.wait_for_complete_gathering) {
+      std::lock_guard<std::mutex> lock(pending_description_mutex_);
+      if (has_pending_local_description_) {
+        return;
+      }
+    }
+
     nlohmann::json data;
     data["candidate"] = candidate_sdp;
     data["sdpMid"] = candidate.mid();
-    // Note: libdatachannel doesn't directly expose mLineIndex
-    // For now, we'll omit it or set to 0 as Unity/browser can derive it from sdpMid
     data["sdpMLineIndex"] = 0;
-    
+
     std::lock_guard<std::mutex> lock(signaling_mutex_);
     if (signaling_callback_) {
       signaling_callback_("candidate", data);
@@ -226,6 +262,17 @@ void WebRTCManager::create_peer_connection()
       return;
     }
 
+    // Re-fetch the local description so it contains all gathered ICE
+    // candidates.  The original SDP captured in onLocalDescription was
+    // generated before any candidates existed.
+    if (peer_connection_) {
+      auto current_desc = peer_connection_->localDescription();
+      if (current_desc.has_value()) {
+        pending_data["sdp"] = std::string(*current_desc);
+        pending_data["type"] = current_desc->typeString();
+      }
+    }
+
     std::lock_guard<std::mutex> signaling_lock(signaling_mutex_);
     if (signaling_callback_) {
       signaling_callback_(pending_type, pending_data);
@@ -236,28 +283,277 @@ void WebRTCManager::create_peer_connection()
     std::cout << "WebRTC Signaling State: " << state << std::endl;
   });
 
-  // Explicitly declare H264 + SSRC so SDP and outgoing RTP packets stay aligned.
-  rtc::Description::Video media("video", rtc::Description::Direction::SendOnly);
-  media.addH264Codec(video_payload_type_);
-  media.addSSRC(video_ssrc_, "horus-video");
-  video_track_ = peer_connection_->addTrack(media);
-  if (video_track_) {
-    video_track_->onOpen([this]() {
-      video_track_open_.store(true);
-      std::cout << "WebRTC video track open" << std::endl;
-      request_keyframe();
-    });
-    video_track_->onClosed([this]() {
-      video_track_open_.store(false);
-      std::cout << "WebRTC video track closed" << std::endl;
-    });
-  }
+  video_track_.reset();
+  video_track_open_.store(false);
 }
 
-void WebRTCManager::handle_offer(const std::string& sdp)
+std::string WebRTCManager::trim_copy(const std::string& value)
 {
-  if (!initialized_) {
-    return;
+  const auto first = std::find_if(value.begin(), value.end(), [](unsigned char ch) {
+    return !std::isspace(ch);
+  });
+  if (first == value.end()) {
+    return std::string();
+  }
+  const auto last = std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) {
+    return !std::isspace(ch);
+  }).base();
+  return std::string(first, last);
+}
+
+bool WebRTCManager::parse_payload_type_from_rtpmap(
+  const std::string& line,
+  const std::string& codec_name,
+  int& payload_type)
+{
+  const std::string prefix = "a=rtpmap:";
+  if (line.rfind(prefix, 0) != 0) {
+    return false;
+  }
+
+  const auto space_pos = line.find(' ', prefix.size());
+  if (space_pos == std::string::npos) {
+    return false;
+  }
+
+  try {
+    payload_type = std::stoi(line.substr(prefix.size(), space_pos - prefix.size()));
+  } catch (...) {
+    return false;
+  }
+
+  const std::string codec_value = to_lower_copy(trim_copy(line.substr(space_pos + 1)));
+  const std::string expected_codec = to_lower_copy(codec_name);
+  return codec_value.rfind(expected_codec, 0) == 0;
+}
+
+bool WebRTCManager::parse_offer_video_negotiation(
+  const std::string& sdp,
+  OfferVideoNegotiation& negotiation) const
+{
+  struct VideoSection
+  {
+    bool rejected = false;
+    std::string mid;
+    std::vector<int> mline_payload_types;
+    std::vector<int> h264_payload_types;
+    std::unordered_set<int> packetization_mode_1_payload_types;
+  };
+
+  std::vector<VideoSection> sections;
+  VideoSection* current_section = nullptr;
+
+  std::istringstream stream(sdp);
+  std::string line;
+  while (std::getline(stream, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    const std::string trimmed_line = trim_copy(line);
+    if (trimmed_line.empty()) {
+      continue;
+    }
+
+    if (trimmed_line.rfind("m=", 0) == 0) {
+      current_section = nullptr;
+      const auto tokens = split_space_tokens(trimmed_line);
+      if (tokens.empty() || tokens[0] != "m=video") {
+        continue;
+      }
+
+      VideoSection section;
+      if (tokens.size() > 1) {
+        section.rejected = tokens[1] == "0";
+      }
+      for (size_t idx = 3; idx < tokens.size(); ++idx) {
+        try {
+          section.mline_payload_types.push_back(std::stoi(tokens[idx]));
+        } catch (...) {
+        }
+      }
+      sections.push_back(std::move(section));
+      current_section = &sections.back();
+      continue;
+    }
+
+    if (!current_section) {
+      continue;
+    }
+
+    if (trimmed_line.rfind("a=mid:", 0) == 0) {
+      current_section->mid = trim_copy(trimmed_line.substr(6));
+      continue;
+    }
+
+    int rtpmap_pt = -1;
+    if (parse_payload_type_from_rtpmap(trimmed_line, "h264/90000", rtpmap_pt)) {
+      current_section->h264_payload_types.push_back(rtpmap_pt);
+      continue;
+    }
+
+    const std::string fmtp_prefix = "a=fmtp:";
+    if (trimmed_line.rfind(fmtp_prefix, 0) == 0) {
+      const auto space_pos = trimmed_line.find(' ', fmtp_prefix.size());
+      if (space_pos == std::string::npos) {
+        continue;
+      }
+
+      int fmtp_pt = -1;
+      try {
+        fmtp_pt = std::stoi(trimmed_line.substr(fmtp_prefix.size(), space_pos - fmtp_prefix.size()));
+      } catch (...) {
+        continue;
+      }
+      const std::string fmtp_params = to_lower_copy(trim_copy(trimmed_line.substr(space_pos + 1)));
+      if (fmtp_params.find("packetization-mode=1") != std::string::npos) {
+        current_section->packetization_mode_1_payload_types.insert(fmtp_pt);
+      }
+    }
+  }
+
+  const VideoSection* selected_section = nullptr;
+  for (const auto& section : sections) {
+    if (!section.rejected && !section.h264_payload_types.empty()) {
+      selected_section = &section;
+      break;
+    }
+  }
+  if (!selected_section) {
+    for (const auto& section : sections) {
+      if (!section.rejected) {
+        selected_section = &section;
+        break;
+      }
+    }
+  }
+
+  if (!selected_section || selected_section->h264_payload_types.empty()) {
+    return false;
+  }
+
+  std::unordered_set<int> h264_set(
+    selected_section->h264_payload_types.begin(),
+    selected_section->h264_payload_types.end());
+  std::unordered_set<int> unique_payloads;
+  std::vector<int> ordered_h264_payloads;
+
+  for (const int payload_type : selected_section->mline_payload_types) {
+    if (h264_set.count(payload_type) == 0) {
+      continue;
+    }
+    if (unique_payloads.insert(payload_type).second) {
+      ordered_h264_payloads.push_back(payload_type);
+    }
+  }
+  for (const int payload_type : selected_section->h264_payload_types) {
+    if (unique_payloads.insert(payload_type).second) {
+      ordered_h264_payloads.push_back(payload_type);
+    }
+  }
+
+  if (ordered_h264_payloads.empty()) {
+    return false;
+  }
+
+  int selected_payload_type = -1;
+  for (const int payload_type : ordered_h264_payloads) {
+    if (selected_section->packetization_mode_1_payload_types.count(payload_type) > 0) {
+      selected_payload_type = payload_type;
+      break;
+    }
+  }
+  if (selected_payload_type == -1) {
+    selected_payload_type = ordered_h264_payloads.front();
+  }
+
+  negotiation.mid = selected_section->mid.empty() ? "0" : selected_section->mid;
+  negotiation.h264_payload_types = std::move(ordered_h264_payloads);
+  negotiation.preferred_payload_type = selected_payload_type;
+  return true;
+}
+
+bool WebRTCManager::apply_video_payload_type(int payload_type)
+{
+  if (payload_type < 0 || payload_type > 127) {
+    std::cerr << "Invalid video payload type requested: " << payload_type << std::endl;
+    return false;
+  }
+
+  if (video_payload_type_ != payload_type) {
+    std::cout << "Updating GStreamer/WebRTC payload type from "
+              << video_payload_type_ << " to " << payload_type << std::endl;
+  }
+  video_payload_type_ = payload_type;
+
+  if (!pipeline_) {
+    return true;
+  }
+
+  GstElement* payloader = gst_bin_get_by_name(GST_BIN(pipeline_), "mypayloader");
+  if (!payloader) {
+    std::cerr << "Failed to locate rtph264pay element 'mypayloader' while applying payload type "
+              << video_payload_type_ << std::endl;
+    return false;
+  }
+
+  g_object_set(payloader, "pt", video_payload_type_, nullptr);
+  gst_object_unref(payloader);
+  return true;
+}
+
+bool WebRTCManager::configure_video_track_for_offer(const OfferVideoNegotiation& negotiation)
+{
+  if (!peer_connection_) {
+    return false;
+  }
+  if (negotiation.mid.empty() || negotiation.preferred_payload_type < 0) {
+    return false;
+  }
+
+  if (!apply_video_payload_type(negotiation.preferred_payload_type)) {
+    return false;
+  }
+
+  if (video_track_) {
+    video_track_.reset();
+  }
+  video_track_open_.store(false);
+
+  rtc::Description::Video media(negotiation.mid, rtc::Description::Direction::SendOnly);
+  media.addH264Codec(negotiation.preferred_payload_type);
+  media.addSSRC(video_ssrc_, "horus-video");
+  video_track_ = peer_connection_->addTrack(media);
+  if (!video_track_) {
+    std::cerr << "Failed to create WebRTC video track for mid='" << negotiation.mid << "'" << std::endl;
+    return false;
+  }
+
+  negotiated_video_mid_ = negotiation.mid;
+  rtp_packets_sent_.store(0);
+  rtp_bytes_sent_.store(0);
+  first_rtp_logged_.store(false);
+  {
+    std::lock_guard<std::mutex> lock(rtp_metrics_mutex_);
+    first_rtp_sent_timestamp_ = std::chrono::steady_clock::time_point{};
+  }
+
+  video_track_->onOpen([this]() {
+    video_track_open_.store(true);
+    std::cout << "WebRTC video track open (mid='" << negotiated_video_mid_
+              << "', pt=" << video_payload_type_ << ")" << std::endl;
+    request_keyframe();
+  });
+  video_track_->onClosed([this]() {
+    video_track_open_.store(false);
+    std::cout << "WebRTC video track closed" << std::endl;
+  });
+  return true;
+}
+
+bool WebRTCManager::handle_offer(const std::string& sdp)
+{
+  if (!initialized_ || !peer_connection_) {
+    return false;
   }
   {
     std::lock_guard<std::mutex> lock(pending_description_mutex_);
@@ -265,8 +561,40 @@ void WebRTCManager::handle_offer(const std::string& sdp)
     pending_local_description_type_.clear();
     pending_local_description_data_.clear();
   }
+
   std::cout << "Received WebRTC Offer" << std::endl;
-  peer_connection_->setRemoteDescription(rtc::Description(sdp, "offer"));
+
+  OfferVideoNegotiation negotiation;
+  if (!parse_offer_video_negotiation(sdp, negotiation)) {
+    std::cerr << "Failed to parse offer video section with H264 payload negotiation" << std::endl;
+    return false;
+  }
+
+  std::ostringstream payloads;
+  for (size_t idx = 0; idx < negotiation.h264_payload_types.size(); ++idx) {
+    if (idx > 0) {
+      payloads << ",";
+    }
+    payloads << negotiation.h264_payload_types[idx];
+  }
+
+  std::cout << "Negotiated WebRTC video from offer: mid='" << negotiation.mid
+            << "' h264_pts=[" << payloads.str()
+            << "] selected_pt=" << negotiation.preferred_payload_type << std::endl;
+
+  if (!configure_video_track_for_offer(negotiation)) {
+    std::cerr << "Failed to configure WebRTC video track for offer mid='"
+              << negotiation.mid << "'" << std::endl;
+    return false;
+  }
+
+  try {
+    peer_connection_->setRemoteDescription(rtc::Description(sdp, "offer"));
+  } catch (const std::exception& e) {
+    std::cerr << "Failed to apply WebRTC offer remote description: " << e.what() << std::endl;
+    return false;
+  }
+  return true;
 }
 
 void WebRTCManager::handle_answer(const std::string& sdp)
@@ -293,6 +621,9 @@ void WebRTCManager::handle_candidate(const std::string& candidate, const std::st
   std::vector<std::string> mids_to_try;
   if (!sdp_mid.empty()) {
     mids_to_try.push_back(sdp_mid);
+  }
+  if (!negotiated_video_mid_.empty()) {
+    mids_to_try.push_back(negotiated_video_mid_);
   }
   if (video_track_) {
     try {
@@ -360,8 +691,11 @@ bool WebRTCManager::setup_gstreamer_pipeline()
       builder << "appsrc name=mysource format=time is-live=true do-timestamp=true ! ";
       builder << "videoconvert ! ";
       builder << encoder_stage << " ! ";
+      // Force constrained-baseline profile via caps to ensure Unity/mobile compatibility
+      // This works for any H264 encoder (x264enc, nvh264enc, etc.)
+      builder << "video/x-h264,profile=constrained-baseline ! ";
       builder << "h264parse ! ";
-      builder << "rtph264pay config-interval=1 pt=" << video_payload_type_;
+      builder << "rtph264pay name=mypayloader config-interval=1 pt=" << video_payload_type_;
       builder << " ssrc=" << video_ssrc_ << " mtu=1200 ! ";
       builder << "appsink name=mysink emit-signals=true sync=false";
       return builder.str();
@@ -407,8 +741,32 @@ bool WebRTCManager::setup_gstreamer_pipeline()
       const bool simple_factory_name =
         requested_encoder.find(' ') == std::string::npos &&
         requested_encoder.find('!') == std::string::npos;
-      if (!simple_factory_name || has_factory(requested_encoder.c_str())) {
+      if (!simple_factory_name) {
+        // Complex pipeline stage (e.g. "x264enc bitrate=500") – use as-is.
         add_candidate("requested", requested_encoder);
+      } else if (has_factory(requested_encoder.c_str())) {
+        // Simple factory name – build a proper stage with configured
+        // bitrate / framerate / low-latency tuning so we don't fall back
+        // to high-latency x264 defaults (B-frames, slow preset, etc.).
+        std::string requested_stage;
+        if (requested_encoder == "x264enc") {
+          std::ostringstream s;
+          // tune=zerolatency is essential for real-time streaming (disables B-frames).
+          // We don't set profile here because x264enc might not have the property;
+          // we enforce it via caps in build_pipeline instead.
+          s << "x264enc tune=zerolatency speed-preset=ultrafast bitrate="
+            << bitrate_kbps << " key-int-max=" << framerate;
+          requested_stage = s.str();
+        } else if (requested_encoder == "openh264enc") {
+          std::ostringstream s;
+          s << "openh264enc bitrate=" << bitrate_bps;
+          requested_stage = s.str();
+        } else if (requested_encoder == "nvh264enc") {
+          requested_stage = "nvh264enc preset=low-latency-hp";
+        } else {
+          requested_stage = requested_encoder;
+        }
+        add_candidate("requested", requested_stage);
       } else {
         std::cout << "Requested encoder '" << requested_encoder
                   << "' is not available. Trying fallbacks." << std::endl;
@@ -483,6 +841,11 @@ bool WebRTCManager::setup_gstreamer_pipeline()
     return false;
   }
 
+  if (!apply_video_payload_type(video_payload_type_)) {
+    std::cerr << "Failed to apply negotiated RTP payload type to GStreamer payloader" << std::endl;
+    return false;
+  }
+
   // Configure appsink callback
   g_signal_connect(appsink_, "new-sample", G_CALLBACK(on_new_sample), this);
   return true;
@@ -509,7 +872,7 @@ void WebRTCManager::stop_pipeline()
 void WebRTCManager::push_frame(const std::vector<uint8_t>& data, int width, int height, const std::string& format)
 {
   std::lock_guard<std::mutex> lock(frame_mutex_);
-  
+
   if (!appsrc_ || !pipeline_ || !pipeline_started_) {
     return;
   }
@@ -520,7 +883,7 @@ void WebRTCManager::push_frame(const std::vector<uint8_t>& data, int width, int 
     std::cerr << "Failed to allocate GStreamer buffer" << std::endl;
     return;
   }
-  
+
   gst_buffer_fill(buffer, 0, data.data(), size);
 
   // Set caps only if they changed
@@ -531,10 +894,10 @@ void WebRTCManager::push_frame(const std::vector<uint8_t>& data, int width, int 
       "height", G_TYPE_INT, height,
       "framerate", GST_TYPE_FRACTION, std::max(1, settings_.framerate), 1,
       nullptr);
-    
+
     gst_app_src_set_caps(GST_APP_SRC(appsrc_), caps);
     gst_caps_unref(caps);
-    
+
     last_width_ = width;
     last_height_ = height;
     last_format_ = format;
@@ -543,18 +906,29 @@ void WebRTCManager::push_frame(const std::vector<uint8_t>& data, int width, int 
   GstFlowReturn ret;
   g_signal_emit_by_name(appsrc_, "push-buffer", buffer, &ret);
   gst_buffer_unref(buffer);
-  
+
   if (ret != GST_FLOW_OK) {
     std::cerr << "Failed to push frame to GStreamer pipeline: " << ret << std::endl;
+  }
+
+  static int frame_count = 0;
+  if (++frame_count % 30 == 0) {
+      std::cout << "Pushed " << frame_count << " frames to GStreamer pipeline" << std::endl;
   }
 }
 
 GstFlowReturn WebRTCManager::on_new_sample(GstElement* sink, gpointer user_data)
 {
   WebRTCManager* manager = static_cast<WebRTCManager*>(user_data);
+
+  static int sample_count = 0;
+  if (++sample_count % 30 == 0) {
+      std::cout << "Pulled " << sample_count << " samples from GStreamer pipeline" << std::endl;
+  }
+
   GstSample* sample;
   g_signal_emit_by_name(sink, "pull-sample", &sample);
-  
+
   if (sample) {
     GstBuffer* buffer = gst_sample_get_buffer(sample);
     if (buffer && manager->video_track_) {
@@ -566,21 +940,59 @@ GstFlowReturn WebRTCManager::on_new_sample(GstElement* sink, gpointer user_data)
       }
       GstMapInfo info;
       if (gst_buffer_map(buffer, &info, GST_MAP_READ)) {
-        // Send RTP packet to WebRTC track
-        // Note: libdatachannel expects RTP packets for media tracks
+        bool sent_packet = false;
         try {
-            // We need to cast pointer to byte*
-            auto* data_ptr = reinterpret_cast<const std::byte*>(info.data);
-            manager->video_track_->send(data_ptr, info.size);
+          // libdatachannel expects RTP packets for media tracks.
+          auto* data_ptr = reinterpret_cast<const std::byte*>(info.data);
+          manager->video_track_->send(data_ptr, info.size);
+          sent_packet = true;
         } catch (const std::exception& e) {
+          const auto now = std::chrono::steady_clock::now();
+          if (now - manager->last_track_closed_log_time_ > std::chrono::seconds(2)) {
+            std::cerr << "Failed to send RTP packet: " << e.what() << std::endl;
+            manager->last_track_closed_log_time_ = now;
+          }
+          if (std::string(e.what()).find("Track is closed") != std::string::npos) {
+            manager->video_track_open_.store(false);
+          }
+        }
+
+        if (sent_packet) {
+          const uint64_t packets_sent = manager->rtp_packets_sent_.fetch_add(1) + 1;
+          const uint64_t bytes_sent = manager->rtp_bytes_sent_.fetch_add(info.size) + info.size;
+
+          if (!manager->first_rtp_logged_.exchange(true)) {
             const auto now = std::chrono::steady_clock::now();
-            if (now - manager->last_track_closed_log_time_ > std::chrono::seconds(2)) {
-              std::cerr << "Failed to send RTP packet: " << e.what() << std::endl;
-              manager->last_track_closed_log_time_ = now;
+            {
+              std::lock_guard<std::mutex> lock(manager->rtp_metrics_mutex_);
+              manager->first_rtp_sent_timestamp_ = now;
             }
-            if (std::string(e.what()).find("Track is closed") != std::string::npos) {
-              manager->video_track_open_.store(false);
+
+            if (info.size >= 12) {
+              const auto payload_type = static_cast<int>(info.data[1] & 0x7F);
+              const auto sequence = static_cast<uint16_t>(
+                (static_cast<uint16_t>(info.data[2]) << 8) |
+                static_cast<uint16_t>(info.data[3]));
+              const auto ssrc = static_cast<uint32_t>(
+                (static_cast<uint32_t>(info.data[8]) << 24) |
+                (static_cast<uint32_t>(info.data[9]) << 16) |
+                (static_cast<uint32_t>(info.data[10]) << 8) |
+                static_cast<uint32_t>(info.data[11]));
+              std::cout << "First RTP packet sent: mid='" << manager->negotiated_video_mid_
+                        << "' pt=" << payload_type
+                        << " ssrc=" << ssrc
+                        << " seq=" << sequence
+                        << " expected_pt=" << manager->video_payload_type_ << std::endl;
+            } else {
+              std::cout << "First RTP packet sent: packet too short for header decode (size="
+                        << info.size << ")" << std::endl;
             }
+          }
+
+          if (packets_sent % 30 == 0) {
+            std::cout << "Sent " << packets_sent << " RTP packets ("
+                      << bytes_sent << " bytes total)" << std::endl;
+          }
         }
         gst_buffer_unmap(buffer, &info);
       }
@@ -593,13 +1005,17 @@ GstFlowReturn WebRTCManager::on_new_sample(GstElement* sink, gpointer user_data)
 
 void WebRTCManager::request_keyframe()
 {
-  if (!pipeline_ || !appsrc_) return;
-  
+  // Send the keyframe request to the sink so it travels UPSTREAM to the encoder.
+  // Sending it to appsrc (source) would try to send it upstream into the void.
+  if (!pipeline_ || !appsink_) return;
+
+  std::cout << "Requesting IDR keyframe from encoder..." << std::endl;
+
   GstStructure* s = gst_structure_new_empty("GstForceKeyUnit");
   gst_structure_set(s, "all-headers", G_TYPE_BOOLEAN, TRUE, nullptr);
-  
+
   GstEvent* event = gst_event_new_custom(GST_EVENT_CUSTOM_UPSTREAM, s);
-  if (!gst_element_send_event(appsrc_, event)) {
+  if (!gst_element_send_event(appsink_, event)) {
       std::cerr << "Failed to send keyframe request event" << std::endl;
   }
 }
