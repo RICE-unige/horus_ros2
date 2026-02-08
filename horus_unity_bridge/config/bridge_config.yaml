@@ -45,3 +45,15 @@ horus_unity_bridge:
     # Security (for future implementation)
     enable_authentication: false
     enable_encryption: false
+
+    webrtc:
+      enabled: true
+      client_signal_topic: "/horus/webrtc/client_signal"
+      server_signal_topic: "/horus/webrtc/server_signal"
+      session_timeout_sec: 20
+      default_bitrate_kbps: 2000
+      default_framerate: 20
+      default_encoder: "x264enc"
+      default_pipeline: ""
+      default_stun_servers:
+        - "stun:stun.l.google.com:19302"

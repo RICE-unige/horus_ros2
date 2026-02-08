@@ -8,10 +8,24 @@
 #include "service_manager.hpp"
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <nlohmann/json.hpp>
 #include <memory>
 #include <functional>
 #include <unordered_map>
 #include <mutex>
+
+#ifdef ENABLE_WEBRTC
+#include "horus_unity_bridge/webrtc_manager.hpp"
+#include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/compressed_image.hpp>
+#include <condition_variable>
+#include <variant>
+#include <deque>
+#include <thread>
+#include <atomic>
+#include <chrono>
+#endif
 
 namespace horus_unity_bridge
 {
@@ -36,7 +50,7 @@ public:
   using BroadcastCallback = std::function<void(const std::string&, const std::vector<uint8_t>&)>;
   
   explicit MessageRouter();
-  ~MessageRouter() = default;
+  ~MessageRouter();
   
   /**
    * @brief Set callbacks for sending messages to Unity clients
@@ -96,6 +110,71 @@ private:
   std::unique_ptr<TopicManager> topic_manager_;
   std::unique_ptr<ServiceManager> service_manager_;
   
+#ifdef ENABLE_WEBRTC
+  using FrameVariant = std::variant<
+    sensor_msgs::msg::Image::SharedPtr,
+    sensor_msgs::msg::CompressedImage::SharedPtr>;
+
+  struct WebRtcSession {
+    std::string session_id;
+    std::string stream_topic;
+    std::string image_type;
+    std::shared_ptr<WebRTCManager> manager;
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr raw_sub;
+    rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_sub;
+    std::deque<FrameVariant> frame_queue;
+    std::mutex frame_queue_mutex;
+    std::condition_variable frame_queue_cv;
+    std::thread worker_thread;
+    std::atomic<bool> running{false};
+    std::chrono::steady_clock::time_point last_activity;
+    bool warned_unsupported_encoding = false;
+  };
+
+  bool webrtc_enabled_ = false;
+  std::string webrtc_client_signal_topic_ = "/horus/webrtc/client_signal";
+  std::string webrtc_server_signal_topic_ = "/horus/webrtc/server_signal";
+  int webrtc_default_bitrate_kbps_ = 2000;
+  int webrtc_default_framerate_ = 30;
+  std::string webrtc_default_encoder_ = "x264enc";
+  std::string webrtc_default_pipeline_;
+  std::vector<std::string> webrtc_default_stun_servers_;
+  int webrtc_session_timeout_sec_ = 20;
+  size_t webrtc_max_queue_size_ = 2;
+
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr webrtc_signal_sub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr webrtc_signal_pub_;
+  rclcpp::TimerBase::SharedPtr webrtc_cleanup_timer_;
+  std::unordered_map<std::string, std::shared_ptr<WebRtcSession>> webrtc_sessions_;
+  std::mutex webrtc_sessions_mutex_;
+
+  void handle_webrtc_signal_msg(const std_msgs::msg::String::SharedPtr msg);
+  void handle_webrtc_offer(const nlohmann::json& payload);
+  void handle_webrtc_candidate(const nlohmann::json& payload);
+  void handle_webrtc_stop(const nlohmann::json& payload);
+  void process_webrtc_frames(const std::shared_ptr<WebRtcSession>& session);
+  void enqueue_webrtc_raw_frame(
+    const std::shared_ptr<WebRtcSession>& session,
+    const sensor_msgs::msg::Image::SharedPtr& msg);
+  void enqueue_webrtc_compressed_frame(
+    const std::shared_ptr<WebRtcSession>& session,
+    const sensor_msgs::msg::CompressedImage::SharedPtr& msg);
+  bool convert_to_rgb(
+    const sensor_msgs::msg::Image& msg,
+    std::vector<uint8_t>& output,
+    bool& warned_flag);
+  bool decompress_to_rgb(
+    const sensor_msgs::msg::CompressedImage& msg,
+    std::vector<uint8_t>& output,
+    int& width,
+    int& height,
+    bool& warned_flag);
+  void remove_webrtc_session(const std::string& session_id);
+  void shutdown_webrtc_sessions();
+  void cleanup_stale_webrtc_sessions();
+  void publish_webrtc_signal(const nlohmann::json& payload);
+#endif
+
   // Callbacks
   SendCallback send_callback_;
   BroadcastCallback broadcast_callback_;

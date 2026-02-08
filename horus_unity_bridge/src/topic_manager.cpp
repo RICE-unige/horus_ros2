@@ -90,6 +90,13 @@ bool TopicManager::register_subscriber(const std::string& topic,
     if (topic.length() >= 9 && topic.substr(topic.length() - 9) == "tf_static") {
         final_qos.transient_local();
         RCLCPP_INFO(node_->get_logger(), "Forcing Transient Local QoS for static TF topic: %s", topic.c_str());
+    } else if (topic.find("webrtc") != std::string::npos && topic.find("server_signal") != std::string::npos) {
+        // Match exact QoS of webrtc_signal_pub_ in message_router.cpp:
+        // KeepLast(100), Reliable, Volatile
+        final_qos = rclcpp::QoS(rclcpp::KeepLast(100))
+            .reliability(rclcpp::ReliabilityPolicy::Reliable)
+            .durability(rclcpp::DurabilityPolicy::Volatile);
+        RCLCPP_INFO(node_->get_logger(), "Forcing matching WebRTC signal QoS (reliable+volatile) for topic: %s", topic.c_str());
     }
 
     auto sub = node_->create_generic_subscription(

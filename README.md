@@ -65,6 +65,17 @@ This brings up the Bridge and Backend nodes, ready to accept connections from th
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 ```
 
+### WebRTC Camera Streaming Notes
+
+- The Unity bridge WebRTC path negotiates outgoing video track `MID` and H264 payload type directly from the Unity offer before applying the remote description.
+- `ready` signaling is published only after offer negotiation succeeds; negotiation failures are returned as `type="error"` signaling payloads for deterministic client handling.
+- Bridge logs include media-path telemetry for faster diagnosis:
+  - negotiated offer values (`mid` + selected H264 payload type),
+  - first outbound RTP packet header (`pt`/`ssrc`/`seq`),
+  - periodic RTP sent counters.
+
+These additions specifically target the common "ICE connected but white video panel" failure mode by ensuring SDP and RTP payload alignment end-to-end.
+
 ### Network Ports
 
 - **10000**: Main Communication Port (SDK Client & MR App)
@@ -88,4 +99,3 @@ University of Genoa, Italy
 
 - [HORUS SDK (Main Repo)](https://github.com/RICE-unige/horus_sdk)
 - [Unity ROS-TCP-Connector](https://github.com/Unity-Technologies/ROS-TCP-Connector) (Unity client compatible with this bridge)
-
