@@ -1,5 +1,10 @@
 # HORUS ROS 2 Infrastructure
 
+[![ROS2](https://img.shields.io/badge/ROS2-Humble%20%7C%20Jazzy-22314E)](https://docs.ros.org)
+![Build](https://img.shields.io/badge/Build-colcon-blue)
+![C++](https://img.shields.io/badge/C%2B%2B-17-00599C)
+[![License](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
+
 <div align="center">
 
 ```text
@@ -10,7 +15,6 @@
 ██║  ██║╚██████╔╝██║  ██║╚██████╔╝███████║
 ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 ```
-
 </div>
 
 > [!TIP]
