@@ -1,6 +1,6 @@
 # HORUS ROS 2 Infrastructure
 
-```
+```text
 ██╗  ██╗ ██████╗ ██████╗ ██╗   ██╗███████╗
 ██║  ██║██╔═══██╗██╔══██╗██║   ██║██╔════╝
 ███████║██║   ██║██████╔╝██║   ██║███████╗
@@ -9,93 +9,178 @@
 ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 ```
 
-**Mixed Reality Robot Management Backend**
+> [!TIP]
+> ROS 2 infrastructure layer for the HORUS research stack (SDK <-> bridge <-> MR app).
 
-This repository contains the ROS 2 packages for the HORUS system, managing the bridge between ROS 2 robots and the Meta Quest 3 Mixed Reality application.
+> [!IMPORTANT]
+> This repository provides the ROS 2 backend infrastructure for HORUS, including the Unity bridge runtime (`horus_unity_bridge`) used by the MR application.
 
-## 📦 Packages
+## :microscope: Research Scope
 
-- **`horus_unity_bridge`**: TCP server node inspired by `ROS-TCP-Endpoint`, optimized for C++ and fully compatible with the Unity `ROS-TCP-Connector` (Unity connects as a client).
-- **`horus_interfaces`**: Custom ROS 2 message and service definitions (`RobotConfig`, `RobotStatus`, etc.).
-- **`horus_backend`**: Core backend logic for robot registration and state management.
-- **`horus_unity_bridge_test`**: Testing utilities and simulation mocks.
+This repo focuses on runtime infrastructure for mixed-reality robot operations:
+- ROS 2 topic/service integration,
+- Unity-compatible TCP bridge behavior,
+- optional WebRTC camera signaling/media pipeline,
+- backend package boundaries for scalability experiments.
 
-## 🏗️ Architecture
+It does not own SDK payload authoring (`horus_sdk`) or Unity scene/runtime UX (`horus`).
 
+## :jigsaw: Packages and Responsibilities
+
+| Package | Responsibility |
+|---|---|
+| `horus_unity_bridge` | TCP/WebRTC bridge runtime between ROS 2 and Unity client |
+| `horus_backend` | Backend registration/state management logic |
+| `horus_interfaces` | ROS 2 interfaces used by HORUS components |
+| `horus_unity_bridge_test` | Test utilities and simulation helpers |
+
+## :building_construction: Architecture
+
+```text
+HORUS SDK (registration + orchestration)
+         <->
+horus_unity_bridge (ROS 2 node, TCP/WebRTC)
+         <->
+HORUS MR App (Unity client)
 ```
-HORUS MR App (Unity, TCP client)
-    ↑ (TCP 10000)
-HORUS Unity Bridge (ROS 2 TCP server)
-    ↔ (Topics / Services)
-HORUS Backend Node
-    ↔ (Registration / State)
-HORUS SDK (Robot/PC)
-```
 
-## 🚀 Building
+Default ingress:
+- TCP server: `0.0.0.0:10000`
 
-### Prerequisites
-- ROS 2 Humble (or Jazzy)
-- `nlohmann-json3-dev`
+WebRTC signaling topics:
+- `/horus/webrtc/client_signal`
+- `/horus/webrtc/server_signal`
 
-### Build Instructions
+## :white_check_mark: Prerequisites
+
+- ROS 2 Humble or Jazzy
+- `rosdep`
+- C++ build toolchain (`colcon`, CMake)
+- For WebRTC builds: GStreamer + OpenCV dependencies (see [`horus_unity_bridge/README.md`](horus_unity_bridge/README.md))
+
+## :gear: Build Matrix
+
+| Mode | Command |
+|---|---|
+| Standard bridge | `colcon build --packages-select horus_unity_bridge` |
+| WebRTC-enabled bridge | `colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON` |
+
+Recommended setup:
 
 ```bash
-# Clone the repository
-git clone https://github.com/RICE-unige/horus_ros2.git
-cd horus_ros2
-
-# Install dependencies
+git clone https://github.com/RICE-unige/horus_ros2.git ~/horus_ws/src/horus_ros2
+cd ~/horus_ws/src/horus_ros2
 rosdep install --from-paths . -y --ignore-src
-
-# Build
-colcon build --symlink-install
-
-# Source
+colcon build --symlink-install --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON
 source install/setup.bash
 ```
 
-## 🛠️ Usage
-
-### Standard Launch
-
-This brings up the Bridge and Backend nodes, ready to accept connections from the HORUS SDK and MR App.
+## :rocket: Launch
 
 ```bash
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 ```
 
-### WebRTC Camera Streaming Notes
+> [!NOTE]
+> Runtime defaults are managed in `horus_unity_bridge/config/bridge_config.yaml`.
 
-- The Unity bridge WebRTC path negotiates outgoing video track `MID` and H264 payload type directly from the Unity offer before applying the remote description.
-- `ready` signaling is published only after offer negotiation succeeds; negotiation failures are returned as `type="error"` signaling payloads for deterministic client handling.
-- Bridge logs include media-path telemetry for faster diagnosis:
-  - negotiated offer values (`mid` + selected H264 payload type),
-  - first outbound RTP packet header (`pt`/`ssrc`/`seq`),
-  - periodic RTP sent counters.
+## :toolbox: Operational Guidance
 
-These additions specifically target the common "ICE connected but white video panel" failure mode by ensuring SDP and RTP payload alignment end-to-end.
+### Signaling and QoS
+- WebRTC signaling uses reliable/volatile semantics for timely negotiation.
+- Bridge emits structured diagnostics for negotiation and media startup.
 
-### Network Ports
+### Diagnostics to Monitor
+- connection lifecycle events,
+- negotiated MID/H264 payload selection,
+- first outbound RTP header fields,
+- periodic RTP counters.
 
-- **10000**: Main Communication Port (SDK Client & MR App)
+### Integration Boundary
+- `horus_sdk` should treat this repo as infrastructure service, not payload author.
+- `horus` should consume this bridge as transport/runtime endpoint.
 
-## 🤝 Integration
-
-The **HORUS SDK** (`python`, `cpp`, `rust`) interacts with this backend to register robots.
-Typically, the SDK Client will automatically attempt to launch this bridge if it is installed and sourced.
+## :test_tube: Validation Workflow
 
 ```bash
-# Example manual start from SDK Repo
+# 1) Start bridge
 ros2 launch horus_unity_bridge unity_bridge.launch.py
+
+# 2) In SDK repo, run fake publishers + registration demo
+python3 python/examples/fake_tf_publisher.py --robot-count 4 --with-camera
+python3 python/examples/sdk_registration_demo.py --robot-count 4 --with-camera
 ```
 
-## 🏛️ Research Lab
+Expected outcomes:
+- bridge accepts Unity client connection,
+- registration/ack/heartbeat channels remain stable,
+- WebRTC sessions negotiate and stream when requested.
 
-Developed at **RICE Lab** (Robots and Intelligent Systems for Citizens and the Environment)
-University of Genoa, Italy
+## :warning: Known Constraints
 
-## 🔗 Links
+- Performance envelope depends on robot count, camera resolutions, and bridge host decode/encode budget.
+- Network topology (WSL/NAT/localhost) can affect ICE behavior in WebRTC mode.
 
-- [HORUS SDK (Main Repo)](https://github.com/RICE-unige/horus_sdk)
-- [Unity ROS-TCP-Connector](https://github.com/Unity-Technologies/ROS-TCP-Connector) (Unity client compatible with this bridge)
+## :world_map: Roadmap
+
+### Now
+- [x] Stable TCP bridge baseline for MR integration
+- [x] WebRTC signaling/session infrastructure merged into main
+- [x] Negotiation diagnostics for MID/PT/RTP path validation
+
+### Next
+- [ ] Broader automated integration tests (SDK + bridge + Unity harness)
+- [ ] Better runtime observability dashboards/metrics export
+- [ ] QoS and session policy tuning for multi-robot high-load scenarios
+
+### Later
+- [ ] Benchmark suite for throughput/latency under controlled workloads
+- [ ] Failover/recovery strategy for long-running multi-client sessions
+- [ ] Experiment reproducibility profiles for publications
+
+## :link: Related Repositories
+
+- SDK: <https://github.com/RICE-unige/horus_sdk>
+- Unity MR app: <https://github.com/RICE-unige/horus>
+
+## :book: Citation
+
+If you use HORUS or ideas from this work in your research, please cite:
+
+O. S. Adekoya, A. Sgorbissa, C. T. Recchiuto. HORUS: A Mixed Reality Interface for Managing Teams of Mobile Robots. arXiv preprint arXiv:2506.02622, 2025.
+
+```bibtex
+@misc{adekoya2025horus,
+  title         = {HORUS: A Mixed Reality Interface for Managing Teams of Mobile Robots},
+  author        = {Adekoya, Omotoye Shamsudeen and Sgorbissa, Antonio and Recchiuto, Carmine Tommaso},
+  year          = {2025},
+  eprint        = {2506.02622},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.RO},
+  url           = {https://github.com/RICE-unige/horus},
+  pdf           = {https://arxiv.org/abs/2506.02622},
+  note          = {arXiv preprint arXiv:2506.02622}
+}
+```
+
+## :mailbox_with_mail: Contact
+
+- Omotoye Shamsudeen Adekoya
+- Email: `omotoye.adekoya@edu.unige.it`
+
+## :bulb: Acknowledgments
+
+This project is part of a PhD research effort at the University of Genoa, under the supervision of:
+
+- Prof. Carmine Recchiuto
+- Prof. Antonio Sgorbissa
+
+Developed at **RICE Lab**, University of Genoa.
+
+## :handshake: Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Include reproducible test steps for behavior changes.
+
+## :page_facing_up: License
+
+Apache-2.0. See [`LICENSE`](LICENSE).

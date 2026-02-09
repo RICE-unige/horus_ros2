@@ -1,25 +1,37 @@
-# HORUS Unity Bridge
+﻿# HORUS Unity Bridge (`horus_unity_bridge`)
 
-High-performance C++ ROS 2 node inspired by the **Unity ROS-TCP-Endpoint**.  
-It is built to be a drop-in replacement that works natively with the **Unity ROS-TCP-Connector** package on Unity.
+> [!IMPORTANT]
+> `horus_unity_bridge` is the ROS 2 runtime bridge between HORUS SDK clients and Unity-based MR applications.
+> It preserves Unity ROS-TCP protocol compatibility while adding HORUS-specific operational behavior.
 
-One process hosts the epoll-based TCP bridge, topic router, and service manager, delivering sub-millisecond routing while preserving the original Unity protocol semantics.
+## Operator Scope
 
-## Prerequisites
+This package handles:
+- TCP server lifecycle for Unity client connectivity,
+- topic/service routing between Unity protocol and ROS 2 graph,
+- optional WebRTC signaling + media session runtime,
+- bridge diagnostics for integration triage.
 
-- ROS 2 Humble or Jazzy
-- `nlohmann-json3-dev`
-- `libunwind-dev`
-- WebRTC build dependencies (Linux bridge host):
-  - `pkg-config`
-  - `libgstreamer1.0-dev`
-  - `libgstreamer-plugins-base1.0-dev`
-  - `libgstreamer-plugins-bad1.0-dev`
-  - `libopencv-dev`
-  - `libunwind-dev` (transitive dep required by GStreamer's pkg-config — without it CMake silently disables WebRTC)
-- Internet access on first configure (CMake fetches `libdatachannel` automatically)
+## Runtime Components
 
-Install all at once:
+- `ConnectionManager`: socket lifecycle and client handling
+- `MessageRouter`: protocol command routing, publisher/subscriber binding, WebRTC signaling dispatch
+- `TopicManager`: ROS 2 topic registry + QoS handling
+- `ServiceManager`: ROS/Unity service proxy handling
+- `WebRTCManager` (optional): offer/candidate handling, SDP/ICE flow, RTP sender pipeline
+
+## Dependency Matrix
+
+| Dependency | Required | Why |
+|---|---|---|
+| ROS 2 Humble/Jazzy | Yes | Core runtime |
+| `nlohmann-json3-dev` | Yes | Protocol payload serialization |
+| `libunwind-dev` | Yes | Runtime/toolchain dependency |
+| GStreamer dev libs | WebRTC mode | Media encode/payloader pipeline |
+| OpenCV dev libs | WebRTC mode | Image decode/format conversion |
+| `libdatachannel` | WebRTC mode | WebRTC signaling/peer connection (fetched by CMake) |
+
+Install baseline + WebRTC deps:
 
 ```bash
 sudo apt-get update
@@ -38,91 +50,114 @@ sudo apt-get install -y \
   libopencv-dev
 ```
 
-## Quick Start
+## Build and Launch
+
+### WebRTC enabled
 
 ```bash
-# Build inside the HORUS ROS 2 workspace
-cd ~/horus_ros2
+cd ~/horus_ws/src/horus_ros2
 colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON
 source install/setup.bash
-
-# Run the bridge (listens on tcp/10000 by default)
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 ```
 
-Supply parameters through `config/bridge_config.yaml` or `--ros-args`.  
-To build without WebRTC, use:
+### WebRTC disabled
 
 ```bash
+cd ~/horus_ws/src/horus_ros2
 colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=OFF
+source install/setup.bash
+ros2 launch horus_unity_bridge unity_bridge.launch.py
 ```
 
-Important knobs: `tcp_ip`, `tcp_port`, socket buffer sizes, queue depth, worker thread count, and default QoS profiles.
+## Key Runtime Configuration
+
+Primary configuration file:
+- `config/bridge_config.yaml`
+
+Important keys:
+- network: `tcp_ip`, `tcp_port`, `max_connections`
+- performance: `socket_buffer_size`, `message_queue_size`, `worker_threads`
+- QoS defaults: publisher/subscriber reliability + durability + depth
+- WebRTC block:
+  - `enabled`
+  - signaling topics
+  - session timeout
+  - bitrate/framerate defaults
+  - encoder and STUN defaults
 
 ## WebRTC Negotiation Behavior
 
-For camera streaming sessions, the bridge now derives video media parameters from the incoming Unity offer before setting the remote description:
+### Negotiation strategy
+- Parse Unity offer video m-section before applying remote description.
+- Select active `mid` from offer.
+- Select H264 payload type from offer (prefers `packetization-mode=1` when available).
+- Keep SDP payload type and `rtph264pay` payload type aligned.
 
-- selects the active video `mid` from the offered video m-section,
-- selects H264 payload type from the same section (prefers `packetization-mode=1` when available),
-- applies the selected payload type to both SDP track description and `rtph264pay` so SDP/PT and outgoing RTP stay aligned.
+### Signaling gates
+- Emit `ready` only after successful offer handling.
+- Emit `error` and clean session on negotiation/setup failure.
 
-Session startup signaling behavior:
+> [!TIP]
+> This gate avoids the common "session appears connected but white panel" condition caused by negotiation mismatch.
 
-- `type="ready"` is emitted only after `handle_offer(...)` negotiation succeeds,
-- failed negotiation emits `type="error"` and the session is cleaned up.
+## Diagnostics Decoding Guide
 
-This avoids "WebRTC connected but no decodable frames" when Unity and bridge disagree on m-line/MID or payload mapping.
+Bridge telemetry includes:
+- negotiated video MID,
+- selected H264 payload type,
+- first outbound RTP packet header (`pt`, `ssrc`, `seq`),
+- periodic RTP counters.
 
-## WebRTC Media Telemetry
+Interpretation:
+- MID/PT mismatch risk -> inspect offer parse + selected PT logs.
+- signaling appears fine but no frames -> compare RTP counters vs Unity inbound stats.
+- rapid close after checking -> inspect network/ICE candidate path and host topology.
 
-Bridge runtime logs include media-path diagnostics:
+## Failure Taxonomy
 
-- negotiated offer summary (`mid`, candidate H264 payloads, selected payload type),
-- first outbound RTP header (`pt`, `ssrc`, `sequence`),
-- periodic counters for samples pulled and RTP packets/bytes sent.
+| Symptom | Likely Class | First Check |
+|---|---|---|
+| No answer/ready | Signaling flow | signaling topic wiring + QoS compatibility |
+| ICE checking -> closed | Transport path | candidate reachability / network topology |
+| Connected but white panel | Decode/PT mismatch | negotiated MID/PT + inbound RTP stats |
+| Frames stall after start | Media pipeline/runtime load | RTP counters + publisher/input rate |
 
-Use these together with Unity inbound RTP stats (`bytesReceived`, `framesDecoded`) to isolate transport-vs-decoder failures quickly.
+## Deployment Checklist
 
-## Using the Bridge
+- [ ] Built with intended mode (`ENABLE_WEBRTC` ON/OFF)
+- [ ] `bridge_config.yaml` reviewed for current test environment
+- [ ] Signaling topics match SDK/MR settings
+- [ ] Unity client can connect to TCP bridge on expected host/port
+- [ ] Diagnostic logs enabled for integration runs
+- [ ] Repro commands recorded for experiment repeatability
 
-Unity continues to use the standard ROS‑TCP‑Connector API:
-
-```csharp
-ROSConnection.GetOrCreateInstance().Connect("bridge-ip", 10000);
-ROSConnection.GetOrCreateInstance().Subscribe<PoseMsg>("/robot/pose", callback);
-```
-
-System commands (`__subscribe`, `__publish`, `__ros_service`, etc.), binary framing, and keep‑alives all match the upstream protocol.  
-Topic data is published via ROS generic publishers/subscriptions and services are proxied through the typed `ServiceManager`.
-
-## Monitoring & Operations
-
-- Structured logs list connections, per‑topic registrations, and every 30 s statistics covering TCP traffic, routed messages, and service counts.
-- To change runtime settings, edit `config/bridge_config.yaml` and relaunch (hot reload is not yet supported).
-- If the port is busy, free it via `fuser -k 10000/tcp`.
-
-## Testing
-
-Build the optional `horus_unity_bridge_test` package to access ROS publishers, service servers, and Unity client simulators:
+## Test Entry Points
 
 ```bash
 colcon build --packages-select horus_unity_bridge horus_unity_bridge_test --cmake-args -DENABLE_WEBRTC=ON
 source install/setup.bash
 
-# Example
 ros2 launch horus_unity_bridge unity_bridge.launch.py &
 ros2 run horus_unity_bridge_test test_publisher
 ros2 run horus_unity_bridge_test unity_client_simulator
 ```
 
-Use `colcon test --packages-select horus_unity_bridge` to exercise C++ unit/integration tests.
+## Stack Links
+
+- ROS 2 infrastructure repo: <https://github.com/RICE-unige/horus_ros2>
+- SDK repo: <https://github.com/RICE-unige/horus_sdk>
+- Unity MR app repo: <https://github.com/RICE-unige/horus>
+
+## Acknowledgments
+
+`horus_unity_bridge` design and interoperability strategy were strongly informed by the Unity ROS networking stack:
+
+- Unity ROS TCP Endpoint: <https://github.com/Unity-Technologies/ROS-TCP-Endpoint>
+- Unity ROS TCP Connector package <https://github.com/Unity-Technologies/ROS-TCP-Connector>
+
+These references helped guide compatibility decisions while extending the bridge for HORUS-specific runtime and WebRTC features.
 
 ## License
 
-Apache-2.0 (same as the rest of HORUS SDK).
-
-## Research Lab
-
-Developed at **RICE Lab** (Robots and Intelligent Systems for Citizens and the Environment)
-University of Genoa, Italy
+Apache-2.0.
