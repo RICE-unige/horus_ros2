@@ -1,5 +1,18 @@
 ﻿# HORUS Unity Bridge (`horus_unity_bridge`)
 
+<div align="center">
+
+```text
+██╗  ██╗ ██████╗ ██████╗ ██╗   ██╗███████╗
+██║  ██║██╔═══██╗██╔══██╗██║   ██║██╔════╝
+███████║██║   ██║██████╔╝██║   ██║███████╗
+██╔══██║██║   ██║██╔══██╗██║   ██║╚════██║
+██║  ██║╚██████╔╝██║  ██║╚██████╔╝███████║
+╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
+```
+
+</div>
+
 > [!IMPORTANT]
 > `horus_unity_bridge` is the ROS 2 runtime bridge between HORUS SDK clients and Unity-based MR applications.
 > It preserves Unity ROS-TCP protocol compatibility while adding HORUS-specific operational behavior.

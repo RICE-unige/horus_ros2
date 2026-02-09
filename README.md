@@ -1,5 +1,7 @@
 # HORUS ROS 2 Infrastructure
 
+<div align="center">
+
 ```text
 ██╗  ██╗ ██████╗ ██████╗ ██╗   ██╗███████╗
 ██║  ██║██╔═══██╗██╔══██╗██║   ██║██╔════╝
@@ -8,6 +10,8 @@
 ██║  ██║╚██████╔╝██║  ██║╚██████╔╝███████║
 ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
 ```
+
+</div>
 
 > [!TIP]
 > ROS 2 infrastructure layer for the HORUS research stack (SDK <-> bridge <-> MR app).
