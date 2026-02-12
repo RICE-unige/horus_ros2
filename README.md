@@ -115,36 +115,35 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 
 # 2) In SDK repo, run fake publishers + registration demo
-python3 python/examples/fake_tf_publisher.py --robot-count 4 --with-camera
-python3 python/examples/sdk_registration_demo.py --robot-count 4 --with-camera
+python3 python/examples/fake_tf_publisher.py --robot-count 4 --with-camera --publish-occupancy-grid
+python3 python/examples/sdk_registration_demo.py --robot-count 4 --with-camera --with-occupancy-grid --workspace-scale 0.1
 ```
 
 Expected outcomes:
 - bridge accepts Unity client connection,
 - registration/ack/heartbeat channels remain stable,
-- WebRTC sessions negotiate and stream when requested.
+- WebRTC sessions negotiate and stream when requested,
+- occupancy `/map` data is available for MR after workspace acceptance.
 
 ## :warning: Known Constraints
 
 - Performance envelope depends on robot count, camera resolutions, and bridge host decode/encode budget.
 - Network topology (WSL/NAT/localhost) can affect ICE behavior in WebRTC mode.
+- For occupancy map validation, use transient-local publishers (the SDK fake publisher already does this by default).
 
 ## :world_map: Roadmap
 
-### Now
-- [x] Stable TCP bridge baseline for MR integration
-- [x] WebRTC signaling/session infrastructure merged into main
-- [x] Negotiation diagnostics for MID/PT/RTP path validation
+> [!NOTE]
+> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX or SDK dashboard behavior.
 
-### Next
-- [ ] Broader automated integration tests (SDK + bridge + Unity harness)
-- [ ] Better runtime observability dashboards/metrics export
-- [ ] QoS and session policy tuning for multi-robot high-load scenarios
-
-### Later
-- [ ] Benchmark suite for throughput/latency under controlled workloads
-- [ ] Failover/recovery strategy for long-running multi-client sessions
-- [ ] Experiment reproducibility profiles for publications
+| Stream | Status | Current Baseline | Next Milestone |
+|---|---|---|---|
+| Bridge Runtime Stability | :white_check_mark: Active baseline | Stable TCP bridge path, WebRTC signaling/session flow merged in `main`, and negotiation diagnostics available (MID/PT/RTP counters). | Add long-duration soak tests and explicit reconnection stress scenarios. |
+| WebRTC Media Reliability | :large_orange_diamond: In progress | White-screen negotiation mismatch path was addressed in bridge/runtime flow. | Harden edge-case handling for network topology variance and high robot counts. |
+| QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
+| Integration Automation | :white_circle: Planned | Validation is currently mostly manual (SDK fake publishers + Unity runtime checks). | Add CI-driven integration matrix across SDK, bridge, and Unity harness scenarios. |
+| Observability and Metrics | :white_circle: Planned | Logs provide actionable diagnostics during runtime issues. | Export machine-readable metrics for dashboards and regression tracking. |
+| Benchmarking and Reproducibility | :white_circle: Planned | Ad-hoc profiling exists across development cycles. | Publish repeatable throughput/latency benchmark suite for research reporting. |
 
 ## :link: Related Repositories
 
