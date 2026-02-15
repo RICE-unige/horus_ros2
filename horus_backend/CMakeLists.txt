@@ -13,6 +13,16 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(horus_interfaces REQUIRED)
+find_package(nav2_msgs QUIET)
+find_package(rclcpp_action QUIET)
+
+set(HORUS_BACKEND_HAS_NAV2 FALSE)
+if(nav2_msgs_FOUND AND rclcpp_action_FOUND)
+  set(HORUS_BACKEND_HAS_NAV2 TRUE)
+  message(STATUS "horus_backend: Nav2 adapter enabled")
+else()
+  message(STATUS "horus_backend: Nav2 adapter disabled (nav2_msgs or rclcpp_action not found)")
+endif()
 
 # Include directories
 include_directories(include)
@@ -24,6 +34,11 @@ add_library(${PROJECT_NAME}_lib
   src/plugin_manager.cpp
 )
 
+if(HORUS_BACKEND_HAS_NAV2)
+  target_sources(${PROJECT_NAME}_lib PRIVATE src/nav2_action_adapter.cpp)
+  target_compile_definitions(${PROJECT_NAME}_lib PRIVATE HORUS_BACKEND_HAS_NAV2=1)
+endif()
+
 # Dependencies for library
 ament_target_dependencies(${PROJECT_NAME}_lib
   rclcpp
@@ -32,6 +47,13 @@ ament_target_dependencies(${PROJECT_NAME}_lib
   sensor_msgs
   horus_interfaces
 )
+
+if(HORUS_BACKEND_HAS_NAV2)
+  ament_target_dependencies(${PROJECT_NAME}_lib
+    nav2_msgs
+    rclcpp_action
+  )
+endif()
 
 # Main executable
 add_executable(horus_backend_node
@@ -49,6 +71,14 @@ ament_target_dependencies(horus_backend_node
   sensor_msgs
   horus_interfaces
 )
+
+if(HORUS_BACKEND_HAS_NAV2)
+  target_compile_definitions(horus_backend_node PRIVATE HORUS_BACKEND_HAS_NAV2=1)
+  ament_target_dependencies(horus_backend_node
+    nav2_msgs
+    rclcpp_action
+  )
+endif()
 
 # Install executable
 install(TARGETS horus_backend_node

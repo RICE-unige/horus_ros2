@@ -22,6 +22,7 @@
 
 namespace horus_backend
 {
+class Nav2ActionAdapter;
 
 class BackendNode : public rclcpp::Node
 {
@@ -36,6 +37,7 @@ private:
   // Core components
   std::unique_ptr<TcpServer> tcp_server_;
   std::unique_ptr<PluginManager> plugin_manager_;
+  std::unique_ptr<Nav2ActionAdapter> nav2_adapter_;
 
   // ROS2 Publishers
   rclcpp::Publisher<horus_interfaces::msg::RobotCommand>::SharedPtr

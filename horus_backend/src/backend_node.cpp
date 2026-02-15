@@ -3,6 +3,21 @@
 
 #include "horus_backend/backend_node.hpp"
 
+#ifdef HORUS_BACKEND_HAS_NAV2
+#include "horus_backend/nav2_action_adapter.hpp"
+#else
+namespace horus_backend
+{
+class Nav2ActionAdapter
+{
+public:
+  explicit Nav2ActionAdapter(rclcpp::Node *) {}
+  void register_robot(const std::string &, const std::string &) {}
+  void unregister_robot(const std::string &) {}
+};
+}  // namespace horus_backend
+#endif
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -43,6 +58,15 @@ void BackendNode::initialize()
 
   // Start TCP server
   tcp_server_->start();
+
+#ifdef HORUS_BACKEND_HAS_NAV2
+  // Initialize Nav2 action adapter
+  nav2_adapter_ = std::make_unique<Nav2ActionAdapter>(this);
+#else
+  RCLCPP_INFO(
+    get_logger(),
+    "Nav2 adapter disabled (nav2_msgs / rclcpp_action not found at build time).");
+#endif
 
   display_startup_info();
 }
@@ -300,6 +324,13 @@ void BackendNode::register_robot_callback(
   // Register robot
   registered_robots_[robot_id] = robot;
 
+  // Register with Nav2 adapter
+#ifdef HORUS_BACKEND_HAS_NAV2
+  if (nav2_adapter_) {
+    nav2_adapter_->register_robot(robot_id, request->robot_config.name);
+  }
+#endif
+
   // Start monitoring timer if this is the first robot
   if (registered_robots_.size() == 1 && !monitoring_timer_) {
     monitoring_timer_ =
@@ -334,6 +365,14 @@ void BackendNode::unregister_robot_callback(
   auto it = registered_robots_.find(request->robot_id);
   if (it != registered_robots_.end()) {
     registered_robots_.erase(it);
+
+    // Unregister from Nav2 adapter
+#ifdef HORUS_BACKEND_HAS_NAV2
+    if (nav2_adapter_) {
+      nav2_adapter_->unregister_robot(request->robot_id);
+    }
+#endif
+
     response->success = true;
     response->error_message = "";
 
