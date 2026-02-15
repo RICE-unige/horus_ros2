@@ -59,6 +59,11 @@ WebRTC signaling topics:
 - `/horus/webrtc/client_signal`
 - `/horus/webrtc/server_signal`
 
+Recommended go-to-point task topics:
+- `/<robot>/goal_pose` (`geometry_msgs/PoseStamped`)
+- `/<robot>/goal_cancel` (`std_msgs/Empty`)
+- `/<robot>/goal_status` (`std_msgs/String`)
+
 ## :white_check_mark: Prerequisites
 
 - ROS 2 Humble or Jazzy
@@ -115,8 +120,8 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 
 # 2) In SDK repo, run fake publishers + registration demo
-python3 python/examples/fake_tf_publisher.py --robot-count 4 --with-camera --publish-occupancy-grid
-python3 python/examples/sdk_registration_demo.py --robot-count 4 --with-camera --with-occupancy-grid --workspace-scale 0.1
+python3 python/examples/fake_tf_publisher.py --robot-count 4 --publish-occupancy-grid
+python3 python/examples/sdk_registration_demo.py --robot-count 4 --with-occupancy-grid --workspace-scale 0.1
 ```
 
 Expected outcomes:
