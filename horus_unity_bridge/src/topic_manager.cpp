@@ -6,6 +6,7 @@
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
 #include <dlfcn.h>
 #include <algorithm>
+#include <std_msgs/msg/empty.hpp>
 
 namespace horus_unity_bridge
 {
@@ -170,6 +171,19 @@ bool TopicManager::publish_message(const std::string& topic,
   }
   
   try {
+    const std::string& message_type = it->second.message_type;
+    if (message_type == "std_msgs/msg/Empty") {
+      // Use a typed serialization path for std_msgs/Empty to avoid payload edge cases.
+      std_msgs::msg::Empty empty_msg;
+      rclcpp::SerializedMessage empty_serialized;
+      rclcpp::Serialization<std_msgs::msg::Empty> empty_serializer;
+      empty_serializer.serialize_message(&empty_msg, &empty_serialized);
+
+      it->second.publisher->publish(empty_serialized);
+      stats_.messages_published++;
+      return true;
+    }
+
     // Create ROS serialized message
     rclcpp::SerializedMessage msg(serialized_msg.size());
     auto& rcl_msg = msg.get_rcl_serialized_message();
