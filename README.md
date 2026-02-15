@@ -61,7 +61,7 @@ WebRTC signaling topics:
 
 Recommended go-to-point task topics:
 - `/<robot>/goal_pose` (`geometry_msgs/PoseStamped`)
-- `/<robot>/goal_cancel` (`std_msgs/Empty`)
+- `/<robot>/goal_cancel` (`std_msgs/String`, payload: `"cancel"`)
 - `/<robot>/goal_status` (`std_msgs/String`)
 
 ## :white_check_mark: Prerequisites
