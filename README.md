@@ -68,6 +68,11 @@ Recommended waypoint task topics:
 - `/<robot>/waypoint_path` (`nav_msgs/Path`)
 - `/<robot>/waypoint_status` (`std_msgs/String`, JSON status payload)
 
+Robot-task backend baseline:
+- `horus_backend` includes an optional Nav2 action adapter path for `goal_pose` / `goal_cancel` / `goal_status`.
+- Adapter auto-enables when both `nav2_msgs` and `rclcpp_action` are available at build time.
+- When Nav2 dependencies are missing, backend still builds and runs with adapter disabled.
+
 ## :white_check_mark: Prerequisites
 
 - ROS 2 Humble or Jazzy
@@ -81,6 +86,7 @@ Recommended waypoint task topics:
 |---|---|
 | Standard bridge | `colcon build --packages-select horus_unity_bridge` |
 | WebRTC-enabled bridge | `colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON` |
+| Backend + bridge (auto Nav2 detect) | `colcon build --packages-select horus_backend horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON` |
 
 Recommended setup:
 
@@ -150,6 +156,7 @@ Expected outcomes:
 | Bridge Runtime Stability | :white_check_mark: Active baseline | Stable TCP bridge path, WebRTC signaling/session flow merged in `main`, and negotiation diagnostics available (MID/PT/RTP counters). | Add long-duration soak tests and explicit reconnection stress scenarios. |
 | WebRTC Media Reliability | :large_orange_diamond: In progress | White-screen negotiation mismatch path was addressed in bridge/runtime flow. | Harden edge-case handling for network topology variance and high robot counts. |
 | QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
+| Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation and richer task-status observability. |
 | Integration Automation | :white_circle: Planned | Validation is currently mostly manual (SDK fake publishers + Unity runtime checks). | Add CI-driven integration matrix across SDK, bridge, and Unity harness scenarios. |
 | Observability and Metrics | :white_circle: Planned | Logs provide actionable diagnostics during runtime issues. | Export machine-readable metrics for dashboards and regression tracking. |
 | Benchmarking and Reproducibility | :white_circle: Planned | Ad-hoc profiling exists across development cycles. | Publish repeatable throughput/latency benchmark suite for research reporting. |
