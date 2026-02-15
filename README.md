@@ -64,6 +64,10 @@ Recommended go-to-point task topics:
 - `/<robot>/goal_cancel` (`std_msgs/String`, payload: `"cancel"`)
 - `/<robot>/goal_status` (`std_msgs/String`)
 
+Recommended waypoint task topics:
+- `/<robot>/waypoint_path` (`nav_msgs/Path`)
+- `/<robot>/waypoint_status` (`std_msgs/String`, JSON status payload)
+
 ## :white_check_mark: Prerequisites
 
 - ROS 2 Humble or Jazzy
