@@ -68,6 +68,9 @@ Recommended waypoint task topics:
 - `/<robot>/waypoint_path` (`nav_msgs/Path`)
 - `/<robot>/waypoint_status` (`std_msgs/String`, JSON status payload)
 
+Recommended 3D map topic:
+- `/map_3d` (`sensor_msgs/PointCloud2`)
+
 Robot-task backend baseline:
 - `horus_backend` includes an optional Nav2 action adapter path for `goal_pose` / `goal_cancel` / `goal_status`.
 - Adapter auto-enables when both `nav2_msgs` and `rclcpp_action` are available at build time.
