@@ -129,16 +129,17 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 # 1) Start bridge
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 
-# 2) In SDK repo, run fake publishers + registration demo
-python3 python/examples/fake_tf_publisher.py --robot-count 4 --publish-occupancy-grid
-python3 python/examples/sdk_registration_demo.py --robot-count 4 --with-occupancy-grid --workspace-scale 0.1
+# 2) In SDK repo, run unified fake runtime + typical registration demo
+python3 python/examples/fake_tf_ops_suite.py --robot-count 10 --rate 30 --static-camera --publish-compressed-images
+python3 python/examples/sdk_typical_ops_demo.py --robot-count 10 --workspace-scale 0.1
 ```
 
 Expected outcomes:
 - bridge accepts Unity client connection,
 - registration/ack/heartbeat channels remain stable,
 - WebRTC sessions negotiate and stream when requested,
-- occupancy `/map` data is available for MR after workspace acceptance.
+- robots remain static until teleop/task command topics are used,
+- active teleop commands can preempt active go-to-point/waypoint execution.
 
 ## :warning: Known Constraints
 
