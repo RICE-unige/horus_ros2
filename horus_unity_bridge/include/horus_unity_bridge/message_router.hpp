@@ -127,7 +127,17 @@ private:
     std::condition_variable frame_queue_cv;
     std::thread worker_thread;
     std::atomic<bool> running{false};
+    std::chrono::steady_clock::time_point session_start_time{};
     std::chrono::steady_clock::time_point last_activity;
+    uint64_t incoming_frames = 0;
+    uint64_t pushed_frames = 0;
+    uint64_t dropped_queue_frames = 0;
+    std::chrono::steady_clock::time_point last_incoming_frame_time{};
+    std::chrono::steady_clock::time_point last_push_time{};
+    uint64_t last_seen_rtp_packets = 0;
+    std::chrono::steady_clock::time_point last_rtp_progress_time{};
+    std::chrono::steady_clock::time_point last_keyframe_request_time{};
+    std::chrono::steady_clock::time_point last_telemetry_log_time{};
     bool warned_unsupported_encoding = false;
   };
 
