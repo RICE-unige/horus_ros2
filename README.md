@@ -112,12 +112,15 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 ### Signaling and QoS
 - WebRTC signaling uses reliable/volatile semantics for timely negotiation.
 - Bridge emits structured diagnostics for negotiation and media startup.
+- Bridge recovery policy now uses paced keyframe requests (warmup + cooldown gates) to avoid recovery flapping under load.
 
 ### Diagnostics to Monitor
 - connection lifecycle events,
 - negotiated MID/H264 payload selection,
 - first outbound RTP header fields,
-- periodic RTP counters.
+- periodic RTP counters,
+- per-session stall telemetry (incoming frames, pushed frames, dropped queue frames, last push progress),
+- keyframe request reasons and cooldown behavior.
 
 ### Integration Boundary
 - `horus_sdk` should treat this repo as infrastructure service, not payload author.
@@ -155,7 +158,7 @@ Expected outcomes:
 | Stream | Status | Current Baseline | Next Milestone |
 |---|---|---|---|
 | Bridge Runtime Stability | :white_check_mark: Active baseline | Stable TCP bridge path, WebRTC signaling/session flow merged in `main`, and negotiation diagnostics available (MID/PT/RTP counters). | Add long-duration soak tests and explicit reconnection stress scenarios. |
-| WebRTC Media Reliability | :large_orange_diamond: In progress | White-screen negotiation mismatch path was addressed in bridge/runtime flow. | Harden edge-case handling for network topology variance and high robot counts. |
+| WebRTC Media Reliability | :large_orange_diamond: In progress | Negotiation mismatch fixes plus stall telemetry and paced keyframe recovery are integrated. | Harden edge-case handling for network topology variance and high robot counts. |
 | QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
 | Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation and richer task-status observability. |
 | Integration Automation | :white_circle: Planned | Validation is currently mostly manual (SDK fake publishers + Unity runtime checks). | Add CI-driven integration matrix across SDK, bridge, and Unity harness scenarios. |
