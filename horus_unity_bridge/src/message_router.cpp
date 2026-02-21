@@ -622,7 +622,13 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
   session->session_id = session_id;
   session->stream_topic = stream_topic;
   session->image_type = image_type;
-  session->last_activity = std::chrono::steady_clock::now();
+  session->session_start_time = std::chrono::steady_clock::now();
+  session->last_activity = session->session_start_time;
+  session->last_incoming_frame_time = session->last_activity;
+  session->last_push_time = session->last_activity;
+  session->last_rtp_progress_time = session->last_activity;
+  session->last_keyframe_request_time = session->last_activity;
+  session->last_telemetry_log_time = session->last_activity;
   session->manager = std::make_shared<WebRTCManager>();
 
   WebRTCManager::Settings settings;
@@ -859,8 +865,11 @@ void MessageRouter::enqueue_webrtc_raw_frame(
     std::lock_guard<std::mutex> lock(session->frame_queue_mutex);
     if (session->frame_queue.size() >= webrtc_max_queue_size_) {
       session->frame_queue.pop_front();
+      session->dropped_queue_frames++;
     }
     session->frame_queue.push_back(msg);
+    session->incoming_frames++;
+    session->last_incoming_frame_time = std::chrono::steady_clock::now();
   }
   session->last_activity = std::chrono::steady_clock::now();
   session->frame_queue_cv.notify_one();
@@ -877,8 +886,11 @@ void MessageRouter::enqueue_webrtc_compressed_frame(
     std::lock_guard<std::mutex> lock(session->frame_queue_mutex);
     if (session->frame_queue.size() >= webrtc_max_queue_size_) {
       session->frame_queue.pop_front();
+      session->dropped_queue_frames++;
     }
     session->frame_queue.push_back(msg);
+    session->incoming_frames++;
+    session->last_incoming_frame_time = std::chrono::steady_clock::now();
   }
   session->last_activity = std::chrono::steady_clock::now();
   session->frame_queue_cv.notify_one();
@@ -886,6 +898,12 @@ void MessageRouter::enqueue_webrtc_compressed_frame(
 
 void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& session)
 {
+  const auto kWarmupWindow = std::chrono::milliseconds(2000);
+  const auto kIncomingActivityWindow = std::chrono::milliseconds(2500);
+  const auto kRtpStallThreshold = std::chrono::milliseconds(2500);
+  const auto kKeyframeCooldown = std::chrono::milliseconds(3000);
+  const auto kTelemetryLogInterval = std::chrono::seconds(5);
+
   while (session && session->running) {
     FrameVariant frame_variant;
     {
@@ -905,6 +923,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
     }
 
     std::vector<uint8_t> rgb_data;
+    bool pushed_frame = false;
     if (std::holds_alternative<sensor_msgs::msg::Image::SharedPtr>(frame_variant)) {
       auto raw = std::get<sensor_msgs::msg::Image::SharedPtr>(frame_variant);
       if (!raw) {
@@ -912,6 +931,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
       }
       if (convert_to_rgb(*raw, rgb_data, session->warned_unsupported_encoding)) {
         session->manager->push_frame(rgb_data, static_cast<int>(raw->width), static_cast<int>(raw->height), "RGB");
+        pushed_frame = true;
       }
     } else {
       auto compressed = std::get<sensor_msgs::msg::CompressedImage::SharedPtr>(frame_variant);
@@ -922,9 +942,98 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
       int height = 0;
       if (decompress_to_rgb(*compressed, rgb_data, width, height, session->warned_unsupported_encoding)) {
         session->manager->push_frame(rgb_data, width, height, "RGB");
+        pushed_frame = true;
       }
     }
-    session->last_activity = std::chrono::steady_clock::now();
+
+    const auto now = std::chrono::steady_clock::now();
+    bool should_request_keyframe = false;
+    bool should_log_telemetry = false;
+    uint64_t incoming_frames = 0;
+    uint64_t pushed_frames = 0;
+    uint64_t dropped_frames = 0;
+    uint64_t rtp_packets = 0;
+    uint64_t rtp_bytes = 0;
+    bool peer_connected = false;
+    bool track_open = false;
+
+    {
+      std::lock_guard<std::mutex> lock(session->frame_queue_mutex);
+      if (pushed_frame) {
+        session->pushed_frames++;
+        session->last_push_time = now;
+      }
+
+      if (session->manager) {
+        rtp_packets = session->manager->get_rtp_packets_sent();
+        rtp_bytes = session->manager->get_rtp_bytes_sent();
+        peer_connected = session->manager->is_peer_connected();
+        track_open = session->manager->is_video_track_open();
+      }
+
+      if (rtp_packets > session->last_seen_rtp_packets) {
+        session->last_seen_rtp_packets = rtp_packets;
+        session->last_rtp_progress_time = now;
+      }
+
+      const bool warmupElapsed =
+        session->session_start_time.time_since_epoch().count() > 0 &&
+        (now - session->session_start_time) > kWarmupWindow;
+      const bool has_recent_incoming =
+        session->last_incoming_frame_time.time_since_epoch().count() > 0 &&
+        (now - session->last_incoming_frame_time) < kIncomingActivityWindow;
+      const bool rtp_stalled =
+        warmupElapsed &&
+        peer_connected &&
+        track_open &&
+        has_recent_incoming &&
+        session->last_rtp_progress_time.time_since_epoch().count() > 0 &&
+        (now - session->last_rtp_progress_time) > kRtpStallThreshold;
+      if (rtp_stalled &&
+          (now - session->last_keyframe_request_time) > kKeyframeCooldown) {
+        session->last_keyframe_request_time = now;
+        should_request_keyframe = true;
+      }
+
+      if ((now - session->last_telemetry_log_time) > kTelemetryLogInterval) {
+        session->last_telemetry_log_time = now;
+        should_log_telemetry = true;
+      }
+
+      incoming_frames = session->incoming_frames;
+      pushed_frames = session->pushed_frames;
+      dropped_frames = session->dropped_queue_frames;
+    }
+
+    if (should_request_keyframe && session->manager) {
+      session->manager->request_keyframe();
+      RCLCPP_WARN(
+        get_logger(),
+        "WebRTC session '%s' stall detected (incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu). Requested keyframe (cooldown=%ldms, stall_threshold=%ldms).",
+        session->session_id.c_str(),
+        static_cast<unsigned long long>(incoming_frames),
+        static_cast<unsigned long long>(pushed_frames),
+        static_cast<unsigned long long>(dropped_frames),
+        static_cast<unsigned long long>(rtp_packets),
+        static_cast<long>(kKeyframeCooldown.count()),
+        static_cast<long>(kRtpStallThreshold.count()));
+    }
+
+    if (should_log_telemetry) {
+      RCLCPP_INFO(
+        get_logger(),
+        "WebRTC session '%s' telemetry: incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu rtp_bytes=%llu peer=%s track=%s",
+        session->session_id.c_str(),
+        static_cast<unsigned long long>(incoming_frames),
+        static_cast<unsigned long long>(pushed_frames),
+        static_cast<unsigned long long>(dropped_frames),
+        static_cast<unsigned long long>(rtp_packets),
+        static_cast<unsigned long long>(rtp_bytes),
+        peer_connected ? "connected" : "disconnected",
+        track_open ? "open" : "closed");
+    }
+
+    session->last_activity = now;
   }
 }
 
@@ -1046,6 +1155,28 @@ void MessageRouter::remove_webrtc_session(const std::string& session_id)
   }
 
   if (session) {
+    uint64_t incoming_frames = 0;
+    uint64_t pushed_frames = 0;
+    uint64_t dropped_frames = 0;
+    {
+      std::lock_guard<std::mutex> lock(session->frame_queue_mutex);
+      incoming_frames = session->incoming_frames;
+      pushed_frames = session->pushed_frames;
+      dropped_frames = session->dropped_queue_frames;
+    }
+    uint64_t rtp_packets = session->manager ? session->manager->get_rtp_packets_sent() : 0;
+    uint64_t rtp_bytes = session->manager ? session->manager->get_rtp_bytes_sent() : 0;
+    RCLCPP_INFO(
+      get_logger(),
+      "Stopping WebRTC session '%s' topic='%s' telemetry: incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu rtp_bytes=%llu",
+      session->session_id.c_str(),
+      session->stream_topic.c_str(),
+      static_cast<unsigned long long>(incoming_frames),
+      static_cast<unsigned long long>(pushed_frames),
+      static_cast<unsigned long long>(dropped_frames),
+      static_cast<unsigned long long>(rtp_packets),
+      static_cast<unsigned long long>(rtp_bytes));
+
     session->running = false;
     session->frame_queue_cv.notify_all();
     if (session->worker_thread.joinable()) {
