@@ -58,6 +58,7 @@ bool TopicManager::register_publisher(const std::string& topic,
 
 bool TopicManager::register_subscriber(const std::string& topic,
                                        const std::string& message_type,
+                                       int client_fd,
                                        MessageCallback callback,
                                        const rclcpp::QoS& qos)
 {
@@ -65,18 +66,21 @@ bool TopicManager::register_subscriber(const std::string& topic,
   
   // Check if already registered
   auto it = subscribers_.find(topic);
+  std::unordered_map<int, MessageCallback> preserved_callbacks;
   if (it != subscribers_.end()) {
     // FIX: Update callback for reconnecting clients
     // For tf_static, re-create the subscription to re-deliver latched data.
     if (topic.length() >= 9 && topic.substr(topic.length() - 9) == "tf_static") {
+      preserved_callbacks = it->second.client_callbacks;
       subscribers_.erase(it);
       if (stats_.active_subscribers > 0) {
         stats_.active_subscribers--;
       }
       RCLCPP_INFO(node_->get_logger(), "Recreating subscriber for static TF on reconnect: %s", topic.c_str());
     } else {
-      it->second.callback = callback;
-      RCLCPP_INFO(node_->get_logger(), "Updated subscriber callback: %s", topic.c_str());
+      it->second.client_callbacks[client_fd] = std::move(callback);
+      RCLCPP_INFO(node_->get_logger(), "Updated subscriber callback: %s (client_fd=%d, total_clients=%zu)",
+                  topic.c_str(), client_fd, it->second.client_callbacks.size());
       return true;
     }
   }
@@ -104,7 +108,7 @@ bool TopicManager::register_subscriber(const std::string& topic,
       topic,
       normalized_type,
       final_qos,
-      [this, topic, callback](std::shared_ptr<rclcpp::SerializedMessage> msg) {
+      [this, topic](std::shared_ptr<rclcpp::SerializedMessage> msg) {
         // Convert serialized message to vector
         const auto& rcl_msg = msg->get_rcl_serialized_message();
         
@@ -128,9 +132,24 @@ bool TopicManager::register_subscriber(const std::string& topic,
         
         std::vector<uint8_t> data;
         data.assign(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
-        
-        // Call the callback
-        callback(topic, data);
+
+        std::vector<MessageCallback> callbacks;
+        {
+          std::lock_guard<std::mutex> callbacks_lock(subscribers_mutex_);
+          auto sub_it = subscribers_.find(topic);
+          if (sub_it != subscribers_.end()) {
+            callbacks.reserve(sub_it->second.client_callbacks.size());
+            for (const auto& client_pair : sub_it->second.client_callbacks) {
+              if (client_pair.second) {
+                callbacks.push_back(client_pair.second);
+              }
+            }
+          }
+        }
+
+        for (const auto& cb : callbacks) {
+          cb(topic, data);
+        }
         
         stats_.messages_received++;
       }
@@ -140,7 +159,10 @@ bool TopicManager::register_subscriber(const std::string& topic,
     GenericSubscriberInfo info;
     info.subscription = sub;
     info.message_type = normalized_type;
-    info.callback = callback;
+    if (!preserved_callbacks.empty()) {
+      info.client_callbacks = std::move(preserved_callbacks);
+    }
+    info.client_callbacks[client_fd] = std::move(callback);
     info.type_support = nullptr;  // Not needed for subscription
     
     subscribers_[topic] = info;
@@ -221,20 +243,79 @@ bool TopicManager::unregister_publisher(const std::string& topic)
   return true;
 }
 
-bool TopicManager::unregister_subscriber(const std::string& topic)
+bool TopicManager::unregister_subscriber(const std::string& topic, int client_fd)
 {
   std::lock_guard<std::mutex> lock(subscribers_mutex_);
-  
+
   auto it = subscribers_.find(topic);
   if (it == subscribers_.end()) {
     return false;
   }
-  
+
+  it->second.client_callbacks.erase(client_fd);
+  if (!it->second.client_callbacks.empty()) {
+    RCLCPP_INFO(node_->get_logger(), "Removed subscriber client callback: %s (client_fd=%d, remaining=%zu)",
+                topic.c_str(), client_fd, it->second.client_callbacks.size());
+    return true;
+  }
+
   subscribers_.erase(it);
-  stats_.active_subscribers--;
-  
-  RCLCPP_INFO(node_->get_logger(), "Unregistered subscriber: %s", topic.c_str());
+  if (stats_.active_subscribers > 0) {
+    stats_.active_subscribers--;
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Unregistered subscriber: %s (last client removed)", topic.c_str());
   return true;
+}
+
+size_t TopicManager::unregister_all_client_subscribers(int client_fd)
+{
+  std::lock_guard<std::mutex> lock(subscribers_mutex_);
+
+  size_t removed_topics = 0;
+  std::vector<std::string> topics_to_erase;
+  topics_to_erase.reserve(subscribers_.size());
+
+  for (auto& pair : subscribers_) {
+    auto erased = pair.second.client_callbacks.erase(client_fd);
+    if (erased == 0) {
+      continue;
+    }
+
+    removed_topics += erased;
+    RCLCPP_INFO(node_->get_logger(),
+                "Disconnect cleanup removed subscriber callback: topic=%s client_fd=%d remaining_clients=%zu",
+                pair.first.c_str(),
+                client_fd,
+                pair.second.client_callbacks.size());
+    if (pair.second.client_callbacks.empty()) {
+      topics_to_erase.push_back(pair.first);
+    }
+  }
+
+  for (const auto& topic : topics_to_erase) {
+    subscribers_.erase(topic);
+    if (stats_.active_subscribers > 0) {
+      stats_.active_subscribers--;
+    }
+    RCLCPP_INFO(node_->get_logger(), "Unregistered subscriber on disconnect cleanup: %s", topic.c_str());
+  }
+
+  return removed_topics;
+}
+
+std::vector<std::string> TopicManager::get_client_subscription_topics(int client_fd) const
+{
+  std::lock_guard<std::mutex> lock(subscribers_mutex_);
+  std::vector<std::string> topics;
+
+  for (const auto& pair : subscribers_) {
+    if (pair.second.client_callbacks.find(client_fd) != pair.second.client_callbacks.end()) {
+      topics.push_back(pair.first);
+    }
+  }
+
+  return topics;
 }
 
 bool TopicManager::has_publisher(const std::string& topic) const

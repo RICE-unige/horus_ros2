@@ -59,6 +59,7 @@ public:
    */
   bool register_subscriber(const std::string& topic,
                           const std::string& message_type,
+                          int client_fd,
                           MessageCallback callback,
                           const rclcpp::QoS& qos = rclcpp::QoS(10));
   
@@ -80,7 +81,9 @@ public:
   /**
    * @brief Unregister a subscriber
    */
-  bool unregister_subscriber(const std::string& topic);
+  bool unregister_subscriber(const std::string& topic, int client_fd);
+  size_t unregister_all_client_subscribers(int client_fd);
+  std::vector<std::string> get_client_subscription_topics(int client_fd) const;
   
   /**
    * @brief Check if topic is registered as publisher
@@ -128,7 +131,7 @@ private:
   struct GenericSubscriberInfo {
     std::shared_ptr<rclcpp::GenericSubscription> subscription;
     std::string message_type;
-    MessageCallback callback;
+    std::unordered_map<int, MessageCallback> client_callbacks;
     const rosidl_message_type_support_t* type_support;
   };
   
