@@ -187,6 +187,9 @@ void UnityBridgeNode::handle_client_disconnected(int client_fd, const std::strin
 {
   RCLCPP_INFO(router_->get_logger(), "Unity client disconnected: %s:%u (fd=%d)",
               ip.c_str(), port, client_fd);
+  if (router_) {
+    router_->on_client_disconnected(client_fd);
+  }
 }
 
 void UnityBridgeNode::stats_timer_callback()
