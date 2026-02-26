@@ -6,6 +6,7 @@
 #include "protocol_handler.hpp"
 #include "topic_manager.hpp"
 #include "service_manager.hpp"
+#include "control_lease_manager.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -110,6 +111,7 @@ private:
   // Managers
   std::unique_ptr<TopicManager> topic_manager_;
   std::unique_ptr<ServiceManager> service_manager_;
+  std::unique_ptr<ControlLeaseManager> control_lease_manager_;
   
 #ifdef ENABLE_WEBRTC
   using FrameVariant = std::variant<

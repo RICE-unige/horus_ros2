@@ -24,6 +24,7 @@ MessageRouter::MessageRouter()
 {
   topic_manager_ = std::make_unique<TopicManager>(this);
   service_manager_ = std::make_unique<ServiceManager>(this);
+  control_lease_manager_ = std::make_unique<ControlLeaseManager>(this);
 
 #ifdef ENABLE_WEBRTC
   webrtc_enabled_ = this->declare_parameter<bool>("webrtc.enabled", false);
@@ -153,6 +154,32 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage& message)
   }
   
   // Regular message - publish to ROS
+  if (control_lease_manager_ && control_lease_manager_->is_internal_topic(message.destination)) {
+    bool handled = control_lease_manager_->handle_internal_message(client_fd, message.destination, message.payload);
+    if (!handled) {
+      stats_.routing_errors++;
+    }
+    return handled;
+  }
+
+  std::string denied_reason;
+  std::string denied_robot_name;
+  if (control_lease_manager_ &&
+      !control_lease_manager_->authorize_command_publish(
+        client_fd, message.destination, &denied_reason, &denied_robot_name)) {
+    stats_.routing_errors++;
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      1000,
+      "Denied Unity publish from client %d on protected topic '%s' (robot='%s', reason='%s')",
+      client_fd,
+      message.destination.c_str(),
+      denied_robot_name.c_str(),
+      denied_reason.c_str());
+    return false;
+  }
+
   bool success = topic_manager_->publish_message(message.destination, message.payload);
   
   if (success) {
@@ -273,7 +300,7 @@ void MessageRouter::handle_publish_command(int client_fd, const std::string& par
   }
   
   // Register publisher so Unity can publish to ROS
-  bool success = topic_manager_->register_publisher(topic, message_name);
+  bool success = topic_manager_->register_publisher(topic, message_name, client_fd);
   
   if (success) {
     track_client_publisher(client_fd, topic);
@@ -323,7 +350,7 @@ void MessageRouter::handle_remove_publisher_command(int client_fd, const std::st
     return;
   }
 
-  bool success = topic_manager_->unregister_publisher(topic);
+  bool success = topic_manager_->unregister_publisher(topic, client_fd);
   untrack_client_publisher(client_fd, topic);
   if (success) {
     send_log_to_client(client_fd, "info", "RemovePublisher(" + topic + ") OK");
@@ -726,12 +753,10 @@ void MessageRouter::on_client_disconnected(int client_fd)
   }
 
   size_t removed_subscriber_topics = topic_manager_->unregister_all_client_subscribers(client_fd);
+  size_t removed_publisher_owners = topic_manager_->unregister_all_client_publishers(client_fd);
 
-  size_t removed_publishers = 0;
-  for (const auto& topic : resources.published_topics) {
-    if (topic_manager_->unregister_publisher(topic)) {
-      removed_publishers++;
-    }
+  if (control_lease_manager_) {
+    control_lease_manager_->on_client_disconnected(client_fd);
   }
 
   size_t removed_ros_services = 0;
@@ -771,7 +796,7 @@ void MessageRouter::on_client_disconnected(int client_fd)
       "Client %d cleanup: subscribers=%zu publishers=%zu ros_services=%zu unity_services=%zu webrtc_sessions=%zu",
       client_fd,
       removed_subscriber_topics,
-      removed_publishers,
+      removed_publisher_owners,
       removed_ros_services,
       removed_unity_services,
       resources.webrtc_session_ids.size());
