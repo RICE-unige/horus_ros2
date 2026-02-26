@@ -6,6 +6,7 @@
 #include "protocol_handler.hpp"
 #include "topic_manager.hpp"
 #include "service_manager.hpp"
+#include "control_lease_manager.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 #ifdef ENABLE_WEBRTC
@@ -109,6 +111,7 @@ private:
   // Managers
   std::unique_ptr<TopicManager> topic_manager_;
   std::unique_ptr<ServiceManager> service_manager_;
+  std::unique_ptr<ControlLeaseManager> control_lease_manager_;
   
 #ifdef ENABLE_WEBRTC
   using FrameVariant = std::variant<
@@ -117,6 +120,7 @@ private:
 
   struct WebRtcSession {
     std::string session_id;
+    int owner_client_fd = -1;
     std::string stream_topic;
     std::string image_type;
     std::shared_ptr<WebRTCManager> manager;
@@ -195,6 +199,10 @@ private:
   // System command handlers
   void handle_subscribe_command(int client_fd, const std::string& params);
   void handle_publish_command(int client_fd, const std::string& params);
+  void handle_remove_subscriber_command(int client_fd, const std::string& params);
+  void handle_remove_publisher_command(int client_fd, const std::string& params);
+  void handle_remove_ros_service_command(int client_fd, const std::string& params);
+  void handle_remove_unity_service_command(int client_fd, const std::string& params);
   void handle_ros_service_command(int client_fd, const std::string& params);
   void handle_unity_service_command(int client_fd, const std::string& params);
   void handle_request_command(int client_fd, const std::string& params);
@@ -216,6 +224,28 @@ private:
   
   bool parse_json_params(const std::string& json_str, 
                         std::unordered_map<std::string, std::string>& params);
+public:
+  void on_client_disconnected(int client_fd);
+private:
+  struct ClientResourceState {
+    std::unordered_set<std::string> subscribed_topics;
+    std::unordered_set<std::string> published_topics;
+    std::unordered_set<std::string> ros_services;
+    std::unordered_set<std::string> unity_services;
+    std::unordered_set<std::string> webrtc_session_ids;
+  };
+  std::unordered_map<int, ClientResourceState> client_resources_;
+  std::mutex client_resources_mutex_;
+  void track_client_subscriber(int client_fd, const std::string& topic);
+  void track_client_publisher(int client_fd, const std::string& topic);
+  void track_client_ros_service(int client_fd, const std::string& service_name);
+  void track_client_unity_service(int client_fd, const std::string& service_name);
+  void track_client_webrtc_session(int client_fd, const std::string& session_id);
+  void untrack_client_webrtc_session(int client_fd, const std::string& session_id);
+  void untrack_client_subscriber(int client_fd, const std::string& topic);
+  void untrack_client_publisher(int client_fd, const std::string& topic);
+  void untrack_client_ros_service(int client_fd, const std::string& service_name);
+  void untrack_client_unity_service(int client_fd, const std::string& service_name);
 };
 
 } // namespace horus_unity_bridge

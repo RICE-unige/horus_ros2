@@ -119,6 +119,8 @@ public:
   bool register_unity_service(const std::string& service_name,
                              const std::string& service_type,
                              UnityServiceRequestCallback request_callback);
+  bool unregister_ros_service(const std::string& service_name);
+  bool unregister_unity_service(const std::string& service_name);
   
   /**
    * @brief Handle service response from Unity
