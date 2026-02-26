@@ -5,17 +5,12 @@
 ![C++](https://img.shields.io/badge/C%2B%2B-17-00599C)
 [![License](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 
-<div align="center">
+<p align="center">
+  <img src="docs/horus_logo_black.svg#gh-light-mode-only" alt="HORUS logo" height="90">
+  <img src="docs/horus_logo_white.svg#gh-dark-mode-only" alt="HORUS logo" height="90">
+</p>
 
-```text
-██╗  ██╗ ██████╗ ██████╗ ██╗   ██╗███████╗
-██║  ██║██╔═══██╗██╔══██╗██║   ██║██╔════╝
-███████║██║   ██║██████╔╝██║   ██║███████╗
-██╔══██║██║   ██║██╔══██╗██║   ██║╚════██║
-██║  ██║╚██████╔╝██║  ██║╚██████╔╝███████║
-╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
-```
-</div>
+<p align="center"><em>Holistic Operational Reality for Unified Systems</em></p>
 
 > [!TIP]
 > ROS 2 infrastructure layer for the HORUS research stack (SDK <-> bridge <-> MR app).
@@ -29,6 +24,8 @@ This repo focuses on runtime infrastructure for mixed-reality robot operations:
 - ROS 2 topic/service integration,
 - Unity-compatible TCP bridge behavior,
 - optional WebRTC camera signaling/media pipeline,
+- multi-client Unity bridge fanout/cleanup for multi-operator sessions,
+- bridge-authoritative per-robot control lease arbitration and command-topic enforcement,
 - backend package boundaries for scalability experiments.
 
 It does not own SDK payload authoring (`horus_sdk`) or Unity scene/runtime UX (`horus`).
@@ -37,7 +34,7 @@ It does not own SDK payload authoring (`horus_sdk`) or Unity scene/runtime UX (`
 
 | Package | Responsibility |
 |---|---|
-| `horus_unity_bridge` | TCP/WebRTC bridge runtime between ROS 2 and Unity client |
+| `horus_unity_bridge` | TCP/WebRTC bridge runtime between ROS 2 and Unity client, including multi-client fanout and control-lease enforcement |
 | `horus_backend` | Backend registration/state management logic |
 | `horus_interfaces` | ROS 2 interfaces used by HORUS components |
 | `horus_unity_bridge_test` | Test utilities and simulation helpers |
@@ -120,11 +117,22 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 - first outbound RTP header fields,
 - periodic RTP counters,
 - per-session stall telemetry (incoming frames, pushed frames, dropped queue frames, last push progress),
-- keyframe request reasons and cooldown behavior.
+- keyframe request reasons and cooldown behavior,
+- multi-operator bridge lease events (`control_lease_state`) and denied-command diagnostics when control topics are protected.
 
 ### Integration Boundary
 - `horus_sdk` should treat this repo as infrastructure service, not payload author.
 - `horus` should consume this bridge as transport/runtime endpoint.
+
+### Multi-Operator Bridge Baseline
+Current multi-operator infrastructure now integrated in `main` includes:
+- multi-client subscriber fanout (prevents last-subscriber-wins behavior),
+- client disconnect cleanup for subscriptions/publishers/services/session state,
+- per-robot control lease arbitration (`/horus/multi_operator/control_lease_request`),
+- protected command-topic enforcement with lease-denied events,
+- multi-client publisher ownership refcounting (prevents one client disconnect from tearing down shared publishers).
+
+Lease state snapshots are published on `/horus/multi_operator/control_lease_state` for MR clients (and optional SDK observability).
 
 ## :test_tube: Validation Workflow
 
@@ -157,10 +165,11 @@ Expected outcomes:
 
 | Stream | Status | Current Baseline | Next Milestone |
 |---|---|---|---|
-| Bridge Runtime Stability | :white_check_mark: Active baseline | Stable TCP bridge path, WebRTC signaling/session flow merged in `main`, and negotiation diagnostics available (MID/PT/RTP counters). | Add long-duration soak tests and explicit reconnection stress scenarios. |
+| Bridge Runtime Stability | :white_check_mark: Active baseline | Stable TCP bridge path, WebRTC signaling/session flow, multi-client subscriber fanout, and publisher ownership refcounting are integrated in `main`, with negotiation diagnostics available (MID/PT/RTP counters). | Add long-duration soak tests and explicit reconnection stress scenarios. |
 | WebRTC Media Reliability | :large_orange_diamond: In progress | Negotiation mismatch fixes plus stall telemetry and paced keyframe recovery are integrated. | Harden edge-case handling for network topology variance and high robot counts. |
 | QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
 | Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation and richer task-status observability. |
+| Multi-Operator Control Arbitration | :large_orange_diamond: In progress | Bridge-side per-robot control lease arbiter, protected command-topic enforcement, and lease state snapshots are integrated. | Harden lease telemetry/observability, tune TTL policies, and extend regression coverage for repeated join/rejoin contention scenarios. |
 | Integration Automation | :white_circle: Planned | Validation is currently mostly manual (SDK fake publishers + Unity runtime checks). | Add CI-driven integration matrix across SDK, bridge, and Unity harness scenarios. |
 | Observability and Metrics | :white_circle: Planned | Logs provide actionable diagnostics during runtime issues. | Export machine-readable metrics for dashboards and regression tracking. |
 | Benchmarking and Reproducibility | :white_circle: Planned | Ad-hoc profiling exists across development cycles. | Publish repeatable throughput/latency benchmark suite for research reporting. |
