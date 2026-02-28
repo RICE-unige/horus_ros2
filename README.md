@@ -65,6 +65,12 @@ Recommended waypoint task topics:
 - `/<robot>/waypoint_path` (`nav_msgs/Path`)
 - `/<robot>/waypoint_status` (`std_msgs/String`, JSON status payload)
 
+Recommended navigation visualization topics:
+- `/<robot>/global_path` (`nav_msgs/Path`)
+- `/<robot>/local_path` (`nav_msgs/Path`)
+- `/<robot>/odom` (`nav_msgs/Odometry`)
+- `/<robot>/collision_risk` (`std_msgs/String`, JSON payload)
+
 Robot-task backend baseline:
 - `horus_backend` includes an optional Nav2 action adapter path for `goal_pose` / `goal_cancel` / `goal_status`.
 - Adapter auto-enables when both `nav2_msgs` and `rclcpp_action` are available at build time.
@@ -141,7 +147,7 @@ Lease state snapshots are published on `/horus/multi_operator/control_lease_stat
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 
 # 2) In SDK repo, run unified fake runtime + typical registration demo
-python3 python/examples/fake_tf_ops_suite.py --robot-count 10 --rate 30 --static-camera --publish-compressed-images
+python3 python/examples/fake_tf_ops_suite.py --robot-count 10 --rate 30 --static-camera --publish-compressed-images --task-path-publish-rate 5 --publish-collision-risk --collision-threshold-m 1.2
 python3 python/examples/sdk_typical_ops_demo.py --robot-count 10 --workspace-scale 0.1
 ```
 
