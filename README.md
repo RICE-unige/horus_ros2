@@ -71,6 +71,12 @@ Recommended navigation visualization topics:
 - `/<robot>/odom` (`nav_msgs/Odometry`)
 - `/<robot>/collision_risk` (`std_msgs/String`, JSON payload)
 
+Recommended robot-description transport topics:
+- `/horus/robot_description/request` (`std_msgs/String`, JSON request envelope)
+- `/horus/robot_description/chunk_begin` (`std_msgs/String`, JSON begin envelope)
+- `/horus/robot_description/chunk_item` (`std_msgs/String`, JSON chunk envelope)
+- `/horus/robot_description/chunk_end` (`std_msgs/String`, JSON end envelope)
+
 Robot-task backend baseline:
 - `horus_backend` includes an optional Nav2 action adapter path for `goal_pose` / `goal_cancel` / `goal_status`.
 - Adapter auto-enables when both `nav2_msgs` and `rclcpp_action` are available at build time.
@@ -149,6 +155,11 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 # 2) In SDK repo, run unified fake runtime + typical registration demo
 python3 python/examples/fake_tf_ops_suite.py --robot-count 10 --rate 30 --static-camera --publish-compressed-images --task-path-publish-rate 5 --publish-collision-risk --collision-threshold-m 1.2
 python3 python/examples/sdk_typical_ops_demo.py --robot-count 10 --workspace-scale 0.1
+
+# 3) Optional robot-description validation (collision + joints)
+python3 python/examples/tools/fetch_robot_description_assets.py
+python3 python/examples/fake_tf_robot_description_suite.py
+python3 python/examples/sdk_robot_description_demo.py --workspace-scale 0.1 --collision-opaque
 ```
 
 Expected outcomes:
@@ -175,6 +186,7 @@ Expected outcomes:
 | WebRTC Media Reliability | :large_orange_diamond: In progress | Negotiation mismatch fixes plus stall telemetry and paced keyframe recovery are integrated. | Harden edge-case handling for network topology variance and high robot counts. |
 | QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
 | Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation and richer task-status observability. |
+| Robot Description Transport | :large_orange_diamond: In progress | Bridge pass-through for request/chunk topics is active and used by SDK/MR Robot Description V1 flow. | Add targeted transport diagnostics and replay stress tests for chunked description traffic under multi-robot load. |
 | Multi-Operator Control Arbitration | :large_orange_diamond: In progress | Bridge-side per-robot control lease arbiter, protected command-topic enforcement, and lease state snapshots are integrated. | Harden lease telemetry/observability, tune TTL policies, and extend regression coverage for repeated join/rejoin contention scenarios. |
 | Integration Automation | :white_circle: Planned | Validation is currently mostly manual (SDK fake publishers + Unity runtime checks). | Add CI-driven integration matrix across SDK, bridge, and Unity harness scenarios. |
 | Observability and Metrics | :white_circle: Planned | Logs provide actionable diagnostics during runtime issues. | Export machine-readable metrics for dashboards and regression tracking. |
