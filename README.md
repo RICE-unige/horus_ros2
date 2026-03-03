@@ -65,6 +65,10 @@ Recommended waypoint task topics:
 - `/<robot>/waypoint_path` (`nav_msgs/Path`)
 - `/<robot>/waypoint_status` (`std_msgs/String`, JSON status payload)
 
+Recommended drone task command topics:
+- `/<robot>/takeoff` (`std_msgs/Empty`)
+- `/<robot>/land` (`std_msgs/Empty`)
+
 Recommended navigation visualization topics:
 - `/<robot>/global_path` (`nav_msgs/Path`)
 - `/<robot>/local_path` (`nav_msgs/Path`)
@@ -160,6 +164,10 @@ python3 python/examples/sdk_typical_ops_demo.py --robot-count 10 --workspace-sca
 python3 python/examples/tools/fetch_robot_description_assets.py
 python3 python/examples/fake_tf_robot_description_suite.py
 python3 python/examples/sdk_robot_description_demo.py --workspace-scale 0.1 --collision-opaque
+
+# 4) Optional drone flow validation (takeoff/land + 3D go-to/waypoint/draw-path in MR)
+python3 python/examples/fake_tf_drone_ops_suite.py --robot-count 3 --robot-names drone_1,drone_2,drone_3 --min-altitude 0.0 --max-altitude 25.0 --takeoff-altitude 1.2
+python3 python/examples/sdk_typical_ops_demo.py --robot-names drone_1,drone_2,drone_3 --teleop-profile aerial --go-to-min-altitude 0.0 --go-to-max-altitude 25.0 --workspace-scale 0.1
 ```
 
 Expected outcomes:
@@ -167,7 +175,8 @@ Expected outcomes:
 - registration/ack/heartbeat channels remain stable,
 - WebRTC sessions negotiate and stream when requested,
 - robots remain static until teleop/task command topics are used,
-- active teleop commands can preempt active go-to-point/waypoint execution.
+- active teleop commands can preempt active go-to-point/waypoint execution,
+- aerial commands (`takeoff`/`land`) pass through bridge without extra protocol wiring.
 
 ## :warning: Known Constraints
 
@@ -185,7 +194,7 @@ Expected outcomes:
 | Bridge Runtime Stability | :white_check_mark: Active baseline | Stable TCP bridge path, WebRTC signaling/session flow, multi-client subscriber fanout, and publisher ownership refcounting are integrated in `main`, with negotiation diagnostics available (MID/PT/RTP counters). | Add long-duration soak tests and explicit reconnection stress scenarios. |
 | WebRTC Media Reliability | :large_orange_diamond: In progress | Negotiation mismatch fixes plus stall telemetry and paced keyframe recovery are integrated. | Harden edge-case handling for network topology variance and high robot counts. |
 | QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
-| Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation and richer task-status observability. |
+| Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined, aerial `takeoff`/`land` command topics are validated in fake runtime workflows, and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation (ground + aerial) and richer task-status observability. |
 | Robot Description Transport | :large_orange_diamond: In progress | Bridge pass-through for request/chunk topics is active and used by SDK/MR Robot Description V1 flow. | Add targeted transport diagnostics and replay stress tests for chunked description traffic under multi-robot load. |
 | Multi-Operator Control Arbitration | :large_orange_diamond: In progress | Bridge-side per-robot control lease arbiter, protected command-topic enforcement, and lease state snapshots are integrated. | Harden lease telemetry/observability, tune TTL policies, and extend regression coverage for repeated join/rejoin contention scenarios. |
 | Integration Automation | :white_circle: Planned | Validation is currently mostly manual (SDK fake publishers + Unity runtime checks). | Add CI-driven integration matrix across SDK, bridge, and Unity harness scenarios. |
