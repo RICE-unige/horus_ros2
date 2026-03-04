@@ -135,6 +135,7 @@ private:
   bool should_publish_denied_event_locked(int client_fd, const std::string& topic, uint64_t now_ms);
 
   static uint64_t now_ms();
+  static bool lease_usage_active(const RobotControlLease& lease);
   static bool try_decode_string_msg(const std::vector<uint8_t>& serialized_payload, std::string& out_data);
 };
 

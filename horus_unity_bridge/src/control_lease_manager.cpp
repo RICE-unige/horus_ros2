@@ -362,9 +362,28 @@ ControlLeaseManager::LeaseRequestResult ControlLeaseManager::apply_acquire_reque
     return result;
   }
 
-  result.granted = false;
-  result.reason = "robot_control_leased";
+  if (lease_usage_active(lease)) {
+    result.granted = false;
+    result.reason = "robot_control_leased";
+    result.current_lease = lease;
+    return result;
+  }
+
+  // The existing holder is inactive (no panel/task/teleop usage), so reassign immediately.
+  lease.holder_client_fd = client_fd;
+  lease.holder_app_id = app_id;
+  lease.holder_role = role;
+  lease.session_id = session_id;
+  lease.acquired_at_ms = now;
+  lease.last_heartbeat_ms = now;
+  lease.panel_open = panel_open;
+  lease.teleop_active = teleop_active;
+  lease.task_active = task_active;
+  lease.task_kind = task_kind.empty() ? "none" : task_kind;
+  lease.lease_version = next_lease_version_++;
+  result.granted = true;
   result.current_lease = lease;
+  publish_snapshot_locked("lease_reassigned_inactive", request_id, robot_name, std::string(), lease.holder_app_id);
   return result;
 }
 
@@ -548,6 +567,11 @@ uint64_t ControlLeaseManager::now_ms()
   using Clock = std::chrono::steady_clock;
   return static_cast<uint64_t>(
     std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count());
+}
+
+bool ControlLeaseManager::lease_usage_active(const RobotControlLease& lease)
+{
+  return lease.panel_open || lease.teleop_active || lease.task_active;
 }
 
 bool ControlLeaseManager::try_decode_string_msg(const std::vector<uint8_t>& serialized_payload, std::string& out_data)
