@@ -145,6 +145,7 @@ Current multi-operator infrastructure now integrated in `main` includes:
 - multi-client subscriber fanout (prevents last-subscriber-wins behavior),
 - client disconnect cleanup for subscriptions/publishers/services/session state,
 - per-robot control lease arbitration (`/horus/multi_operator/control_lease_request`),
+- inactive-holder acquire preemption (if holder has no active `panel_open`/`task_active`/`teleop_active`, acquire is reassigned immediately),
 - protected command-topic enforcement with lease-denied events,
 - multi-client publisher ownership refcounting (prevents one client disconnect from tearing down shared publishers).
 
