@@ -75,6 +75,14 @@ Recommended navigation visualization topics:
 - `/<robot>/odom` (`nav_msgs/Odometry`)
 - `/<robot>/collision_risk` (`std_msgs/String`, JSON payload)
 
+Recommended global 3D map topics:
+- `/map_3d` (`sensor_msgs/PointCloud2`, global pointcloud map stream)
+- `/map_3d_mesh_array` (`visualization_msgs/MarkerArray`, chunked `TRIANGLE_LIST` mesh stream, recommended for Quest)
+- `/map_3d_mesh` (`visualization_msgs/Marker`, single `TRIANGLE_LIST` mesh stream, compatibility fallback)
+
+> [!NOTE]
+> Mesh conversion flow for `/map_3d -> /map_3d_mesh_array` (and optional legacy `/map_3d_mesh`) is orchestrated by `horus_sdk` demo tooling (`fake_tf_robot_description_suite.py` + `pointcloud_to_voxel_mesh_marker.py`). Default policy is snapshot-first for Quest stability; tune via SDK mesh flags (`--map-3d-mesh-transport`, `--map-3d-mesh-array-topic`, `--map-3d-mesh-chunk-max-triangles`, `--map-3d-mesh-voxel-size`, `--map-3d-mesh-max-voxels`, `--map-3d-mesh-max-triangles`, `--map-3d-mesh-update-policy`, `--map-3d-mesh-republish-interval`).
+
 Recommended robot-description transport topics:
 - `/horus/robot_description/request` (`std_msgs/String`, JSON request envelope)
 - `/horus/robot_description/chunk_begin` (`std_msgs/String`, JSON begin envelope)
