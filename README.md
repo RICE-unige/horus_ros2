@@ -77,11 +77,14 @@ Recommended navigation visualization topics:
 
 Recommended global 3D map topics:
 - `/map_3d` (`sensor_msgs/PointCloud2`, global pointcloud map stream)
-- `/map_3d_mesh_array` (`visualization_msgs/MarkerArray`, chunked `TRIANGLE_LIST` mesh stream, recommended for Quest)
-- `/map_3d_mesh` (`visualization_msgs/Marker`, single `TRIANGLE_LIST` mesh stream, compatibility fallback)
+- `/map_3d_mesh` (`visualization_msgs/Marker`, single `TRIANGLE_LIST` mesh stream, recommended Quest mesh path in current stable workflow)
+- `/map_3d_octomap_mesh` (`visualization_msgs/Marker`, `TRIANGLE_LIST` mesh stream for octomap mode)
+- `/map_3d_octomap` (`octomap_msgs/Octomap`, optional native octomap metadata/topic for interoperability)
 
 > [!NOTE]
-> Mesh conversion flow for `/map_3d -> /map_3d_mesh_array` (and optional legacy `/map_3d_mesh`) is orchestrated by `horus_sdk` demo tooling (`fake_tf_robot_description_suite.py` + `pointcloud_to_voxel_mesh_marker.py`). Default policy is snapshot-first for Quest stability; tune via SDK mesh flags (`--map-3d-mesh-transport`, `--map-3d-mesh-array-topic`, `--map-3d-mesh-chunk-max-triangles`, `--map-3d-mesh-voxel-size`, `--map-3d-mesh-max-voxels`, `--map-3d-mesh-max-triangles`, `--map-3d-mesh-update-policy`, `--map-3d-mesh-republish-interval`).
+> Mesh conversion flow for `/map_3d -> /map_3d_mesh` is orchestrated by `horus_sdk` demo tooling (`fake_tf_robot_description_suite.py` + `pointcloud_to_voxel_mesh_marker.py`), with snapshot-first defaults for Quest stability.
+> Marker-array transport flags remain accepted in SDK for compatibility but are currently coerced to marker-only runtime behavior with warning logs.
+> Replay-time bounded republish bursts are used so late joiners receive map data during SDK registry replay windows.
 
 Recommended robot-description transport topics:
 - `/horus/robot_description/request` (`std_msgs/String`, JSON request envelope)
@@ -196,7 +199,7 @@ Expected outcomes:
 ## :world_map: Roadmap
 
 > [!NOTE]
-> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX or SDK dashboard behavior.
+> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX or SDK dashboard behavior. Current baseline aligns with marker-only mesh transport stability in the integrated SDK/MR workflow.
 
 | Stream | Status | Current Baseline | Next Milestone |
 |---|---|---|---|
@@ -205,6 +208,7 @@ Expected outcomes:
 | QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
 | Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined, aerial `takeoff`/`land` command topics are validated in fake runtime workflows, and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation (ground + aerial) and richer task-status observability. |
 | Robot Description Transport | :large_orange_diamond: In progress | Bridge pass-through for request/chunk topics is active and used by SDK/MR Robot Description V1 flow. | Add targeted transport diagnostics and replay stress tests for chunked description traffic under multi-robot load. |
+| 3D Map Transport Compatibility | :large_orange_diamond: In progress | Marker-based global 3D map topic guidance is aligned across stack (`/map_3d`, `/map_3d_mesh`, `/map_3d_octomap_mesh`) with snapshot-first conversion defaults and replay-window map republish behavior handled in SDK tooling. | Add explicit bridge-level diagnostics and stress tests focused on 3D map traffic during multi-operator join/rejoin windows. |
 | Multi-Operator Control Arbitration | :large_orange_diamond: In progress | Bridge-side per-robot control lease arbiter, protected command-topic enforcement, and lease state snapshots are integrated. | Harden lease telemetry/observability, tune TTL policies, and extend regression coverage for repeated join/rejoin contention scenarios. |
 | Integration Automation | :white_circle: Planned | Validation is currently mostly manual (SDK fake publishers + Unity runtime checks). | Add CI-driven integration matrix across SDK, bridge, and Unity harness scenarios. |
 | Observability and Metrics | :white_circle: Planned | Logs provide actionable diagnostics during runtime issues. | Export machine-readable metrics for dashboards and regression tracking. |
