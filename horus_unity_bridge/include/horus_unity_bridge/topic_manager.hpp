@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
 #include <mutex>
 
@@ -44,8 +45,9 @@ public:
    * @param qos QoS profile
    * @return true if successful
    */
-  bool register_publisher(const std::string& topic, 
+  bool register_publisher(const std::string& topic,
                          const std::string& message_type,
+                         int client_fd,
                          const rclcpp::QoS& qos = rclcpp::QoS(10));
   
   /**
@@ -59,6 +61,7 @@ public:
    */
   bool register_subscriber(const std::string& topic,
                           const std::string& message_type,
+                          int client_fd,
                           MessageCallback callback,
                           const rclcpp::QoS& qos = rclcpp::QoS(10));
   
@@ -75,12 +78,15 @@ public:
   /**
    * @brief Unregister a publisher
    */
-  bool unregister_publisher(const std::string& topic);
+  bool unregister_publisher(const std::string& topic, int client_fd);
+  size_t unregister_all_client_publishers(int client_fd);
   
   /**
    * @brief Unregister a subscriber
    */
-  bool unregister_subscriber(const std::string& topic);
+  bool unregister_subscriber(const std::string& topic, int client_fd);
+  size_t unregister_all_client_subscribers(int client_fd);
+  std::vector<std::string> get_client_subscription_topics(int client_fd) const;
   
   /**
    * @brief Check if topic is registered as publisher
@@ -122,13 +128,14 @@ private:
   struct GenericPublisherInfo {
     std::shared_ptr<rclcpp::GenericPublisher> publisher;
     std::string message_type;
+    std::unordered_set<int> owner_client_fds;
     const rosidl_message_type_support_t* type_support;
   };
   
   struct GenericSubscriberInfo {
     std::shared_ptr<rclcpp::GenericSubscription> subscription;
     std::string message_type;
-    MessageCallback callback;
+    std::unordered_map<int, MessageCallback> client_callbacks;
     const rosidl_message_type_support_t* type_support;
   };
   

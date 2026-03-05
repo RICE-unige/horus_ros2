@@ -55,6 +55,11 @@ public:
   // Request a keyframe from the encoder (useful for packet loss recovery)
   void request_keyframe();
 
+  uint64_t get_rtp_packets_sent() const;
+  uint64_t get_rtp_bytes_sent() const;
+  bool is_peer_connected() const;
+  bool is_video_track_open() const;
+
 private:
   struct OfferVideoNegotiation
   {

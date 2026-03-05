@@ -213,6 +213,30 @@ bool ServiceManager::register_unity_service(const std::string& service_name,
   return true;
 }
 
+bool ServiceManager::unregister_ros_service(const std::string& service_name)
+{
+  std::lock_guard<std::mutex> lock(ros_clients_mutex_);
+  auto it = ros_service_clients_.find(service_name);
+  if (it == ros_service_clients_.end()) {
+    return false;
+  }
+  ros_service_clients_.erase(it);
+  RCLCPP_INFO(node_->get_logger(), "Unregistered ROS service client: %s", service_name.c_str());
+  return true;
+}
+
+bool ServiceManager::unregister_unity_service(const std::string& service_name)
+{
+  std::lock_guard<std::mutex> lock(unity_servers_mutex_);
+  auto it = unity_service_servers_.find(service_name);
+  if (it == unity_service_servers_.end()) {
+    return false;
+  }
+  unity_service_servers_.erase(it);
+  RCLCPP_INFO(node_->get_logger(), "Unregistered Unity service server: %s", service_name.c_str());
+  return true;
+}
+
 void ServiceManager::handle_unity_service_response(uint32_t srv_id,
                                                   const std::vector<uint8_t>& response)
 {

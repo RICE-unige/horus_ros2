@@ -24,6 +24,7 @@ MessageRouter::MessageRouter()
 {
   topic_manager_ = std::make_unique<TopicManager>(this);
   service_manager_ = std::make_unique<ServiceManager>(this);
+  control_lease_manager_ = std::make_unique<ControlLeaseManager>(this);
 
 #ifdef ENABLE_WEBRTC
   webrtc_enabled_ = this->declare_parameter<bool>("webrtc.enabled", false);
@@ -153,6 +154,32 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage& message)
   }
   
   // Regular message - publish to ROS
+  if (control_lease_manager_ && control_lease_manager_->is_internal_topic(message.destination)) {
+    bool handled = control_lease_manager_->handle_internal_message(client_fd, message.destination, message.payload);
+    if (!handled) {
+      stats_.routing_errors++;
+    }
+    return handled;
+  }
+
+  std::string denied_reason;
+  std::string denied_robot_name;
+  if (control_lease_manager_ &&
+      !control_lease_manager_->authorize_command_publish(
+        client_fd, message.destination, &denied_reason, &denied_robot_name)) {
+    stats_.routing_errors++;
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      1000,
+      "Denied Unity publish from client %d on protected topic '%s' (robot='%s', reason='%s')",
+      client_fd,
+      message.destination.c_str(),
+      denied_robot_name.c_str(),
+      denied_reason.c_str());
+    return false;
+  }
+
   bool success = topic_manager_->publish_message(message.destination, message.payload);
   
   if (success) {
@@ -176,16 +203,24 @@ bool MessageRouter::handle_system_command(int client_fd, const ProtocolMessage& 
   try {
     if (command == "__subscribe") {
       handle_subscribe_command(client_fd, params_json);
+    } else if (command == "__remove_subscriber") {
+      handle_remove_subscriber_command(client_fd, params_json);
     } else if (command == "__publish") {
       handle_publish_command(client_fd, params_json);
+    } else if (command == "__remove_publisher") {
+      handle_remove_publisher_command(client_fd, params_json);
     } else if (command == "__topic_list") {
       handle_topic_list_command(client_fd);
     } else if (command == "__handshake") {
       handle_handshake_command(client_fd);
     } else if (command == "__ros_service") {
       handle_ros_service_command(client_fd, params_json);
+    } else if (command == "__remove_ros_service") {
+      handle_remove_ros_service_command(client_fd, params_json);
     } else if (command == "__unity_service") {
       handle_unity_service_command(client_fd, params_json);
+    } else if (command == "__remove_unity_service") {
+      handle_remove_unity_service_command(client_fd, params_json);
     } else if (command == "__request") {
       handle_request_command(client_fd, params_json);
     } else if (command == "__response") {
@@ -227,6 +262,7 @@ void MessageRouter::handle_subscribe_command(int client_fd, const std::string& p
   bool success = topic_manager_->register_subscriber(
     topic,
     message_name,
+    client_fd,
     [this, client_fd](const std::string& topic, const std::vector<uint8_t>& data) {
       // Forward to Unity client
       if (send_callback_) {
@@ -236,6 +272,7 @@ void MessageRouter::handle_subscribe_command(int client_fd, const std::string& p
   );
   
   if (success) {
+    track_client_subscriber(client_fd, topic);
     RCLCPP_INFO(get_logger(), "Registered Unity subscriber: %s [%s]", 
                 topic.c_str(), message_name.c_str());
     send_log_to_client(client_fd, "info", 
@@ -263,15 +300,108 @@ void MessageRouter::handle_publish_command(int client_fd, const std::string& par
   }
   
   // Register publisher so Unity can publish to ROS
-  bool success = topic_manager_->register_publisher(topic, message_name);
+  bool success = topic_manager_->register_publisher(topic, message_name, client_fd);
   
   if (success) {
+    track_client_publisher(client_fd, topic);
     RCLCPP_INFO(get_logger(), "Registered Unity publisher: %s [%s]", 
                 topic.c_str(), message_name.c_str());
     send_log_to_client(client_fd, "info",
                       "RegisterPublisher(" + topic + ", " + message_name + ") OK");
   } else {
     send_error_to_client(client_fd, "Failed to register publisher: " + topic);
+  }
+}
+
+void MessageRouter::handle_remove_subscriber_command(int client_fd, const std::string& params)
+{
+  std::unordered_map<std::string, std::string> param_map;
+  if (!parse_json_params(params, param_map)) {
+    send_error_to_client(client_fd, "Failed to parse remove subscriber parameters");
+    return;
+  }
+
+  std::string topic = param_map["topic"];
+  if (topic.empty()) {
+    send_error_to_client(client_fd, "Missing required parameter: topic");
+    return;
+  }
+
+  bool success = topic_manager_->unregister_subscriber(topic, client_fd);
+  untrack_client_subscriber(client_fd, topic);
+  if (success) {
+    send_log_to_client(client_fd, "info", "RemoveSubscriber(" + topic + ") OK");
+  } else {
+    send_log_to_client(client_fd, "warning", "RemoveSubscriber(" + topic + ") ignored (not registered)");
+  }
+}
+
+void MessageRouter::handle_remove_publisher_command(int client_fd, const std::string& params)
+{
+  std::unordered_map<std::string, std::string> param_map;
+  if (!parse_json_params(params, param_map)) {
+    send_error_to_client(client_fd, "Failed to parse remove publisher parameters");
+    return;
+  }
+
+  std::string topic = param_map["topic"];
+  if (topic.empty()) {
+    send_error_to_client(client_fd, "Missing required parameter: topic");
+    return;
+  }
+
+  bool success = topic_manager_->unregister_publisher(topic, client_fd);
+  untrack_client_publisher(client_fd, topic);
+  if (success) {
+    send_log_to_client(client_fd, "info", "RemovePublisher(" + topic + ") OK");
+  } else {
+    send_log_to_client(client_fd, "warning", "RemovePublisher(" + topic + ") ignored (not registered)");
+  }
+}
+
+void MessageRouter::handle_remove_ros_service_command(int client_fd, const std::string& params)
+{
+  std::unordered_map<std::string, std::string> param_map;
+  if (!parse_json_params(params, param_map)) {
+    send_error_to_client(client_fd, "Failed to parse remove ROS service parameters");
+    return;
+  }
+
+  std::string service_name = param_map["topic"];
+  if (service_name.empty()) {
+    send_error_to_client(client_fd, "Missing required parameter: topic");
+    return;
+  }
+
+  bool success = service_manager_->unregister_ros_service(service_name);
+  untrack_client_ros_service(client_fd, service_name);
+  if (success) {
+    send_log_to_client(client_fd, "info", "RemoveRosService(" + service_name + ") OK");
+  } else {
+    send_log_to_client(client_fd, "warning", "RemoveRosService(" + service_name + ") ignored (not registered)");
+  }
+}
+
+void MessageRouter::handle_remove_unity_service_command(int client_fd, const std::string& params)
+{
+  std::unordered_map<std::string, std::string> param_map;
+  if (!parse_json_params(params, param_map)) {
+    send_error_to_client(client_fd, "Failed to parse remove Unity service parameters");
+    return;
+  }
+
+  std::string service_name = param_map["topic"];
+  if (service_name.empty()) {
+    send_error_to_client(client_fd, "Missing required parameter: topic");
+    return;
+  }
+
+  bool success = service_manager_->unregister_unity_service(service_name);
+  untrack_client_unity_service(client_fd, service_name);
+  if (success) {
+    send_log_to_client(client_fd, "info", "RemoveUnityService(" + service_name + ") OK");
+  } else {
+    send_log_to_client(client_fd, "warning", "RemoveUnityService(" + service_name + ") ignored (not registered)");
   }
 }
 
@@ -296,6 +426,7 @@ void MessageRouter::handle_ros_service_command(int client_fd, const std::string&
   bool success = service_manager_->register_ros_service(service_name, service_type);
   
   if (success) {
+    track_client_ros_service(client_fd, service_name);
     RCLCPP_INFO(get_logger(), "Registered ROS service client: %s [%s]",
                 service_name.c_str(), service_type.c_str());
     send_log_to_client(client_fd, "info",
@@ -348,6 +479,7 @@ void MessageRouter::handle_unity_service_command(int client_fd, const std::strin
     service_name, service_type, request_callback);
   
   if (success) {
+    track_client_unity_service(client_fd, service_name);
     RCLCPP_INFO(get_logger(), "Registered Unity service server: %s [%s]",
                 service_name.c_str(), service_type.c_str());
     send_log_to_client(client_fd, "info",
@@ -521,6 +653,156 @@ bool MessageRouter::parse_json_params(const std::string& json_str,
   }
 }
 
+void MessageRouter::track_client_subscriber(int client_fd, const std::string& topic)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  auto& state = client_resources_[client_fd];
+  state.subscribed_topics.insert(topic);
+  RCLCPP_INFO(get_logger(), "Client %d subscribed topics=%zu (last=%s)",
+              client_fd, state.subscribed_topics.size(), topic.c_str());
+}
+
+void MessageRouter::track_client_publisher(int client_fd, const std::string& topic)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  client_resources_[client_fd].published_topics.insert(topic);
+}
+
+void MessageRouter::track_client_ros_service(int client_fd, const std::string& service_name)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  client_resources_[client_fd].ros_services.insert(service_name);
+}
+
+void MessageRouter::track_client_unity_service(int client_fd, const std::string& service_name)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  client_resources_[client_fd].unity_services.insert(service_name);
+}
+
+void MessageRouter::track_client_webrtc_session(int client_fd, const std::string& session_id)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  client_resources_[client_fd].webrtc_session_ids.insert(session_id);
+}
+
+void MessageRouter::untrack_client_webrtc_session(int client_fd, const std::string& session_id)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  auto it = client_resources_.find(client_fd);
+  if (it == client_resources_.end()) {
+    return;
+  }
+  it->second.webrtc_session_ids.erase(session_id);
+}
+
+void MessageRouter::untrack_client_subscriber(int client_fd, const std::string& topic)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  auto it = client_resources_.find(client_fd);
+  if (it == client_resources_.end()) {
+    return;
+  }
+  it->second.subscribed_topics.erase(topic);
+  RCLCPP_INFO(get_logger(), "Client %d subscribed topics=%zu after remove (%s)",
+              client_fd, it->second.subscribed_topics.size(), topic.c_str());
+}
+
+void MessageRouter::untrack_client_publisher(int client_fd, const std::string& topic)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  auto it = client_resources_.find(client_fd);
+  if (it == client_resources_.end()) {
+    return;
+  }
+  it->second.published_topics.erase(topic);
+}
+
+void MessageRouter::untrack_client_ros_service(int client_fd, const std::string& service_name)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  auto it = client_resources_.find(client_fd);
+  if (it == client_resources_.end()) {
+    return;
+  }
+  it->second.ros_services.erase(service_name);
+}
+
+void MessageRouter::untrack_client_unity_service(int client_fd, const std::string& service_name)
+{
+  std::lock_guard<std::mutex> lock(client_resources_mutex_);
+  auto it = client_resources_.find(client_fd);
+  if (it == client_resources_.end()) {
+    return;
+  }
+  it->second.unity_services.erase(service_name);
+}
+
+void MessageRouter::on_client_disconnected(int client_fd)
+{
+  ClientResourceState resources;
+  bool had_resources = false;
+  {
+    std::lock_guard<std::mutex> lock(client_resources_mutex_);
+    auto it = client_resources_.find(client_fd);
+    if (it != client_resources_.end()) {
+      resources = it->second;
+      client_resources_.erase(it);
+      had_resources = true;
+    }
+  }
+
+  size_t removed_subscriber_topics = topic_manager_->unregister_all_client_subscribers(client_fd);
+  size_t removed_publisher_owners = topic_manager_->unregister_all_client_publishers(client_fd);
+
+  if (control_lease_manager_) {
+    control_lease_manager_->on_client_disconnected(client_fd);
+  }
+
+  size_t removed_ros_services = 0;
+  for (const auto& service_name : resources.ros_services) {
+    if (service_manager_->unregister_ros_service(service_name)) {
+      removed_ros_services++;
+    }
+  }
+
+  size_t removed_unity_services = 0;
+  for (const auto& service_name : resources.unity_services) {
+    if (service_manager_->unregister_unity_service(service_name)) {
+      removed_unity_services++;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(service_response_mutex_);
+    for (auto it = service_response_client_.begin(); it != service_response_client_.end(); ) {
+      if (it->second == client_fd) {
+        it = service_response_client_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+#ifdef ENABLE_WEBRTC
+  for (const auto& session_id : resources.webrtc_session_ids) {
+    remove_webrtc_session(session_id);
+  }
+#endif
+
+  if (had_resources || removed_subscriber_topics > 0) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Client %d cleanup: subscribers=%zu publishers=%zu ros_services=%zu unity_services=%zu webrtc_sessions=%zu",
+      client_fd,
+      removed_subscriber_topics,
+      removed_publisher_owners,
+      removed_ros_services,
+      removed_unity_services,
+      resources.webrtc_session_ids.size());
+  }
+}
+
 #ifdef ENABLE_WEBRTC
 void MessageRouter::publish_webrtc_signal(const nlohmann::json& payload)
 {
@@ -620,9 +902,24 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
 
   auto session = std::make_shared<WebRtcSession>();
   session->session_id = session_id;
+  if (payload.contains("client_fd")) {
+    try {
+      session->owner_client_fd = payload.at("client_fd").is_number_integer()
+        ? payload.at("client_fd").get<int>()
+        : std::stoi(payload.at("client_fd").get<std::string>());
+    } catch (...) {
+      session->owner_client_fd = -1;
+    }
+  }
   session->stream_topic = stream_topic;
   session->image_type = image_type;
-  session->last_activity = std::chrono::steady_clock::now();
+  session->session_start_time = std::chrono::steady_clock::now();
+  session->last_activity = session->session_start_time;
+  session->last_incoming_frame_time = session->last_activity;
+  session->last_push_time = session->last_activity;
+  session->last_rtp_progress_time = session->last_activity;
+  session->last_keyframe_request_time = session->last_activity;
+  session->last_telemetry_log_time = session->last_activity;
   session->manager = std::make_shared<WebRTCManager>();
 
   WebRTCManager::Settings settings;
@@ -743,6 +1040,9 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
     std::lock_guard<std::mutex> lock(webrtc_sessions_mutex_);
     webrtc_sessions_[session_id] = session;
   }
+  if (session->owner_client_fd >= 0) {
+    track_client_webrtc_session(session->owner_client_fd, session_id);
+  }
 
   if (!session->manager->handle_offer(sdp)) {
     RCLCPP_ERROR(
@@ -859,8 +1159,11 @@ void MessageRouter::enqueue_webrtc_raw_frame(
     std::lock_guard<std::mutex> lock(session->frame_queue_mutex);
     if (session->frame_queue.size() >= webrtc_max_queue_size_) {
       session->frame_queue.pop_front();
+      session->dropped_queue_frames++;
     }
     session->frame_queue.push_back(msg);
+    session->incoming_frames++;
+    session->last_incoming_frame_time = std::chrono::steady_clock::now();
   }
   session->last_activity = std::chrono::steady_clock::now();
   session->frame_queue_cv.notify_one();
@@ -877,8 +1180,11 @@ void MessageRouter::enqueue_webrtc_compressed_frame(
     std::lock_guard<std::mutex> lock(session->frame_queue_mutex);
     if (session->frame_queue.size() >= webrtc_max_queue_size_) {
       session->frame_queue.pop_front();
+      session->dropped_queue_frames++;
     }
     session->frame_queue.push_back(msg);
+    session->incoming_frames++;
+    session->last_incoming_frame_time = std::chrono::steady_clock::now();
   }
   session->last_activity = std::chrono::steady_clock::now();
   session->frame_queue_cv.notify_one();
@@ -886,6 +1192,12 @@ void MessageRouter::enqueue_webrtc_compressed_frame(
 
 void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& session)
 {
+  const auto kWarmupWindow = std::chrono::milliseconds(2000);
+  const auto kIncomingActivityWindow = std::chrono::milliseconds(2500);
+  const auto kRtpStallThreshold = std::chrono::milliseconds(2500);
+  const auto kKeyframeCooldown = std::chrono::milliseconds(3000);
+  const auto kTelemetryLogInterval = std::chrono::seconds(5);
+
   while (session && session->running) {
     FrameVariant frame_variant;
     {
@@ -905,6 +1217,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
     }
 
     std::vector<uint8_t> rgb_data;
+    bool pushed_frame = false;
     if (std::holds_alternative<sensor_msgs::msg::Image::SharedPtr>(frame_variant)) {
       auto raw = std::get<sensor_msgs::msg::Image::SharedPtr>(frame_variant);
       if (!raw) {
@@ -912,6 +1225,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
       }
       if (convert_to_rgb(*raw, rgb_data, session->warned_unsupported_encoding)) {
         session->manager->push_frame(rgb_data, static_cast<int>(raw->width), static_cast<int>(raw->height), "RGB");
+        pushed_frame = true;
       }
     } else {
       auto compressed = std::get<sensor_msgs::msg::CompressedImage::SharedPtr>(frame_variant);
@@ -922,9 +1236,98 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
       int height = 0;
       if (decompress_to_rgb(*compressed, rgb_data, width, height, session->warned_unsupported_encoding)) {
         session->manager->push_frame(rgb_data, width, height, "RGB");
+        pushed_frame = true;
       }
     }
-    session->last_activity = std::chrono::steady_clock::now();
+
+    const auto now = std::chrono::steady_clock::now();
+    bool should_request_keyframe = false;
+    bool should_log_telemetry = false;
+    uint64_t incoming_frames = 0;
+    uint64_t pushed_frames = 0;
+    uint64_t dropped_frames = 0;
+    uint64_t rtp_packets = 0;
+    uint64_t rtp_bytes = 0;
+    bool peer_connected = false;
+    bool track_open = false;
+
+    {
+      std::lock_guard<std::mutex> lock(session->frame_queue_mutex);
+      if (pushed_frame) {
+        session->pushed_frames++;
+        session->last_push_time = now;
+      }
+
+      if (session->manager) {
+        rtp_packets = session->manager->get_rtp_packets_sent();
+        rtp_bytes = session->manager->get_rtp_bytes_sent();
+        peer_connected = session->manager->is_peer_connected();
+        track_open = session->manager->is_video_track_open();
+      }
+
+      if (rtp_packets > session->last_seen_rtp_packets) {
+        session->last_seen_rtp_packets = rtp_packets;
+        session->last_rtp_progress_time = now;
+      }
+
+      const bool warmupElapsed =
+        session->session_start_time.time_since_epoch().count() > 0 &&
+        (now - session->session_start_time) > kWarmupWindow;
+      const bool has_recent_incoming =
+        session->last_incoming_frame_time.time_since_epoch().count() > 0 &&
+        (now - session->last_incoming_frame_time) < kIncomingActivityWindow;
+      const bool rtp_stalled =
+        warmupElapsed &&
+        peer_connected &&
+        track_open &&
+        has_recent_incoming &&
+        session->last_rtp_progress_time.time_since_epoch().count() > 0 &&
+        (now - session->last_rtp_progress_time) > kRtpStallThreshold;
+      if (rtp_stalled &&
+          (now - session->last_keyframe_request_time) > kKeyframeCooldown) {
+        session->last_keyframe_request_time = now;
+        should_request_keyframe = true;
+      }
+
+      if ((now - session->last_telemetry_log_time) > kTelemetryLogInterval) {
+        session->last_telemetry_log_time = now;
+        should_log_telemetry = true;
+      }
+
+      incoming_frames = session->incoming_frames;
+      pushed_frames = session->pushed_frames;
+      dropped_frames = session->dropped_queue_frames;
+    }
+
+    if (should_request_keyframe && session->manager) {
+      session->manager->request_keyframe();
+      RCLCPP_WARN(
+        get_logger(),
+        "WebRTC session '%s' stall detected (incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu). Requested keyframe (cooldown=%ldms, stall_threshold=%ldms).",
+        session->session_id.c_str(),
+        static_cast<unsigned long long>(incoming_frames),
+        static_cast<unsigned long long>(pushed_frames),
+        static_cast<unsigned long long>(dropped_frames),
+        static_cast<unsigned long long>(rtp_packets),
+        static_cast<long>(kKeyframeCooldown.count()),
+        static_cast<long>(kRtpStallThreshold.count()));
+    }
+
+    if (should_log_telemetry) {
+      RCLCPP_INFO(
+        get_logger(),
+        "WebRTC session '%s' telemetry: incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu rtp_bytes=%llu peer=%s track=%s",
+        session->session_id.c_str(),
+        static_cast<unsigned long long>(incoming_frames),
+        static_cast<unsigned long long>(pushed_frames),
+        static_cast<unsigned long long>(dropped_frames),
+        static_cast<unsigned long long>(rtp_packets),
+        static_cast<unsigned long long>(rtp_bytes),
+        peer_connected ? "connected" : "disconnected",
+        track_open ? "open" : "closed");
+    }
+
+    session->last_activity = now;
   }
 }
 
@@ -1046,6 +1449,31 @@ void MessageRouter::remove_webrtc_session(const std::string& session_id)
   }
 
   if (session) {
+    if (session->owner_client_fd >= 0) {
+      untrack_client_webrtc_session(session->owner_client_fd, session_id);
+    }
+    uint64_t incoming_frames = 0;
+    uint64_t pushed_frames = 0;
+    uint64_t dropped_frames = 0;
+    {
+      std::lock_guard<std::mutex> lock(session->frame_queue_mutex);
+      incoming_frames = session->incoming_frames;
+      pushed_frames = session->pushed_frames;
+      dropped_frames = session->dropped_queue_frames;
+    }
+    uint64_t rtp_packets = session->manager ? session->manager->get_rtp_packets_sent() : 0;
+    uint64_t rtp_bytes = session->manager ? session->manager->get_rtp_bytes_sent() : 0;
+    RCLCPP_INFO(
+      get_logger(),
+      "Stopping WebRTC session '%s' topic='%s' telemetry: incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu rtp_bytes=%llu",
+      session->session_id.c_str(),
+      session->stream_topic.c_str(),
+      static_cast<unsigned long long>(incoming_frames),
+      static_cast<unsigned long long>(pushed_frames),
+      static_cast<unsigned long long>(dropped_frames),
+      static_cast<unsigned long long>(rtp_packets),
+      static_cast<unsigned long long>(rtp_bytes));
+
     session->running = false;
     session->frame_queue_cv.notify_all();
     if (session->worker_thread.joinable()) {

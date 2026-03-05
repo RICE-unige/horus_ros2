@@ -87,6 +87,7 @@ set(BRIDGE_SOURCES
   src/protocol_handler.cpp
   src/connection_manager.cpp
   src/message_router.cpp
+  src/control_lease_manager.cpp
   src/topic_manager.cpp
   src/service_manager.cpp
 )

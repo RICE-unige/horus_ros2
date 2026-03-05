@@ -5,17 +5,12 @@
 ![C++](https://img.shields.io/badge/C%2B%2B-17-00599C)
 [![License](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
 
-<div align="center">
+<p align="center">
+  <img src="docs/horus_logo_black.svg#gh-light-mode-only" alt="HORUS logo" height="90">
+  <img src="docs/horus_logo_white.svg#gh-dark-mode-only" alt="HORUS logo" height="90">
+</p>
 
-```text
-██╗  ██╗ ██████╗ ██████╗ ██╗   ██╗███████╗
-██║  ██║██╔═══██╗██╔══██╗██║   ██║██╔════╝
-███████║██║   ██║██████╔╝██║   ██║███████╗
-██╔══██║██║   ██║██╔══██╗██║   ██║╚════██║
-██║  ██║╚██████╔╝██║  ██║╚██████╔╝███████║
-╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝
-```
-</div>
+<p align="center"><em>Holistic Operational Reality for Unified Systems</em></p>
 
 > [!TIP]
 > ROS 2 infrastructure layer for the HORUS research stack (SDK <-> bridge <-> MR app).
@@ -29,6 +24,8 @@ This repo focuses on runtime infrastructure for mixed-reality robot operations:
 - ROS 2 topic/service integration,
 - Unity-compatible TCP bridge behavior,
 - optional WebRTC camera signaling/media pipeline,
+- multi-client Unity bridge fanout/cleanup for multi-operator sessions,
+- bridge-authoritative per-robot control lease arbitration and command-topic enforcement,
 - backend package boundaries for scalability experiments.
 
 It does not own SDK payload authoring (`horus_sdk`) or Unity scene/runtime UX (`horus`).
@@ -37,7 +34,7 @@ It does not own SDK payload authoring (`horus_sdk`) or Unity scene/runtime UX (`
 
 | Package | Responsibility |
 |---|---|
-| `horus_unity_bridge` | TCP/WebRTC bridge runtime between ROS 2 and Unity client |
+| `horus_unity_bridge` | TCP/WebRTC bridge runtime between ROS 2 and Unity client, including multi-client fanout and control-lease enforcement |
 | `horus_backend` | Backend registration/state management logic |
 | `horus_interfaces` | ROS 2 interfaces used by HORUS components |
 | `horus_unity_bridge_test` | Test utilities and simulation helpers |
@@ -68,8 +65,21 @@ Recommended waypoint task topics:
 - `/<robot>/waypoint_path` (`nav_msgs/Path`)
 - `/<robot>/waypoint_status` (`std_msgs/String`, JSON status payload)
 
-Recommended 3D map topic:
-- `/map_3d` (`sensor_msgs/PointCloud2`)
+Recommended drone task command topics:
+- `/<robot>/takeoff` (`std_msgs/Empty`)
+- `/<robot>/land` (`std_msgs/Empty`)
+
+Recommended navigation visualization topics:
+- `/<robot>/global_path` (`nav_msgs/Path`)
+- `/<robot>/local_path` (`nav_msgs/Path`)
+- `/<robot>/odom` (`nav_msgs/Odometry`)
+- `/<robot>/collision_risk` (`std_msgs/String`, JSON payload)
+
+Recommended robot-description transport topics:
+- `/horus/robot_description/request` (`std_msgs/String`, JSON request envelope)
+- `/horus/robot_description/chunk_begin` (`std_msgs/String`, JSON begin envelope)
+- `/horus/robot_description/chunk_item` (`std_msgs/String`, JSON chunk envelope)
+- `/horus/robot_description/chunk_end` (`std_msgs/String`, JSON end envelope)
 
 Robot-task backend baseline:
 - `horus_backend` includes an optional Nav2 action adapter path for `goal_pose` / `goal_cancel` / `goal_status`.
@@ -115,16 +125,31 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 ### Signaling and QoS
 - WebRTC signaling uses reliable/volatile semantics for timely negotiation.
 - Bridge emits structured diagnostics for negotiation and media startup.
+- Bridge recovery policy now uses paced keyframe requests (warmup + cooldown gates) to avoid recovery flapping under load.
 
 ### Diagnostics to Monitor
 - connection lifecycle events,
 - negotiated MID/H264 payload selection,
 - first outbound RTP header fields,
-- periodic RTP counters.
+- periodic RTP counters,
+- per-session stall telemetry (incoming frames, pushed frames, dropped queue frames, last push progress),
+- keyframe request reasons and cooldown behavior,
+- multi-operator bridge lease events (`control_lease_state`) and denied-command diagnostics when control topics are protected.
 
 ### Integration Boundary
 - `horus_sdk` should treat this repo as infrastructure service, not payload author.
 - `horus` should consume this bridge as transport/runtime endpoint.
+
+### Multi-Operator Bridge Baseline
+Current multi-operator infrastructure now integrated in `main` includes:
+- multi-client subscriber fanout (prevents last-subscriber-wins behavior),
+- client disconnect cleanup for subscriptions/publishers/services/session state,
+- per-robot control lease arbitration (`/horus/multi_operator/control_lease_request`),
+- inactive-holder acquire preemption (if holder has no active `panel_open`/`task_active`/`teleop_active`, acquire is reassigned immediately),
+- protected command-topic enforcement with lease-denied events,
+- multi-client publisher ownership refcounting (prevents one client disconnect from tearing down shared publishers).
+
+Lease state snapshots are published on `/horus/multi_operator/control_lease_state` for MR clients (and optional SDK observability).
 
 ## :test_tube: Validation Workflow
 
@@ -132,16 +157,27 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 # 1) Start bridge
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 
-# 2) In SDK repo, run fake publishers + registration demo
-python3 python/examples/fake_tf_publisher.py --robot-count 4 --publish-occupancy-grid
-python3 python/examples/sdk_registration_demo.py --robot-count 4 --with-occupancy-grid --workspace-scale 0.1
+# 2) In SDK repo, run unified fake runtime + typical registration demo
+python3 python/examples/fake_tf_ops_suite.py --robot-count 10 --rate 30 --static-camera --publish-compressed-images --task-path-publish-rate 5 --publish-collision-risk --collision-threshold-m 1.2
+python3 python/examples/sdk_typical_ops_demo.py --robot-count 10 --workspace-scale 0.1
+
+# 3) Optional robot-description validation (collision + joints)
+python3 python/examples/tools/fetch_robot_description_assets.py
+python3 python/examples/fake_tf_robot_description_suite.py
+python3 python/examples/sdk_robot_description_demo.py --workspace-scale 0.1 --collision-opaque
+
+# 4) Optional drone flow validation (takeoff/land + 3D go-to/waypoint/draw-path in MR)
+python3 python/examples/fake_tf_drone_ops_suite.py --robot-count 3 --robot-names drone_1,drone_2,drone_3 --min-altitude 0.0 --max-altitude 25.0 --takeoff-altitude 1.2
+python3 python/examples/sdk_typical_ops_demo.py --robot-names drone_1,drone_2,drone_3 --teleop-profile aerial --go-to-min-altitude 0.0 --go-to-max-altitude 25.0 --workspace-scale 0.1
 ```
 
 Expected outcomes:
 - bridge accepts Unity client connection,
 - registration/ack/heartbeat channels remain stable,
 - WebRTC sessions negotiate and stream when requested,
-- occupancy `/map` data is available for MR after workspace acceptance.
+- robots remain static until teleop/task command topics are used,
+- active teleop commands can preempt active go-to-point/waypoint execution,
+- aerial commands (`takeoff`/`land`) pass through bridge without extra protocol wiring.
 
 ## :warning: Known Constraints
 
@@ -156,10 +192,12 @@ Expected outcomes:
 
 | Stream | Status | Current Baseline | Next Milestone |
 |---|---|---|---|
-| Bridge Runtime Stability | :white_check_mark: Active baseline | Stable TCP bridge path, WebRTC signaling/session flow merged in `main`, and negotiation diagnostics available (MID/PT/RTP counters). | Add long-duration soak tests and explicit reconnection stress scenarios. |
-| WebRTC Media Reliability | :large_orange_diamond: In progress | White-screen negotiation mismatch path was addressed in bridge/runtime flow. | Harden edge-case handling for network topology variance and high robot counts. |
+| Bridge Runtime Stability | :white_check_mark: Active baseline | Stable TCP bridge path, WebRTC signaling/session flow, multi-client subscriber fanout, and publisher ownership refcounting are integrated in `main`, with negotiation diagnostics available (MID/PT/RTP counters). | Add long-duration soak tests and explicit reconnection stress scenarios. |
+| WebRTC Media Reliability | :large_orange_diamond: In progress | Negotiation mismatch fixes plus stall telemetry and paced keyframe recovery are integrated. | Harden edge-case handling for network topology variance and high robot counts. |
 | QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
-| Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation and richer task-status observability. |
+| Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined, aerial `takeoff`/`land` command topics are validated in fake runtime workflows, and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation (ground + aerial) and richer task-status observability. |
+| Robot Description Transport | :large_orange_diamond: In progress | Bridge pass-through for request/chunk topics is active and used by SDK/MR Robot Description V1 flow. | Add targeted transport diagnostics and replay stress tests for chunked description traffic under multi-robot load. |
+| Multi-Operator Control Arbitration | :large_orange_diamond: In progress | Bridge-side per-robot control lease arbiter, protected command-topic enforcement, and lease state snapshots are integrated. | Harden lease telemetry/observability, tune TTL policies, and extend regression coverage for repeated join/rejoin contention scenarios. |
 | Integration Automation | :white_circle: Planned | Validation is currently mostly manual (SDK fake publishers + Unity runtime checks). | Add CI-driven integration matrix across SDK, bridge, and Unity harness scenarios. |
 | Observability and Metrics | :white_circle: Planned | Logs provide actionable diagnostics during runtime issues. | Export machine-readable metrics for dashboards and regression tracking. |
 | Benchmarking and Reproducibility | :white_circle: Planned | Ad-hoc profiling exists across development cycles. | Publish repeatable throughput/latency benchmark suite for research reporting. |

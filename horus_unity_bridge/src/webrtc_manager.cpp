@@ -1020,4 +1020,24 @@ void WebRTCManager::request_keyframe()
   }
 }
 
+uint64_t WebRTCManager::get_rtp_packets_sent() const
+{
+  return rtp_packets_sent_.load();
+}
+
+uint64_t WebRTCManager::get_rtp_bytes_sent() const
+{
+  return rtp_bytes_sent_.load();
+}
+
+bool WebRTCManager::is_peer_connected() const
+{
+  return peer_connected_.load();
+}
+
+bool WebRTCManager::is_video_track_open() const
+{
+  return video_track_open_.load();
+}
+
 } // namespace horus_unity_bridge
