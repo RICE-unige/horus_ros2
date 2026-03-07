@@ -96,6 +96,13 @@ Robot-task backend baseline:
 - `horus_backend` includes an optional Nav2 action adapter path for `goal_pose` / `goal_cancel` / `goal_status`.
 - Adapter auto-enables when both `nav2_msgs` and `rclcpp_action` are available at build time.
 - When Nav2 dependencies are missing, backend still builds and runs with adapter disabled.
+- SDK/MR can now run a flat single-robot workflow without ROS namespace prefixes; bridge routing does not change for this mode when explicit topics are registered.
+- `horus_backend` also accepts explicit metadata-driven Nav2 topics for flat-root robots:
+  - `horus.backend.nav2_action_topic`
+  - `horus.backend.goal_topic`
+  - `horus.backend.cancel_topic`
+  - `horus.backend.status_topic`
+- If these metadata keys are absent, backend behavior remains legacy-prefixed (`/<robot>/...`).
 
 ## :white_check_mark: Prerequisites
 
@@ -199,7 +206,7 @@ Expected outcomes:
 ## :world_map: Roadmap
 
 > [!NOTE]
-> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX or SDK dashboard behavior. Current baseline aligns with marker-only mesh transport stability in the integrated SDK/MR workflow.
+> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX or SDK dashboard behavior. Current baseline aligns with marker-only mesh transport stability in the integrated SDK/MR workflow and explicit flat single-robot backend-topic compatibility.
 
 | Stream | Status | Current Baseline | Next Milestone |
 |---|---|---|---|
@@ -207,6 +214,7 @@ Expected outcomes:
 | WebRTC Media Reliability | :large_orange_diamond: In progress | Negotiation mismatch fixes plus stall telemetry and paced keyframe recovery are integrated. | Harden edge-case handling for network topology variance and high robot counts. |
 | QoS and Session Policy | :large_orange_diamond: In progress | Reliable/volatile signaling defaults in place with current compatibility behavior. | Add topic/session policy profiles for workload-specific tuning. |
 | Robot Task Routing | :large_orange_diamond: In progress | Go-to-point/waypoint topic guidance is defined, aerial `takeoff`/`land` command topics are validated in fake runtime workflows, and optional Nav2 adapter flow is integrated with build-time dependency gating. | Add multi-robot task execution stress validation (ground + aerial) and richer task-status observability. |
+| Flat Single-Robot Backend Compatibility | :large_orange_diamond: In progress | `horus_backend` can now consume explicit metadata-driven Nav2 topics for single robots that publish flat root topics instead of `/<robot>/...`; bridge-side topic routing remains unchanged when SDK registration already provides explicit topic names. | Add targeted validation docs/tests for mixed prefixed + flat deployments and backend diagnostics for mismatched metadata. |
 | Robot Description Transport | :large_orange_diamond: In progress | Bridge pass-through for request/chunk topics is active and used by SDK/MR Robot Description V1 flow. | Add targeted transport diagnostics and replay stress tests for chunked description traffic under multi-robot load. |
 | 3D Map Transport Compatibility | :large_orange_diamond: In progress | Marker-based global 3D map topic guidance is aligned across stack (`/map_3d`, `/map_3d_mesh`, `/map_3d_octomap_mesh`) with snapshot-first conversion defaults and replay-window map republish behavior handled in SDK tooling. | Add explicit bridge-level diagnostics and stress tests focused on 3D map traffic during multi-operator join/rejoin windows. |
 | Multi-Operator Control Arbitration | :large_orange_diamond: In progress | Bridge-side per-robot control lease arbiter, protected command-topic enforcement, and lease state snapshots are integrated. | Harden lease telemetry/observability, tune TTL policies, and extend regression coverage for repeated join/rejoin contention scenarios. |
