@@ -12,14 +12,71 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
-#include <queue>
+#include <list>
 #include <condition_variable>
+#include <vector>
 
 namespace horus_unity_bridge
 {
 
 // Forward declaration
 class MessageRouter;
+
+enum class OutboundMessagePolicy {
+  Auto,
+  Strict,
+  Replaceable
+};
+
+struct OutboundMessage
+{
+  std::string destination;
+  std::vector<uint8_t> serialized;
+  size_t offset = 0;
+  bool strict = true;
+  bool replaceable = false;
+
+  const uint8_t* data() const { return serialized.data() + offset; }
+  size_t remaining_size() const { return serialized.size() - offset; }
+};
+
+class OutboundMessageQueue
+{
+public:
+  struct EnqueueResult {
+    bool accepted = false;
+    bool should_disconnect = false;
+    bool replaced_existing = false;
+    bool dropped_new_message = false;
+    bool evicted_old_message = false;
+  };
+
+  EnqueueResult enqueue(std::string destination,
+                        std::vector<uint8_t> serialized,
+                        OutboundMessagePolicy policy,
+                        size_t message_limit);
+
+  bool empty() const { return queue_.empty(); }
+  size_t size() const { return queue_.size(); }
+
+  OutboundMessage* front();
+  const OutboundMessage* front() const;
+  bool front_is_replaceable() const;
+  void mark_front_in_flight();
+  bool advance_front(size_t bytes_sent);
+
+private:
+  using QueueList = std::list<OutboundMessage>;
+  using QueueIterator = QueueList::iterator;
+
+  QueueIterator find_oldest_replaceable_evictable();
+  void erase_iterator(QueueIterator it);
+  static bool is_replaceable_policy(OutboundMessagePolicy policy);
+  static bool is_strict_policy(OutboundMessagePolicy policy);
+
+  QueueList queue_;
+  std::unordered_map<std::string, QueueIterator> replaceable_by_destination_;
+};
 
 /**
  * @brief Represents a single client connection
@@ -32,10 +89,10 @@ struct ClientConnection
   std::unique_ptr<ProtocolHandler> protocol;
   
   // Send queue for this connection
-  std::queue<std::vector<uint8_t>> send_queue;
+  OutboundMessageQueue send_queue;
   std::mutex queue_mutex;
   
-  bool connected;
+  std::atomic<bool> connected;
   
   ClientConnection(int fd, const std::string& ip, uint16_t port)
     : socket_fd(fd), client_ip(ip), client_port(port),
@@ -64,6 +121,7 @@ public:
     uint16_t port = 10000;
     int max_connections = 10;
     size_t socket_buffer_size = 65536;
+    size_t message_queue_size = 1000;
     bool tcp_nodelay = true;
     int connection_timeout_ms = 5000;
   };
@@ -86,14 +144,16 @@ public:
   /**
    * @brief Send a message to a specific client
    */
-  bool send_to_client(int client_fd, const std::string& destination, 
-                      const std::vector<uint8_t>& payload);
+  bool send_to_client(int client_fd, const std::string& destination,
+                      const std::vector<uint8_t>& payload,
+                      OutboundMessagePolicy policy = OutboundMessagePolicy::Auto);
   
   /**
    * @brief Broadcast a message to all connected clients
    */
-  void broadcast_message(const std::string& destination, 
-                        const std::vector<uint8_t>& payload);
+  void broadcast_message(const std::string& destination,
+                        const std::vector<uint8_t>& payload,
+                        OutboundMessagePolicy policy = OutboundMessagePolicy::Auto);
   
   /**
    * @brief Set callback for incoming messages
@@ -142,7 +202,7 @@ private:
   std::atomic<bool> running_;
   
   // Client connections
-  std::unordered_map<int, std::unique_ptr<ClientConnection>> connections_;
+  std::unordered_map<int, std::shared_ptr<ClientConnection>> connections_;
   mutable std::mutex connections_mutex_;
   
   // Worker threads
@@ -168,12 +228,15 @@ private:
   void handle_client_read(int client_fd);
   void handle_client_write(int client_fd);
   void disconnect_client(int client_fd);
+  std::shared_ptr<ClientConnection> find_connection(int client_fd) const;
   
   bool add_to_epoll(int fd, uint32_t events);
   bool modify_epoll(int fd, uint32_t events);
   bool remove_from_epoll(int fd);
   
   void configure_socket(int socket_fd);
+  static OutboundMessagePolicy resolve_policy(const std::string& destination,
+                                             OutboundMessagePolicy requested_policy);
   
   // Message processing
   void process_message(int client_fd, const ProtocolMessage& message);

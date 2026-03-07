@@ -9,11 +9,157 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 
 namespace horus_unity_bridge
 {
+
+OutboundMessageQueue::EnqueueResult OutboundMessageQueue::enqueue(
+  std::string destination,
+  std::vector<uint8_t> serialized,
+  OutboundMessagePolicy policy,
+  size_t message_limit)
+{
+  EnqueueResult result;
+  const size_t effective_limit = std::max<size_t>(1, message_limit);
+  const bool strict = is_strict_policy(policy);
+  const bool replaceable = is_replaceable_policy(policy);
+
+  if (replaceable) {
+    auto existing_it = replaceable_by_destination_.find(destination);
+    if (existing_it != replaceable_by_destination_.end()) {
+      existing_it->second->serialized = std::move(serialized);
+      existing_it->second->offset = 0;
+      result.accepted = true;
+      result.replaced_existing = true;
+      return result;
+    }
+
+    while (queue_.size() >= effective_limit) {
+      auto evict_it = find_oldest_replaceable_evictable();
+      if (evict_it == queue_.end()) {
+        result.accepted = false;
+        result.dropped_new_message = true;
+        return result;
+      }
+      erase_iterator(evict_it);
+      result.evicted_old_message = true;
+    }
+  } else if (queue_.size() >= effective_limit) {
+    result.should_disconnect = true;
+    return result;
+  }
+
+  queue_.push_back(OutboundMessage{
+    std::move(destination),
+    std::move(serialized),
+    0,
+    strict,
+    replaceable
+  });
+  auto inserted_it = std::prev(queue_.end());
+  if (replaceable) {
+    replaceable_by_destination_[inserted_it->destination] = inserted_it;
+  }
+
+  result.accepted = true;
+  return result;
+}
+
+OutboundMessage* OutboundMessageQueue::front()
+{
+  if (queue_.empty()) {
+    return nullptr;
+  }
+
+  return &queue_.front();
+}
+
+const OutboundMessage* OutboundMessageQueue::front() const
+{
+  if (queue_.empty()) {
+    return nullptr;
+  }
+
+  return &queue_.front();
+}
+
+bool OutboundMessageQueue::front_is_replaceable() const
+{
+  return !queue_.empty() && queue_.front().replaceable;
+}
+
+void OutboundMessageQueue::mark_front_in_flight()
+{
+  if (queue_.empty()) {
+    return;
+  }
+
+  auto it = queue_.begin();
+  if (!it->replaceable) {
+    return;
+  }
+
+  auto replaceable_it = replaceable_by_destination_.find(it->destination);
+  if (replaceable_it != replaceable_by_destination_.end() && replaceable_it->second == it) {
+    replaceable_by_destination_.erase(replaceable_it);
+  }
+  it->replaceable = false;
+}
+
+bool OutboundMessageQueue::advance_front(size_t bytes_sent)
+{
+  if (queue_.empty()) {
+    return false;
+  }
+
+  auto it = queue_.begin();
+  it->offset += bytes_sent;
+  if (it->offset < it->serialized.size()) {
+    return false;
+  }
+
+  erase_iterator(it);
+  return true;
+}
+
+OutboundMessageQueue::QueueIterator OutboundMessageQueue::find_oldest_replaceable_evictable()
+{
+  return std::find_if(
+    queue_.begin(),
+    queue_.end(),
+    [](const OutboundMessage& message) {
+      return message.replaceable && message.offset == 0;
+    });
+}
+
+void OutboundMessageQueue::erase_iterator(QueueIterator it)
+{
+  if (it == queue_.end()) {
+    return;
+  }
+
+  if (it->replaceable) {
+    auto replaceable_it = replaceable_by_destination_.find(it->destination);
+    if (replaceable_it != replaceable_by_destination_.end() && replaceable_it->second == it) {
+      replaceable_by_destination_.erase(replaceable_it);
+    }
+  }
+
+  queue_.erase(it);
+}
+
+bool OutboundMessageQueue::is_replaceable_policy(OutboundMessagePolicy policy)
+{
+  return policy == OutboundMessagePolicy::Replaceable;
+}
+
+bool OutboundMessageQueue::is_strict_policy(OutboundMessagePolicy policy)
+{
+  return policy == OutboundMessagePolicy::Strict;
+}
 
 ConnectionManager::ConnectionManager(const Config& config)
   : config_(config),
@@ -208,7 +354,7 @@ bool ConnectionManager::accept_connection()
   uint16_t port = ntohs(client_addr.sin_port);
   
   // Create connection object
-  auto connection = std::make_unique<ClientConnection>(client_fd, ip_str, port);
+  auto connection = std::make_shared<ClientConnection>(client_fd, ip_str, port);
   
   {
     std::lock_guard<std::mutex> lock(connections_mutex_);
@@ -220,7 +366,7 @@ bool ConnectionManager::accept_connection()
   }
   
   // Add to epoll for I/O
-  add_to_epoll(client_fd, EPOLLIN | EPOLLOUT | EPOLLET);
+  add_to_epoll(client_fd, EPOLLIN | EPOLLET);
   
   std::cout << "Client connected: " << ip_str << ":" << port << std::endl;
   
@@ -273,15 +419,9 @@ void ConnectionManager::io_loop()
 
 void ConnectionManager::handle_client_read(int client_fd)
 {
-  std::unique_ptr<ClientConnection>* conn_ptr = nullptr;
-  
-  {
-    std::lock_guard<std::mutex> lock(connections_mutex_);
-    auto it = connections_.find(client_fd);
-    if (it == connections_.end()) {
-      return;
-    }
-    conn_ptr = &(it->second);
+  auto conn = find_connection(client_fd);
+  if (!conn || !conn->connected.load()) {
+    return;
   }
   
   std::vector<uint8_t> buffer(config_.socket_buffer_size);
@@ -307,7 +447,7 @@ void ConnectionManager::handle_client_read(int client_fd)
     
     // Parse messages
     std::vector<ProtocolMessage> messages;
-    (*conn_ptr)->protocol->parse_messages(buffer.data(), bytes_read, messages);
+    conn->protocol->parse_messages(buffer.data(), bytes_read, messages);
     
     // Process each message
     for (const auto& msg : messages) {
@@ -326,59 +466,82 @@ void ConnectionManager::handle_client_read(int client_fd)
 
 void ConnectionManager::handle_client_write(int client_fd)
 {
-  std::unique_ptr<ClientConnection>* conn_ptr = nullptr;
-  
-  {
-    std::lock_guard<std::mutex> lock(connections_mutex_);
-    auto it = connections_.find(client_fd);
-    if (it == connections_.end()) {
-      return;
-    }
-    conn_ptr = &(it->second);
-  }
-  
-  std::lock_guard<std::mutex> queue_lock((*conn_ptr)->queue_mutex);
-  
-  while (!(*conn_ptr)->send_queue.empty()) {
-    auto& data = (*conn_ptr)->send_queue.front();
-    
-    ssize_t bytes_sent = send(client_fd, data.data(), data.size(), MSG_NOSIGNAL);
-    
-    if (bytes_sent < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // Socket buffer full, try again later
-        break;
-      }
-      // Error - disconnect
-      disconnect_client(client_fd);
-      return;
-    }
-    
-    if (bytes_sent < static_cast<ssize_t>(data.size())) {
-      // Partial send - keep remainder in queue
-      data.erase(data.begin(), data.begin() + bytes_sent);
-      break;
-    }
-    
-    // Full send - remove from queue
-    (*conn_ptr)->send_queue.pop();
-    
-    {
-      std::lock_guard<std::mutex> lock(stats_mutex_);
-      stats_.messages_sent++;
-      stats_.bytes_sent += bytes_sent;
-    }
+  auto conn = find_connection(client_fd);
+  if (!conn || !conn->connected.load()) {
+    return;
   }
 
-  // If queue is empty, remove EPOLLOUT to prevent busy loop
-  if ((*conn_ptr)->send_queue.empty()) {
+  bool should_disconnect = false;
+  bool queue_empty = false;
+
+  {
+    std::lock_guard<std::mutex> queue_lock(conn->queue_mutex);
+
+    while (conn->connected.load() && !conn->send_queue.empty()) {
+      auto* message = conn->send_queue.front();
+      if (message == nullptr) {
+        break;
+      }
+
+      ssize_t bytes_sent = send(
+        client_fd,
+        message->data(),
+        message->remaining_size(),
+        MSG_NOSIGNAL);
+
+      if (bytes_sent < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          break;
+        }
+        should_disconnect = true;
+        break;
+      }
+
+      if (bytes_sent == 0) {
+        should_disconnect = true;
+        break;
+      }
+
+      const size_t message_size = message->remaining_size();
+      if (bytes_sent > 0 &&
+          static_cast<size_t>(bytes_sent) < message_size &&
+          conn->send_queue.front_is_replaceable())
+      {
+        conn->send_queue.mark_front_in_flight();
+      }
+
+      const bool completed = conn->send_queue.advance_front(static_cast<size_t>(bytes_sent));
+      if (completed) {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.messages_sent++;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.bytes_sent += static_cast<uint64_t>(bytes_sent);
+      }
+
+      if (!completed) {
+        break;
+      }
+    }
+
+    queue_empty = conn->send_queue.empty();
+  }
+
+  if (should_disconnect) {
+    disconnect_client(client_fd);
+    return;
+  }
+
+  if (queue_empty && conn->connected.load()) {
     modify_epoll(client_fd, EPOLLIN | EPOLLET);
   }
 }
 
 void ConnectionManager::disconnect_client(int client_fd)
 {
-  std::unique_ptr<ClientConnection> conn;
+  std::shared_ptr<ClientConnection> conn;
   
   {
     std::lock_guard<std::mutex> lock(connections_mutex_);
@@ -386,7 +549,8 @@ void ConnectionManager::disconnect_client(int client_fd)
     if (it == connections_.end()) {
       return;
     }
-    conn = std::move(it->second);
+    conn = it->second;
+    conn->connected.store(false);
     connections_.erase(it);
     
     std::lock_guard<std::mutex> stats_lock(stats_mutex_);
@@ -465,37 +629,96 @@ bool ConnectionManager::remove_from_epoll(int fd)
 }
 
 bool ConnectionManager::send_to_client(int client_fd, const std::string& destination,
-                                      const std::vector<uint8_t>& payload)
+                                      const std::vector<uint8_t>& payload,
+                                      OutboundMessagePolicy policy)
 {
-  std::lock_guard<std::mutex> lock(connections_mutex_);
-  auto it = connections_.find(client_fd);
-  if (it == connections_.end()) {
+  auto conn = find_connection(client_fd);
+  if (!conn || !conn->connected.load()) {
     return false;
   }
   
-  auto serialized = it->second->protocol->serialize_message(destination, payload);
-  
-  std::lock_guard<std::mutex> queue_lock(it->second->queue_mutex);
-  it->second->send_queue.push(std::move(serialized));
-  
-  // Trigger write event
-  modify_epoll(client_fd, EPOLLIN | EPOLLOUT | EPOLLET);
-  
-  return true;
+  auto serialized = conn->protocol->serialize_message(destination, payload);
+  const auto resolved_policy = resolve_policy(destination, policy);
+
+  OutboundMessageQueue::EnqueueResult enqueue_result;
+  {
+    std::lock_guard<std::mutex> queue_lock(conn->queue_mutex);
+    if (!conn->connected.load()) {
+      return false;
+    }
+    enqueue_result = conn->send_queue.enqueue(
+      destination,
+      std::move(serialized),
+      resolved_policy,
+      config_.message_queue_size);
+  }
+
+  if (enqueue_result.should_disconnect) {
+    disconnect_client(client_fd);
+    return false;
+  }
+
+  if (!enqueue_result.accepted && enqueue_result.dropped_new_message) {
+    return true;
+  }
+
+  if (enqueue_result.accepted && conn->connected.load()) {
+    modify_epoll(client_fd, EPOLLIN | EPOLLOUT | EPOLLET);
+  }
+
+  return enqueue_result.accepted || enqueue_result.dropped_new_message;
 }
 
 void ConnectionManager::broadcast_message(const std::string& destination,
-                                         const std::vector<uint8_t>& payload)
+                                         const std::vector<uint8_t>& payload,
+                                         OutboundMessagePolicy policy)
 {
-  std::lock_guard<std::mutex> lock(connections_mutex_);
-  
-  for (auto& pair : connections_) {
-    auto serialized = pair.second->protocol->serialize_message(destination, payload);
-    
-    std::lock_guard<std::mutex> queue_lock(pair.second->queue_mutex);
-    pair.second->send_queue.push(std::move(serialized));
-    
-    modify_epoll(pair.first, EPOLLIN | EPOLLOUT | EPOLLET);
+  std::vector<std::pair<int, std::shared_ptr<ClientConnection>>> connections;
+  {
+    std::lock_guard<std::mutex> lock(connections_mutex_);
+    connections.reserve(connections_.size());
+    for (const auto& pair : connections_) {
+      connections.push_back(pair);
+    }
+  }
+
+  const auto resolved_policy = resolve_policy(destination, policy);
+  std::vector<int> clients_to_disconnect;
+
+  for (const auto& pair : connections) {
+    const int client_fd = pair.first;
+    const auto& conn = pair.second;
+    if (!conn || !conn->connected.load()) {
+      continue;
+    }
+
+    auto serialized = conn->protocol->serialize_message(destination, payload);
+
+    OutboundMessageQueue::EnqueueResult enqueue_result;
+    {
+      std::lock_guard<std::mutex> queue_lock(conn->queue_mutex);
+      if (!conn->connected.load()) {
+        continue;
+      }
+      enqueue_result = conn->send_queue.enqueue(
+        destination,
+        std::move(serialized),
+        resolved_policy,
+        config_.message_queue_size);
+    }
+
+    if (enqueue_result.should_disconnect) {
+      clients_to_disconnect.push_back(client_fd);
+      continue;
+    }
+
+    if (enqueue_result.accepted && conn->connected.load()) {
+      modify_epoll(client_fd, EPOLLIN | EPOLLOUT | EPOLLET);
+    }
+  }
+
+  for (int client_fd : clients_to_disconnect) {
+    disconnect_client(client_fd);
   }
 }
 
@@ -509,6 +732,28 @@ ConnectionManager::Statistics ConnectionManager::get_statistics() const
 {
   std::lock_guard<std::mutex> lock(stats_mutex_);
   return stats_;
+}
+
+std::shared_ptr<ClientConnection> ConnectionManager::find_connection(int client_fd) const
+{
+  std::lock_guard<std::mutex> lock(connections_mutex_);
+  auto it = connections_.find(client_fd);
+  if (it == connections_.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+OutboundMessagePolicy ConnectionManager::resolve_policy(
+  const std::string& destination,
+  OutboundMessagePolicy requested_policy)
+{
+  if (requested_policy != OutboundMessagePolicy::Auto) {
+    return requested_policy;
+  }
+
+  (void)destination;
+  return OutboundMessagePolicy::Strict;
 }
 
 } // namespace horus_unity_bridge

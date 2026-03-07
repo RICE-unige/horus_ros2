@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "connection_manager.hpp"
 #include "protocol_handler.hpp"
 #include "topic_manager.hpp"
 #include "service_manager.hpp"
@@ -48,10 +49,17 @@ namespace horus_unity_bridge
 class MessageRouter : public rclcpp::Node
 {
 public:
-  using SendCallback = std::function<bool(int client_fd, const std::string&, const std::vector<uint8_t>&)>;
-  using BroadcastCallback = std::function<void(const std::string&, const std::vector<uint8_t>&)>;
+  using SendCallback = std::function<bool(
+    int client_fd,
+    const std::string&,
+    const std::vector<uint8_t>&,
+    OutboundMessagePolicy)>;
+  using BroadcastCallback = std::function<void(
+    const std::string&,
+    const std::vector<uint8_t>&,
+    OutboundMessagePolicy)>;
   
-  explicit MessageRouter();
+  explicit MessageRouter(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
   ~MessageRouter();
   
   /**
@@ -106,6 +114,7 @@ public:
   };
   
   const Statistics& get_statistics() const { return stats_; }
+  void set_log_protocol_messages(bool enabled);
 
 private:
   // Managers
@@ -211,16 +220,25 @@ private:
   void handle_handshake_command(int client_fd);
   
   // Service request/response tracking
-  uint32_t pending_service_request_id_ = 0;
-  uint32_t pending_service_response_id_ = 0;
+  struct PendingServiceState {
+    uint32_t pending_request_id = 0;
+    uint32_t pending_response_id = 0;
+  };
+  std::unordered_map<int, PendingServiceState> pending_service_state_;
+  mutable std::mutex pending_service_state_mutex_;
   // Map service request IDs to client FDs for routing responses
   std::unordered_map<uint32_t, int> service_response_client_;
   std::mutex service_response_mutex_;
   std::mutex send_mutex_; // Protects socket writes for atomicity
+  bool log_protocol_messages_ = true;
   
   // Utility
   void send_error_to_client(int client_fd, const std::string& error_message);
   void send_log_to_client(int client_fd, const std::string& level, const std::string& message);
+  PendingServiceState consume_pending_service_state(int client_fd);
+  static OutboundMessagePolicy classify_subscription_policy(
+    const std::string& topic,
+    const std::string& message_type);
   
   bool parse_json_params(const std::string& json_str, 
                         std::unordered_map<std::string, std::string>& params);
@@ -246,6 +264,8 @@ private:
   void untrack_client_publisher(int client_fd, const std::string& topic);
   void untrack_client_ros_service(int client_fd, const std::string& service_name);
   void untrack_client_unity_service(int client_fd, const std::string& service_name);
+
+  friend class MessageRouterTestPeer;
 };
 
 } // namespace horus_unity_bridge

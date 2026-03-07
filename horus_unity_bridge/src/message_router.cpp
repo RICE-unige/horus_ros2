@@ -19,8 +19,33 @@
 namespace horus_unity_bridge
 {
 
-MessageRouter::MessageRouter()
-  : Node("horus_unity_bridge")
+namespace
+{
+
+std::string normalize_message_type_for_policy(std::string message_type)
+{
+  if (!message_type.empty() && message_type.back() == '\0') {
+    message_type.pop_back();
+  }
+
+  const std::string msg_marker = "/msg/";
+  const size_t msg_pos = message_type.find(msg_marker);
+  if (msg_pos != std::string::npos) {
+    message_type.erase(msg_pos, msg_marker.size() - 1);
+  }
+
+  std::transform(
+    message_type.begin(),
+    message_type.end(),
+    message_type.begin(),
+    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return message_type;
+}
+
+}  // namespace
+
+MessageRouter::MessageRouter(const rclcpp::NodeOptions& options)
+  : Node("horus_unity_bridge", options)
 {
   topic_manager_ = std::make_unique<TopicManager>(this);
   service_manager_ = std::make_unique<ServiceManager>(this);
@@ -99,10 +124,10 @@ MessageRouter::MessageRouter()
         response_cmd["srv_id"] = srv_id;
         std::string json_str = response_cmd.dump();
         std::vector<uint8_t> cmd_data(json_str.begin(), json_str.end());
-        send_callback_(target_fd, "__response", cmd_data);
+        send_callback_(target_fd, "__response", cmd_data, OutboundMessagePolicy::Strict);
         
         // Then send the serialized response payload
-        send_callback_(target_fd, "__response_payload", response);
+        send_callback_(target_fd, "__response_payload", response, OutboundMessagePolicy::Strict);
       }
     }
   );
@@ -132,11 +157,12 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage& message)
   if (message.is_system_command()) {
     return handle_system_command(client_fd, message);
   }
-  
+
+  const PendingServiceState pending_state = consume_pending_service_state(client_fd);
+
   // If a service request was announced, treat this payload as the request body
-  if (pending_service_request_id_ != 0) {
-    uint32_t srv_id = pending_service_request_id_;
-    pending_service_request_id_ = 0;
+  if (pending_state.pending_request_id != 0) {
+    uint32_t srv_id = pending_state.pending_request_id;
     bool ok = service_manager_->call_ros_service_async(srv_id, message.destination, message.payload);
     if (!ok) {
       stats_.routing_errors++;
@@ -146,9 +172,8 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage& message)
   }
   
   // If a service response was announced, treat this payload as Unity's response
-  if (pending_service_response_id_ != 0) {
-    uint32_t srv_id = pending_service_response_id_;
-    pending_service_response_id_ = 0;
+  if (pending_state.pending_response_id != 0) {
+    uint32_t srv_id = pending_state.pending_response_id;
     service_manager_->handle_unity_service_response(srv_id, message.payload);
     return true;
   }
@@ -263,10 +288,13 @@ void MessageRouter::handle_subscribe_command(int client_fd, const std::string& p
     topic,
     message_name,
     client_fd,
-    [this, client_fd](const std::string& topic, const std::vector<uint8_t>& data) {
+    [this, client_fd, policy = classify_subscription_policy(topic, message_name)](
+      const std::string& topic,
+      const std::vector<uint8_t>& data)
+    {
       // Forward to Unity client
       if (send_callback_) {
-        send_callback_(client_fd, topic, data);
+        send_callback_(client_fd, topic, data, policy);
       }
     }
   );
@@ -468,10 +496,10 @@ void MessageRouter::handle_unity_service_command(int client_fd, const std::strin
       req_cmd["srv_id"] = srv_id;
       std::string json_str = req_cmd.dump();
       std::vector<uint8_t> cmd_data(json_str.begin(), json_str.end());
-      send_callback_(client_fd, "__request", cmd_data);
+      send_callback_(client_fd, "__request", cmd_data, OutboundMessagePolicy::Strict);
       
       // Then send the actual request data
-      send_callback_(client_fd, service_name, request);
+      send_callback_(client_fd, service_name, request, OutboundMessagePolicy::Strict);
     }
   };
   
@@ -500,9 +528,10 @@ void MessageRouter::handle_request_command(int client_fd, const std::string& par
   
   uint32_t srv_id = std::stoul(param_map["srv_id"]);
   
-  // Store pending service request ID
-  // The next non-system message will be the service request data
-  pending_service_request_id_ = srv_id;
+  {
+    std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
+    pending_service_state_[client_fd].pending_request_id = srv_id;
+  }
   
   // Remember which client should receive the response
   {
@@ -524,9 +553,10 @@ void MessageRouter::handle_response_command(int client_fd, const std::string& pa
   
   uint32_t srv_id = std::stoul(param_map["srv_id"]);
   
-  // Store pending service response ID
-  // The next non-system message will be the service response data
-  pending_service_response_id_ = srv_id;
+  {
+    std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
+    pending_service_state_[client_fd].pending_response_id = srv_id;
+  }
   
   RCLCPP_DEBUG(get_logger(), "Response command received [ID: %u]", srv_id);
 }
@@ -571,7 +601,7 @@ void MessageRouter::handle_topic_list_command(int client_fd)
   // Send as system command response
   if (send_callback_) {
     std::vector<uint8_t> data(json_str.begin(), json_str.end());
-    send_callback_(client_fd, "__topic_list", data);
+    send_callback_(client_fd, "__topic_list", data, OutboundMessagePolicy::Strict);
   }
   
   RCLCPP_DEBUG(get_logger(), "Sent topic list with %zu topics", 
@@ -600,7 +630,7 @@ void MessageRouter::send_handshake(int client_fd)
   
   std::string json_str = handshake.dump();
   std::vector<uint8_t> data(json_str.begin(), json_str.end());
-  send_callback_(client_fd, "__handshake", data);
+  send_callback_(client_fd, "__handshake", data, OutboundMessagePolicy::Strict);
   RCLCPP_INFO(get_logger(), "Sent handshake to client %d", client_fd);
 }
 
@@ -623,7 +653,54 @@ void MessageRouter::send_log_to_client(int client_fd, const std::string& level,
   std::string command = "__" + level;
   
   std::vector<uint8_t> data(json_str.begin(), json_str.end());
-  send_callback_(client_fd, command, data);
+  send_callback_(client_fd, command, data, OutboundMessagePolicy::Strict);
+}
+
+void MessageRouter::set_log_protocol_messages(bool enabled)
+{
+  log_protocol_messages_ = enabled;
+  topic_manager_->set_protocol_logging_enabled(enabled);
+}
+
+MessageRouter::PendingServiceState MessageRouter::consume_pending_service_state(int client_fd)
+{
+  std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
+  auto it = pending_service_state_.find(client_fd);
+  if (it == pending_service_state_.end()) {
+    return {};
+  }
+
+  PendingServiceState pending_state = it->second;
+  it->second.pending_request_id = 0;
+  it->second.pending_response_id = 0;
+  if (it->second.pending_request_id == 0 && it->second.pending_response_id == 0) {
+    pending_service_state_.erase(it);
+  }
+  return pending_state;
+}
+
+OutboundMessagePolicy MessageRouter::classify_subscription_policy(
+  const std::string& topic,
+  const std::string& message_type)
+{
+  if (topic.rfind("/horus/", 0) == 0 || topic.rfind("__", 0) == 0) {
+    return OutboundMessagePolicy::Strict;
+  }
+
+  const std::string normalized_type = normalize_message_type_for_policy(message_type);
+  static const std::unordered_set<std::string> kReplaceableTypes = {
+    "sensor_msgs/image",
+    "sensor_msgs/compressedimage",
+    "sensor_msgs/pointcloud2",
+    "sensor_msgs/laserscan",
+    "nav_msgs/occupancygrid"
+  };
+
+  if (kReplaceableTypes.find(normalized_type) != kReplaceableTypes.end()) {
+    return OutboundMessagePolicy::Replaceable;
+  }
+
+  return OutboundMessagePolicy::Strict;
 }
 
 bool MessageRouter::parse_json_params(const std::string& json_str,
@@ -782,6 +859,11 @@ void MessageRouter::on_client_disconnected(int client_fd)
         ++it;
       }
     }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
+    pending_service_state_.erase(client_fd);
   }
 
 #ifdef ENABLE_WEBRTC
