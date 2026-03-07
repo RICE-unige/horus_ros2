@@ -2,25 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/unity_bridge_node.hpp"
+#include <algorithm>
 #include <iostream>
 #include <chrono>
+#include <sstream>
 
 namespace horus_unity_bridge
 {
 
-UnityBridgeNode::UnityBridgeNode()
-  : running_(false)
+UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions& options)
+  : node_options_(options),
+    running_(false)
 {
   // Initialize ROS if not already done
   if (!rclcpp::ok()) {
     rclcpp::init(0, nullptr);
   }
-  
+
+  // Create router (ROS node)
+  router_ = std::make_shared<MessageRouter>(node_options_);
+
   // Load parameters
   load_parameters();
-  
-  // Create router (ROS node)
-  router_ = std::make_shared<MessageRouter>();
   
   // Create connection manager
   connection_manager_ = std::make_unique<ConnectionManager>(conn_config_);
@@ -29,13 +32,24 @@ UnityBridgeNode::UnityBridgeNode()
   setup_callbacks();
   
   // Create executor
-  int num_threads = 4;  // TODO: Make configurable
-  rclcpp::ExecutorOptions options;
+  rclcpp::ExecutorOptions executor_options;
   executor_ = std::make_shared<rclcpp::executors::MultiThreadedExecutor>(
-    options, num_threads, false
+    executor_options, worker_threads_, false
   );
   executor_->add_node(router_);
   
+  if (!reserved_parameter_warnings_.empty()) {
+    std::ostringstream warning_stream;
+    warning_stream << "Reserved bridge parameters currently ignored: ";
+    for (size_t i = 0; i < reserved_parameter_warnings_.size(); ++i) {
+      if (i > 0) {
+        warning_stream << ", ";
+      }
+      warning_stream << reserved_parameter_warnings_[i];
+    }
+    RCLCPP_WARN(router_->get_logger(), "%s", warning_stream.str().c_str());
+  }
+
   RCLCPP_INFO(router_->get_logger(), "Unity Bridge Node initialized");
 }
 
@@ -46,15 +60,61 @@ UnityBridgeNode::~UnityBridgeNode()
 
 void UnityBridgeNode::load_parameters()
 {
-  // Load configuration from ROS parameters or use defaults
-  conn_config_.bind_address = "0.0.0.0";
-  conn_config_.port = 10000;
-  conn_config_.max_connections = 10;
-  conn_config_.socket_buffer_size = 65536;
-  conn_config_.tcp_nodelay = true;
-  conn_config_.connection_timeout_ms = 5000;
-  
-  // TODO: Load from ROS parameters when node is created
+  conn_config_.bind_address = router_->declare_parameter<std::string>("tcp_ip", "0.0.0.0");
+  conn_config_.port = static_cast<uint16_t>(router_->declare_parameter<int>("tcp_port", 10000));
+  conn_config_.max_connections = router_->declare_parameter<int>("max_connections", 10);
+  conn_config_.socket_buffer_size = static_cast<size_t>(
+    router_->declare_parameter<int>("socket_buffer_size", 65536));
+  conn_config_.message_queue_size = static_cast<size_t>(
+    router_->declare_parameter<int>("message_queue_size", 1000));
+  conn_config_.tcp_nodelay = router_->declare_parameter<bool>("tcp_nodelay", true);
+  conn_config_.connection_timeout_ms = router_->declare_parameter<int>("connection_timeout_ms", 5000);
+
+  const auto configured_worker_threads = router_->declare_parameter<int>("worker_threads", 4);
+  worker_threads_ = std::max<int>(1, static_cast<int>(configured_worker_threads));
+  log_protocol_messages_ = router_->declare_parameter<bool>("log_protocol_messages", true);
+  router_->set_log_protocol_messages(log_protocol_messages_);
+
+  reserved_parameter_warnings_.clear();
+  auto add_reserved_warning = [this](const std::string& name) {
+    if (std::find(
+          reserved_parameter_warnings_.begin(),
+          reserved_parameter_warnings_.end(),
+          name) == reserved_parameter_warnings_.end()) {
+      reserved_parameter_warnings_.push_back(name);
+    }
+  };
+
+  router_->declare_parameter<int>("message_pool_size", 10000);
+  router_->declare_parameter<bool>("enable_zero_copy", true);
+  add_reserved_warning("message_pool_size");
+  add_reserved_warning("enable_zero_copy");
+
+  const std::string publisher_reliability = router_->declare_parameter<std::string>(
+    "default_publisher_qos.reliability", "reliable");
+  const std::string publisher_durability = router_->declare_parameter<std::string>(
+    "default_publisher_qos.durability", "volatile");
+  const std::string publisher_history = router_->declare_parameter<std::string>(
+    "default_publisher_qos.history", "keep_last");
+  const int publisher_depth = router_->declare_parameter<int>("default_publisher_qos.depth", 10);
+  (void)publisher_reliability;
+  (void)publisher_durability;
+  (void)publisher_history;
+  (void)publisher_depth;
+  add_reserved_warning("default_publisher_qos.*");
+
+  const std::string subscriber_reliability = router_->declare_parameter<std::string>(
+    "default_subscriber_qos.reliability", "reliable");
+  const std::string subscriber_durability = router_->declare_parameter<std::string>(
+    "default_subscriber_qos.durability", "volatile");
+  const std::string subscriber_history = router_->declare_parameter<std::string>(
+    "default_subscriber_qos.history", "keep_last");
+  const int subscriber_depth = router_->declare_parameter<int>("default_subscriber_qos.depth", 10);
+  (void)subscriber_reliability;
+  (void)subscriber_durability;
+  (void)subscriber_history;
+  (void)subscriber_depth;
+  add_reserved_warning("default_subscriber_qos.*");
 }
 
 void UnityBridgeNode::setup_callbacks()
@@ -68,14 +128,19 @@ void UnityBridgeNode::setup_callbacks()
   
   // Router wants to send to Unity -> Connection Manager  
   router_->set_send_callback(
-    [this](int fd, const std::string& dest, const std::vector<uint8_t>& payload) {
-      return connection_manager_->send_to_client(fd, dest, payload);
+    [this](int fd,
+           const std::string& dest,
+           const std::vector<uint8_t>& payload,
+           OutboundMessagePolicy policy) {
+      return connection_manager_->send_to_client(fd, dest, payload, policy);
     }
   );
   
   router_->set_broadcast_callback(
-    [this](const std::string& dest, const std::vector<uint8_t>& payload) {
-      connection_manager_->broadcast_message(dest, payload);
+    [this](const std::string& dest,
+           const std::vector<uint8_t>& payload,
+           OutboundMessagePolicy policy) {
+      connection_manager_->broadcast_message(dest, payload, policy);
     }
   );
   
@@ -121,7 +186,7 @@ bool UnityBridgeNode::start()
   );
   
   // Create service response processing timer (1ms for low latency)
-  auto service_timer = router_->create_wall_timer(
+  service_timer_ = router_->create_wall_timer(
     std::chrono::milliseconds(1),
     [this]() { router_->get_service_manager().process_pending_responses(); }
   );
@@ -144,6 +209,9 @@ void UnityBridgeNode::stop()
   // Stop statistics timer
   if (stats_timer_) {
     stats_timer_->cancel();
+  }
+  if (service_timer_) {
+    service_timer_->cancel();
   }
   
   // Stop connection manager

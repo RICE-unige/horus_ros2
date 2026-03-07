@@ -41,7 +41,11 @@ int main(int argc, char** argv)
     std::cout << "\n========================================" << std::endl;
     std::cout << "  HORUS Unity Bridge" << std::endl;
     std::cout << "========================================" << std::endl;
-    std::cout << "Bridge is running on port 10000" << std::endl;
+    std::cout << "Bridge is running on "
+              << node.bind_address()
+              << ":"
+              << node.port()
+              << std::endl;
     std::cout << "Press Ctrl+C to stop" << std::endl;
     std::cout << "========================================\n" << std::endl;
     

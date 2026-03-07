@@ -36,6 +36,7 @@ public:
   
   explicit TopicManager(rclcpp::Node* node);
   ~TopicManager() = default;
+  void set_protocol_logging_enabled(bool enabled) { protocol_logging_enabled_ = enabled; }
   
   /**
    * @brief Register a publisher for Unity to publish ROS messages
@@ -144,6 +145,7 @@ private:
   
   mutable std::mutex publishers_mutex_;
   mutable std::mutex subscribers_mutex_;
+  bool protocol_logging_enabled_ = false;
   
   TopicStatistics stats_;
   

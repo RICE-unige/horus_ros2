@@ -121,13 +121,13 @@ bool TopicManager::register_subscriber(const std::string& topic,
         // Check for registration topic more loosely to avoid mismatch issues
         bool is_reg = (topic.find("registration") != std::string::npos);
 
-        if (is_reg) {
+        if (protocol_logging_enabled_ && is_reg) {
             std::stringstream ss;
             ss << "DEBUG_MSG [" << topic << "] Len: " << rcl_msg.buffer_length << " Bytes: ";
             for(size_t i=0; i< std::min((size_t)8, rcl_msg.buffer_length); ++i) {
                 ss << std::hex << (int)rcl_msg.buffer[i] << " ";
             }
-            RCLCPP_ERROR(node_->get_logger(), "%s", ss.str().c_str());
+            RCLCPP_DEBUG(node_->get_logger(), "%s", ss.str().c_str());
         }
 
         // Send the raw message (ROS 2 CDR formatted)
@@ -433,6 +433,7 @@ std::string TopicManager::normalize_message_type(const std::string& message_type
 const rosidl_message_type_support_t* TopicManager::get_type_support(
     const std::string& message_type)
 {
+  (void)message_type;
   // This function would dynamically load type support
   // For now, we rely on generic publishers/subscribers which don't need explicit type support
   return nullptr;

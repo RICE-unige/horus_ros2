@@ -30,7 +30,7 @@ namespace horus_unity_bridge
 class UnityBridgeNode
 {
 public:
-  UnityBridgeNode();
+  explicit UnityBridgeNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
   ~UnityBridgeNode();
   
   /**
@@ -52,6 +52,15 @@ public:
    * @brief Check if bridge is running
    */
   bool is_running() const { return running_.load(); }
+  const ConnectionManager::Config& connection_config() const { return conn_config_; }
+  uint16_t port() const { return conn_config_.port; }
+  const std::string& bind_address() const { return conn_config_.bind_address; }
+  int worker_threads() const { return worker_threads_; }
+  bool log_protocol_messages() const { return log_protocol_messages_; }
+  bool has_service_timer() const { return static_cast<bool>(service_timer_); }
+  const std::vector<std::string>& reserved_parameter_warnings() const {
+    return reserved_parameter_warnings_;
+  }
   
   /**
    * @brief Print comprehensive statistics
@@ -66,6 +75,10 @@ private:
   
   // Configuration
   ConnectionManager::Config conn_config_;
+  int worker_threads_ = 4;
+  bool log_protocol_messages_ = true;
+  std::vector<std::string> reserved_parameter_warnings_;
+  rclcpp::NodeOptions node_options_;
   
   // State
   std::atomic<bool> running_;
@@ -80,6 +93,7 @@ private:
   
   // Statistics timer
   rclcpp::TimerBase::SharedPtr stats_timer_;
+  rclcpp::TimerBase::SharedPtr service_timer_;
   void stats_timer_callback();
 };
 

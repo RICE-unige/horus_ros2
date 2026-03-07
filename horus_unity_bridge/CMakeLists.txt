@@ -55,6 +55,8 @@ if(ENABLE_WEBRTC)
         set(ENABLE_WEBRTC OFF)
       else()
         include(FetchContent)
+        set(HORUS_BRIDGE_BUILD_TESTING ${BUILD_TESTING})
+        set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
         FetchContent_Declare(
           libdatachannel
           GIT_REPOSITORY https://github.com/paullouisageneau/libdatachannel.git
@@ -63,7 +65,14 @@ if(ENABLE_WEBRTC)
         )
         set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
         set(NO_TESTS ON CACHE BOOL "" FORCE)
+        set(TEST_APPS OFF CACHE BOOL "" FORCE)
         FetchContent_MakeAvailable(libdatachannel)
+        set(BUILD_TESTING ${HORUS_BRIDGE_BUILD_TESTING} CACHE BOOL "" FORCE)
+        if(BUILD_TESTING AND DEFINED libdatachannel_BINARY_DIR)
+          file(WRITE
+            "${libdatachannel_BINARY_DIR}/CTestTestfile.cmake"
+            "# Vendored dependency tests are intentionally excluded from the horus_unity_bridge package CTest surface.\n")
+        endif()
       endif()
     endif()
   endif()
@@ -81,8 +90,7 @@ if(ENABLE_WEBRTC)
 endif()
 
 # Source files
-set(BRIDGE_SOURCES
-  src/main.cpp
+set(BRIDGE_CORE_SOURCES
   src/unity_bridge_node.cpp
   src/protocol_handler.cpp
   src/connection_manager.cpp
@@ -93,13 +101,13 @@ set(BRIDGE_SOURCES
 )
 
 if(ENABLE_WEBRTC)
-  list(APPEND BRIDGE_SOURCES src/webrtc_manager.cpp)
+  list(APPEND BRIDGE_CORE_SOURCES src/webrtc_manager.cpp)
 endif()
 
-# Unity bridge executable
-add_executable(horus_unity_bridge_node ${BRIDGE_SOURCES})
+# Unity bridge core library
+add_library(horus_unity_bridge_core ${BRIDGE_CORE_SOURCES})
 
-ament_target_dependencies(horus_unity_bridge_node
+ament_target_dependencies(horus_unity_bridge_core
   rclcpp
   std_msgs
   sensor_msgs
@@ -114,10 +122,10 @@ ament_target_dependencies(horus_unity_bridge_node
 )
 
 # Link pthread for threading support
-target_link_libraries(horus_unity_bridge_node pthread)
+target_link_libraries(horus_unity_bridge_core pthread)
 
 if(ENABLE_WEBRTC)
-  target_link_libraries(horus_unity_bridge_node
+  target_link_libraries(horus_unity_bridge_core
     LibDataChannel::LibDataChannel
     ${GST_LIBRARIES}
     ${OpenCV_LIBRARIES}
@@ -125,11 +133,20 @@ if(ENABLE_WEBRTC)
 endif()
 
 if(nlohmann_json_FOUND)
-  target_link_libraries(horus_unity_bridge_node nlohmann_json::nlohmann_json)
+  target_link_libraries(horus_unity_bridge_core nlohmann_json::nlohmann_json)
 endif()
 
+target_include_directories(horus_unity_bridge_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+# Unity bridge executable
+add_executable(horus_unity_bridge_node src/main.cpp)
+target_link_libraries(horus_unity_bridge_node horus_unity_bridge_core)
+
 # Install targets
-install(TARGETS horus_unity_bridge_node
+install(TARGETS horus_unity_bridge_node horus_unity_bridge_core
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -149,8 +166,29 @@ install(DIRECTORY include/
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_gtest(horus_unity_bridge_tests
+    test/test_unity_bridge.cpp
+  )
+  if(TARGET horus_unity_bridge_tests)
+    target_link_libraries(horus_unity_bridge_tests horus_unity_bridge_core)
+    ament_target_dependencies(horus_unity_bridge_tests
+      rclcpp
+      std_msgs
+      sensor_msgs
+      geometry_msgs
+      nav_msgs
+      tf2_msgs
+      rosidl_default_runtime
+      rosidl_typesupport_cpp
+      rosidl_typesupport_introspection_cpp
+      std_srvs
+      example_interfaces
+    )
+  endif()
 endif()
 
 ament_package()
