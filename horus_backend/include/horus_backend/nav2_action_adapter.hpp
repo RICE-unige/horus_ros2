@@ -29,7 +29,13 @@ public:
   /**
    * @brief Call this when a new robot is registered to set up its action client adapter.
    */
-  void register_robot(const std::string& robot_id, const std::string& robot_name);
+  void register_robot(
+    const std::string& robot_id,
+    const std::string& robot_name,
+    const std::string& action_topic = "",
+    const std::string& goal_topic = "",
+    const std::string& cancel_topic = "",
+    const std::string& status_topic = "");
 
   /**
    * @brief Call this when a robot is unregistered to clean up.
@@ -41,6 +47,10 @@ private:
   {
     std::string robot_id;
     std::string robot_name;
+    std::string action_topic;
+    std::string goal_topic;
+    std::string cancel_topic;
+    std::string status_topic;
     rclcpp_action::Client<NavigateToPose>::SharedPtr action_client;
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr cancel_sub;

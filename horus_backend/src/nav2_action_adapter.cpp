@@ -17,7 +17,13 @@ Nav2ActionAdapter::~Nav2ActionAdapter()
   adapters_.clear();
 }
 
-void Nav2ActionAdapter::register_robot(const std::string& robot_id, const std::string& robot_name)
+void Nav2ActionAdapter::register_robot(
+  const std::string& robot_id,
+  const std::string& robot_name,
+  const std::string& action_topic,
+  const std::string& goal_topic,
+  const std::string& cancel_topic,
+  const std::string& status_topic)
 {
   std::lock_guard<std::mutex> lock(adapters_mutex_);
   
@@ -29,6 +35,10 @@ void Nav2ActionAdapter::register_robot(const std::string& robot_id, const std::s
   auto adapter = std::make_shared<RobotAdapter>();
   adapter->robot_id = robot_id;
   adapter->robot_name = robot_name;
+  adapter->action_topic = action_topic;
+  adapter->goal_topic = goal_topic;
+  adapter->cancel_topic = cancel_topic;
+  adapter->status_topic = status_topic;
   
   // Setup the action client and subscriptions
   setup_adapter(adapter);
@@ -53,20 +63,26 @@ void Nav2ActionAdapter::setup_adapter(std::shared_ptr<RobotAdapter> adapter)
 {
   // Create action client for navigate_to_pose
   // Topic: /<robot_name>/navigate_to_pose
-  std::string action_topic = "/" + adapter->robot_name + "/navigate_to_pose";
+  std::string action_topic = adapter->action_topic.empty()
+    ? "/" + adapter->robot_name + "/navigate_to_pose"
+    : adapter->action_topic;
   adapter->action_client = rclcpp_action::create_client<NavigateToPose>(
     node_,
     action_topic);
     
   // Create publisher for goal status
   // Topic: /<robot_name>/goal_status
-  std::string status_topic = "/" + adapter->robot_name + "/goal_status";
+  std::string status_topic = adapter->status_topic.empty()
+    ? "/" + adapter->robot_name + "/goal_status"
+    : adapter->status_topic;
   adapter->status_pub = node_->create_publisher<std_msgs::msg::String>(
     status_topic, 10);
     
   // Create subscriber for goal pose
   // Topic: /<robot_name>/goal_pose
-  std::string goal_topic = "/" + adapter->robot_name + "/goal_pose";
+  std::string goal_topic = adapter->goal_topic.empty()
+    ? "/" + adapter->robot_name + "/goal_pose"
+    : adapter->goal_topic;
   adapter->goal_sub = node_->create_subscription<geometry_msgs::msg::PoseStamped>(
     goal_topic, 10,
     [this, adapter](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -75,7 +91,9 @@ void Nav2ActionAdapter::setup_adapter(std::shared_ptr<RobotAdapter> adapter)
     
   // Create subscriber for goal cancel
   // Topic: /<robot_name>/goal_cancel
-  std::string cancel_topic = "/" + adapter->robot_name + "/goal_cancel";
+  std::string cancel_topic = adapter->cancel_topic.empty()
+    ? "/" + adapter->robot_name + "/goal_cancel"
+    : adapter->cancel_topic;
   adapter->cancel_sub = node_->create_subscription<std_msgs::msg::String>(
     cancel_topic, 10,
     [this, adapter](const std_msgs::msg::String::SharedPtr msg) {

@@ -12,7 +12,13 @@ class Nav2ActionAdapter
 {
 public:
   explicit Nav2ActionAdapter(rclcpp::Node *) {}
-  void register_robot(const std::string &, const std::string &) {}
+  void register_robot(
+    const std::string &,
+    const std::string &,
+    const std::string & = "",
+    const std::string & = "",
+    const std::string & = "",
+    const std::string & = "") {}
   void unregister_robot(const std::string &) {}
 };
 }  // namespace horus_backend
@@ -26,9 +32,11 @@ public:
 #include <unistd.h>
 
 #include <chrono>
+#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 namespace horus_backend
@@ -327,7 +335,27 @@ void BackendNode::register_robot_callback(
   // Register with Nav2 adapter
 #ifdef HORUS_BACKEND_HAS_NAV2
   if (nav2_adapter_) {
-    nav2_adapter_->register_robot(robot_id, request->robot_config.name);
+    std::unordered_map<std::string, std::string> metadata;
+    const auto metadata_count = std::min(
+      request->robot_config.metadata_keys.size(),
+      request->robot_config.metadata_values.size());
+    for (size_t i = 0; i < metadata_count; ++i) {
+      metadata[request->robot_config.metadata_keys[i]] =
+        request->robot_config.metadata_values[i];
+    }
+
+    const auto get_metadata = [&metadata](const char * key) -> std::string {
+      auto it = metadata.find(key);
+      return it == metadata.end() ? std::string() : it->second;
+    };
+
+    nav2_adapter_->register_robot(
+      robot_id,
+      request->robot_config.name,
+      get_metadata("horus.backend.nav2_action_topic"),
+      get_metadata("horus.backend.goal_topic"),
+      get_metadata("horus.backend.cancel_topic"),
+      get_metadata("horus.backend.status_topic"));
   }
 #endif
 
