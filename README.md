@@ -17,6 +17,7 @@
 
 > [!IMPORTANT]
 > This repository provides the ROS 2 backend infrastructure for HORUS, including the Unity bridge runtime (`horus_unity_bridge`) used by the MR application.
+> Adjacent future services for copilot orchestration and scene understanding are being developed separately in `compass` and `lenses`; this repository remains the ROS transport/runtime layer rather than the owner of those systems.
 
 ## :microscope: Research Scope
 
@@ -48,6 +49,10 @@ horus_unity_bridge (ROS 2 node, TCP/WebRTC)
          <->
 HORUS MR App (Unity client)
 ```
+
+Adjacent future services outside this repository:
+- `compass` - copilot/orchestration service
+- `lenses` - scene-understanding/perception service
 
 Default ingress:
 - TCP server: `0.0.0.0:10000`
@@ -158,6 +163,7 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 - `horus_sdk` should treat this repo as infrastructure service, not payload author.
 - `horus` should consume this bridge as transport/runtime endpoint.
 - Workspace sharing mode (`Shared Host`, `Shared Join`, `Private Workspace`) is decided in the Unity app; the bridge remains the shared robot/task transport and lease-arbitration layer for all connected operators.
+- Future `compass` and `lenses` integrations should remain upstream/downstream service consumers of bridge data rather than being folded into this bridge runtime.
 
 ### Multi-Operator Bridge Baseline
 Current multi-operator infrastructure now integrated in `main` includes:
@@ -210,7 +216,7 @@ Expected outcomes:
 ## :world_map: Roadmap
 
 > [!NOTE]
-> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX or SDK dashboard behavior. Current baseline aligns with marker-only mesh transport stability in the integrated SDK/MR workflow, explicit flat single-robot backend-topic compatibility, and bridge-global lease behavior across shared/private app workspace modes.
+> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX, SDK dashboard behavior, or the separate `compass`/`lenses` service runtimes. Current baseline aligns with marker-only mesh transport stability in the integrated SDK/MR workflow, explicit flat single-robot backend-topic compatibility, and bridge-global lease behavior across shared/private app workspace modes.
 
 | Stream | Status | Current Baseline | Next Milestone |
 |---|---|---|---|
@@ -230,6 +236,8 @@ Expected outcomes:
 
 - SDK: <https://github.com/RICE-unige/horus_sdk>
 - Unity MR app: <https://github.com/RICE-unige/horus>
+- Copilot/orchestration service: <https://github.com/Omotoye/compass>
+- Scene-understanding service: <https://github.com/Omotoye/lenses>
 
 ## :book: Citation
 
