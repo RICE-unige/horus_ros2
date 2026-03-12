@@ -157,6 +157,7 @@ ros2 launch horus_unity_bridge unity_bridge.launch.py
 ### Integration Boundary
 - `horus_sdk` should treat this repo as infrastructure service, not payload author.
 - `horus` should consume this bridge as transport/runtime endpoint.
+- Workspace sharing mode (`Shared Host`, `Shared Join`, `Private Workspace`) is decided in the Unity app; the bridge remains the shared robot/task transport and lease-arbitration layer for all connected operators.
 
 ### Multi-Operator Bridge Baseline
 Current multi-operator infrastructure now integrated in `main` includes:
@@ -168,6 +169,9 @@ Current multi-operator infrastructure now integrated in `main` includes:
 - multi-client publisher ownership refcounting (prevents one client disconnect from tearing down shared publishers).
 
 Lease state snapshots are published on `/horus/multi_operator/control_lease_state` for MR clients (and optional SDK observability).
+
+> [!NOTE]
+> Bridge-side lease arbitration applies equally to operators using a shared workspace and operators using a private workspace. Workspace geometry/session sync is an app-level concern, not a bridge-level role distinction.
 
 ## :test_tube: Validation Workflow
 
@@ -206,7 +210,7 @@ Expected outcomes:
 ## :world_map: Roadmap
 
 > [!NOTE]
-> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX or SDK dashboard behavior. Current baseline aligns with marker-only mesh transport stability in the integrated SDK/MR workflow and explicit flat single-robot backend-topic compatibility.
+> This roadmap is scoped to ROS 2 infrastructure ownership (bridge/runtime reliability, observability, and reproducibility), not Unity UX or SDK dashboard behavior. Current baseline aligns with marker-only mesh transport stability in the integrated SDK/MR workflow, explicit flat single-robot backend-topic compatibility, and bridge-global lease behavior across shared/private app workspace modes.
 
 | Stream | Status | Current Baseline | Next Milestone |
 |---|---|---|---|
