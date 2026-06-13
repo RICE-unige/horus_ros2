@@ -4,6 +4,8 @@
 #include "horus_unity_bridge/protocol_handler.hpp"
 #include <cstring>
 #include <algorithm>
+#include <limits>
+#include <stdexcept>
 
 namespace horus_unity_bridge
 {
@@ -45,6 +47,12 @@ size_t ProtocolHandler::parse_messages(
                         (static_cast<uint32_t>(length_buffer_[1]) << 8) |
                         (static_cast<uint32_t>(length_buffer_[2]) << 16) |
                         (static_cast<uint32_t>(length_buffer_[3]) << 24);
+
+          if (dest_length_ > kMaxDestinationLength) {
+            stats_.parse_errors++;
+            reset();
+            throw std::runtime_error("Protocol destination length exceeds limit");
+          }
           
           current_dest_.clear();
           current_dest_.reserve(dest_length_);
@@ -84,6 +92,12 @@ size_t ProtocolHandler::parse_messages(
                            (static_cast<uint32_t>(length_buffer_[1]) << 8) |
                            (static_cast<uint32_t>(length_buffer_[2]) << 16) |
                            (static_cast<uint32_t>(length_buffer_[3]) << 24);
+
+          if (payload_length_ > kMaxPayloadLength) {
+            stats_.parse_errors++;
+            reset();
+            throw std::runtime_error("Protocol payload length exceeds limit");
+          }
           
           current_payload_.clear();
           if (payload_length_ > 0) {
@@ -147,6 +161,11 @@ std::vector<uint8_t> ProtocolHandler::serialize_message(
   const std::vector<uint8_t>& payload)
 {
   std::vector<uint8_t> result;
+  if (destination.size() > std::numeric_limits<uint32_t>::max() ||
+      payload.size() > std::numeric_limits<uint32_t>::max()) {
+    stats_.parse_errors++;
+    return result;
+  }
   result.reserve(8 + destination.size() + payload.size());
   
   // Destination length (4 bytes, little-endian)

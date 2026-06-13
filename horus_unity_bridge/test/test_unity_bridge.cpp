@@ -167,6 +167,15 @@ TEST_F(BridgeRuntimeTest, StrictQueueOverflowsDisconnectWhileReplaceableQueueCoa
   EXPECT_EQ(front_destination(), "/camera/right");
 }
 
+TEST_F(BridgeRuntimeTest, SingleUnderscoreDestinationIsNotSystemCommand)
+{
+  ProtocolMessage malformed_system_command{"_", bytes({0x01})};
+  ProtocolMessage valid_system_command{"__topic_list", bytes({0x02})};
+
+  EXPECT_FALSE(malformed_system_command.is_system_command());
+  EXPECT_TRUE(valid_system_command.is_system_command());
+}
+
 TEST_F(BridgeRuntimeTest, ReplaceableFrontStaysSupersedableUntilBytesAreSent)
 {
   OutboundMessageQueue queue;
@@ -209,6 +218,88 @@ TEST_F(BridgeRuntimeTest, ReplaceableFrontStaysSupersedableUntilBytesAreSent)
   EXPECT_EQ(queue.front()->serialized.front(), 0x04);
 }
 
+TEST_F(BridgeRuntimeTest, RealtimeMessagesAreSelectedBeforeQueuedBulk)
+{
+  OutboundMessageQueue queue;
+  queue.set_priority_scheduling_enabled(true);
+
+  auto bulk = queue.enqueue(
+    "/map_3d_octomap_mesh",
+    bytes({0x10}),
+    OutboundMessagePolicy::Bulk,
+    8);
+  auto normal = queue.enqueue(
+    "/robot/status",
+    bytes({0x20}),
+    OutboundMessagePolicy::Strict,
+    8);
+  auto realtime = queue.enqueue(
+    "/tf",
+    bytes({0x30}),
+    OutboundMessagePolicy::Realtime,
+    8);
+
+  ASSERT_TRUE(bulk.accepted);
+  ASSERT_TRUE(normal.accepted);
+  ASSERT_TRUE(realtime.accepted);
+  ASSERT_NE(queue.front(), nullptr);
+  EXPECT_EQ(queue.front()->destination, "/tf");
+
+  EXPECT_TRUE(queue.advance_front(1));
+  ASSERT_NE(queue.front(), nullptr);
+  EXPECT_EQ(queue.front()->destination, "/robot/status");
+}
+
+TEST_F(BridgeRuntimeTest, RealtimeMessageCanEvictQueuedBulkWhenQueueIsFull)
+{
+  OutboundMessageQueue queue;
+  queue.set_priority_scheduling_enabled(true);
+
+  ASSERT_TRUE(queue.enqueue(
+    "/map_chunk_1",
+    bytes({0x01}),
+    OutboundMessagePolicy::Bulk,
+    2).accepted);
+  ASSERT_TRUE(queue.enqueue(
+    "/map_chunk_2",
+    bytes({0x02}),
+    OutboundMessagePolicy::Bulk,
+    2).accepted);
+
+  auto realtime = queue.enqueue(
+    "/tf",
+    bytes({0x03}),
+    OutboundMessagePolicy::Realtime,
+    2);
+
+  EXPECT_TRUE(realtime.accepted);
+  EXPECT_TRUE(realtime.evicted_old_message);
+  ASSERT_NE(queue.front(), nullptr);
+  EXPECT_EQ(queue.front()->destination, "/tf");
+}
+
+TEST_F(BridgeRuntimeTest, BulkOverflowDropsNewMessageInsteadOfDisconnecting)
+{
+  OutboundMessageQueue queue;
+  queue.set_priority_scheduling_enabled(true);
+
+  ASSERT_TRUE(queue.enqueue(
+    "/map_chunk_1",
+    bytes({0x01}),
+    OutboundMessagePolicy::Bulk,
+    1).accepted);
+
+  auto overflow = queue.enqueue(
+    "/map_chunk_2",
+    bytes({0x02}),
+    OutboundMessagePolicy::Bulk,
+    1);
+
+  EXPECT_FALSE(overflow.accepted);
+  EXPECT_TRUE(overflow.dropped_new_message);
+  EXPECT_FALSE(overflow.should_disconnect);
+}
+
 TEST_F(BridgeRuntimeTest, SubscriptionPolicyIsStrictByDefaultAndReplaceableOnlyForKnownStreams)
 {
   EXPECT_EQ(
@@ -231,6 +322,16 @@ TEST_F(BridgeRuntimeTest, SubscriptionPolicyIsStrictByDefaultAndReplaceableOnlyF
       "/points",
       "sensor_msgs/msg/PointCloud2"),
     OutboundMessagePolicy::Replaceable);
+  EXPECT_EQ(
+    MessageRouterTestPeer::classify_subscription_policy(
+      "/tf",
+      "tf2_msgs/msg/TFMessage"),
+    OutboundMessagePolicy::Realtime);
+  EXPECT_EQ(
+    MessageRouterTestPeer::classify_subscription_policy(
+      "/map_3d_octomap_mesh",
+      "visualization_msgs/msg/Marker"),
+    OutboundMessagePolicy::Bulk);
   EXPECT_EQ(
     MessageRouterTestPeer::classify_subscription_policy(
       "/horus/registration",
@@ -286,6 +387,7 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
     rclcpp::Parameter("connection_timeout_ms", 7000),
     rclcpp::Parameter("tcp_nodelay", false),
     rclcpp::Parameter("log_protocol_messages", false),
+    rclcpp::Parameter("enable_priority_scheduling", true),
     rclcpp::Parameter("message_pool_size", 2048),
     rclcpp::Parameter("enable_zero_copy", false),
     rclcpp::Parameter("default_publisher_qos.depth", 32),
@@ -300,6 +402,7 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
   EXPECT_EQ(node.connection_config().message_queue_size, 17u);
   EXPECT_EQ(node.connection_config().connection_timeout_ms, 7000);
   EXPECT_FALSE(node.connection_config().tcp_nodelay);
+  EXPECT_TRUE(node.connection_config().priority_scheduling_enabled);
   EXPECT_EQ(node.worker_threads(), 3);
   EXPECT_FALSE(node.log_protocol_messages());
 

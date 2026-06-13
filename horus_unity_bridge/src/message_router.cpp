@@ -683,21 +683,68 @@ OutboundMessagePolicy MessageRouter::classify_subscription_policy(
   const std::string& topic,
   const std::string& message_type)
 {
-  if (topic.rfind("/horus/", 0) == 0 || topic.rfind("__", 0) == 0) {
-    return OutboundMessagePolicy::Strict;
+  if (topic.rfind("__", 0) == 0) {
+    return OutboundMessagePolicy::Realtime;
+  }
+
+  if (topic == "/tf" ||
+      topic == "tf" ||
+      topic == "/tf_static" ||
+      topic == "tf_static" ||
+      (topic.size() >= 3 && topic.compare(topic.size() - 3, 3, "/tf") == 0) ||
+      (topic.size() >= 10 && topic.compare(topic.size() - 10, 10, "/tf_static") == 0)) {
+    return OutboundMessagePolicy::Realtime;
+  }
+
+  if (topic.find("chunk_item") != std::string::npos ||
+      topic.find("gaussian_splat") != std::string::npos) {
+    return OutboundMessagePolicy::Bulk;
   }
 
   const std::string normalized_type = normalize_message_type_for_policy(message_type);
+  static const std::unordered_set<std::string> kRealtimeTypes = {
+    "tf2_msgs/tfmessage",
+    "geometry_msgs/transform",
+    "geometry_msgs/transformstamped",
+    "geometry_msgs/pose",
+    "geometry_msgs/posestamped",
+    "geometry_msgs/posewithcovariance",
+    "geometry_msgs/posewithcovariancestamped",
+    "geometry_msgs/twist",
+    "geometry_msgs/twiststamped",
+    "nav_msgs/odometry"
+  };
+
+  if (kRealtimeTypes.find(normalized_type) != kRealtimeTypes.end()) {
+    return OutboundMessagePolicy::Realtime;
+  }
+
+  static const std::unordered_set<std::string> kBulkTypes = {
+    "visualization_msgs/marker",
+    "visualization_msgs/markerarray"
+  };
+
+  if (kBulkTypes.find(normalized_type) != kBulkTypes.end()) {
+    return OutboundMessagePolicy::Bulk;
+  }
+
+  if (topic.rfind("/horus/", 0) == 0) {
+    return OutboundMessagePolicy::Strict;
+  }
+
   static const std::unordered_set<std::string> kReplaceableTypes = {
     "sensor_msgs/image",
     "sensor_msgs/compressedimage",
     "sensor_msgs/pointcloud2",
-    "sensor_msgs/laserscan",
-    "nav_msgs/occupancygrid"
+    "sensor_msgs/laserscan"
   };
 
   if (kReplaceableTypes.find(normalized_type) != kReplaceableTypes.end()) {
     return OutboundMessagePolicy::Replaceable;
+  }
+
+  if (normalized_type == "nav_msgs/occupancygrid") {
+    return OutboundMessagePolicy::BulkReplaceable;
   }
 
   return OutboundMessagePolicy::Strict;

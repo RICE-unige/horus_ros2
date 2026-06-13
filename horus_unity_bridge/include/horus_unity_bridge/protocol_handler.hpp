@@ -28,7 +28,7 @@ struct ProtocolMessage
   
   // System command identification
   bool is_system_command() const {
-    return !destination.empty() && destination[0] == '_' && destination[1] == '_';
+    return destination.size() >= 2 && destination[0] == '_' && destination[1] == '_';
   }
   
   bool is_keepalive() const {
@@ -48,6 +48,9 @@ struct ProtocolMessage
 class ProtocolHandler
 {
 public:
+  static constexpr uint32_t kMaxDestinationLength = 4096;
+  static constexpr uint32_t kMaxPayloadLength = 256 * 1024 * 1024;
+
   ProtocolHandler();
   ~ProtocolHandler() = default;
   

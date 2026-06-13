@@ -93,6 +93,7 @@ endif()
 set(BRIDGE_CORE_SOURCES
   src/unity_bridge_node.cpp
   src/protocol_handler.cpp
+  src/bridge_metrics.cpp
   src/connection_manager.cpp
   src/message_router.cpp
   src/control_lease_manager.cpp

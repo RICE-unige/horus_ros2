@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/connection_manager.hpp"
+#include "horus_unity_bridge/bridge_metrics.hpp"
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -11,6 +12,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <iostream>
 
 namespace horus_unity_bridge
@@ -24,14 +26,21 @@ OutboundMessageQueue::EnqueueResult OutboundMessageQueue::enqueue(
 {
   EnqueueResult result;
   const size_t effective_limit = std::max<size_t>(1, message_limit);
+  if (!priority_scheduling_enabled_ &&
+      policy != OutboundMessagePolicy::Replaceable &&
+      policy != OutboundMessagePolicy::BulkReplaceable) {
+    policy = OutboundMessagePolicy::Strict;
+  }
   const bool strict = is_strict_policy(policy);
   const bool replaceable = is_replaceable_policy(policy);
+  const int priority = priority_for_policy(policy);
 
   if (replaceable) {
     auto existing_it = replaceable_by_destination_.find(destination);
     if (existing_it != replaceable_by_destination_.end()) {
       existing_it->second->serialized = std::move(serialized);
       existing_it->second->offset = 0;
+      existing_it->second->priority = priority;
       result.accepted = true;
       result.replaced_existing = true;
       return result;
@@ -47,9 +56,20 @@ OutboundMessageQueue::EnqueueResult OutboundMessageQueue::enqueue(
       erase_iterator(evict_it);
       result.evicted_old_message = true;
     }
-  } else if (queue_.size() >= effective_limit) {
-    result.should_disconnect = true;
-    return result;
+  } else {
+    while (queue_.size() >= effective_limit) {
+      auto evict_it = find_oldest_lower_priority_evictable(priority);
+      if (evict_it == queue_.end()) {
+        if (priority >= priority_for_policy(OutboundMessagePolicy::Bulk)) {
+          result.dropped_new_message = true;
+          return result;
+        }
+        result.should_disconnect = true;
+        return result;
+      }
+      erase_iterator(evict_it);
+      result.evicted_old_message = true;
+    }
   }
 
   queue_.push_back(OutboundMessage{
@@ -57,7 +77,8 @@ OutboundMessageQueue::EnqueueResult OutboundMessageQueue::enqueue(
     std::move(serialized),
     0,
     strict,
-    replaceable
+    replaceable,
+    priority
   });
   auto inserted_it = std::prev(queue_.end());
   if (replaceable) {
@@ -74,7 +95,11 @@ OutboundMessage* OutboundMessageQueue::front()
     return nullptr;
   }
 
-  return &queue_.front();
+  auto it = select_front_iterator();
+  if (it == queue_.end()) {
+    return nullptr;
+  }
+  return &(*it);
 }
 
 const OutboundMessage* OutboundMessageQueue::front() const
@@ -83,12 +108,17 @@ const OutboundMessage* OutboundMessageQueue::front() const
     return nullptr;
   }
 
-  return &queue_.front();
+  auto it = select_front_iterator();
+  if (it == queue_.end()) {
+    return nullptr;
+  }
+  return &(*it);
 }
 
 bool OutboundMessageQueue::front_is_replaceable() const
 {
-  return !queue_.empty() && queue_.front().replaceable;
+  auto it = select_front_iterator();
+  return it != queue_.end() && it->replaceable;
 }
 
 void OutboundMessageQueue::mark_front_in_flight()
@@ -97,7 +127,10 @@ void OutboundMessageQueue::mark_front_in_flight()
     return;
   }
 
-  auto it = queue_.begin();
+  auto it = select_front_iterator();
+  if (it == queue_.end()) {
+    return;
+  }
   if (!it->replaceable) {
     return;
   }
@@ -115,7 +148,10 @@ bool OutboundMessageQueue::advance_front(size_t bytes_sent)
     return false;
   }
 
-  auto it = queue_.begin();
+  auto it = select_front_iterator();
+  if (it == queue_.end()) {
+    return false;
+  }
   it->offset += bytes_sent;
   if (it->offset < it->serialized.size()) {
     return false;
@@ -132,6 +168,69 @@ OutboundMessageQueue::QueueIterator OutboundMessageQueue::find_oldest_replaceabl
     queue_.end(),
     [](const OutboundMessage& message) {
       return message.replaceable && message.offset == 0;
+    });
+}
+
+OutboundMessageQueue::QueueIterator OutboundMessageQueue::find_oldest_lower_priority_evictable(
+  int priority)
+{
+  return std::find_if(
+    queue_.begin(),
+    queue_.end(),
+    [priority](const OutboundMessage& message) {
+      return message.offset == 0 && message.priority > priority;
+    });
+}
+
+OutboundMessageQueue::QueueIterator OutboundMessageQueue::select_front_iterator()
+{
+  if (queue_.empty()) {
+    return queue_.end();
+  }
+
+  if (!priority_scheduling_enabled_) {
+    return queue_.begin();
+  }
+
+  auto in_flight_it = std::find_if(
+    queue_.begin(),
+    queue_.end(),
+    [](const OutboundMessage& message) { return message.offset > 0; });
+  if (in_flight_it != queue_.end()) {
+    return in_flight_it;
+  }
+
+  return std::min_element(
+    queue_.begin(),
+    queue_.end(),
+    [](const OutboundMessage& a, const OutboundMessage& b) {
+      return a.priority < b.priority;
+    });
+}
+
+OutboundMessageQueue::QueueList::const_iterator OutboundMessageQueue::select_front_iterator() const
+{
+  if (queue_.empty()) {
+    return queue_.end();
+  }
+
+  if (!priority_scheduling_enabled_) {
+    return queue_.begin();
+  }
+
+  auto in_flight_it = std::find_if(
+    queue_.begin(),
+    queue_.end(),
+    [](const OutboundMessage& message) { return message.offset > 0; });
+  if (in_flight_it != queue_.end()) {
+    return in_flight_it;
+  }
+
+  return std::min_element(
+    queue_.begin(),
+    queue_.end(),
+    [](const OutboundMessage& a, const OutboundMessage& b) {
+      return a.priority < b.priority;
     });
 }
 
@@ -153,12 +252,33 @@ void OutboundMessageQueue::erase_iterator(QueueIterator it)
 
 bool OutboundMessageQueue::is_replaceable_policy(OutboundMessagePolicy policy)
 {
-  return policy == OutboundMessagePolicy::Replaceable;
+  return policy == OutboundMessagePolicy::Replaceable ||
+    policy == OutboundMessagePolicy::BulkReplaceable;
 }
 
 bool OutboundMessageQueue::is_strict_policy(OutboundMessagePolicy policy)
 {
-  return policy == OutboundMessagePolicy::Strict;
+  return policy == OutboundMessagePolicy::Strict ||
+    policy == OutboundMessagePolicy::Realtime ||
+    policy == OutboundMessagePolicy::Bulk;
+}
+
+int OutboundMessageQueue::priority_for_policy(OutboundMessagePolicy policy)
+{
+  switch (policy) {
+    case OutboundMessagePolicy::Realtime:
+      return 0;
+    case OutboundMessagePolicy::Strict:
+      return 1;
+    case OutboundMessagePolicy::Replaceable:
+      return 2;
+    case OutboundMessagePolicy::Bulk:
+    case OutboundMessagePolicy::BulkReplaceable:
+      return 3;
+    case OutboundMessagePolicy::Auto:
+    default:
+      return 1;
+  }
 }
 
 ConnectionManager::ConnectionManager(const Config& config)
@@ -194,9 +314,6 @@ bool ConnectionManager::start()
   
   running_ = true;
   
-  // Start accept thread
-  accept_thread_ = std::thread(&ConnectionManager::accept_loop, this);
-  
   // Start I/O thread
   io_thread_ = std::thread(&ConnectionManager::io_loop, this);
   
@@ -213,10 +330,9 @@ void ConnectionManager::stop()
   }
   
   running_ = false;
-  
-  // Wait for threads to finish
-  if (accept_thread_.joinable()) {
-    accept_thread_.join();
+
+  if (server_fd_ >= 0) {
+    shutdown(server_fd_, SHUT_RDWR);
   }
   
   if (io_thread_.joinable()) {
@@ -310,72 +426,53 @@ bool ConnectionManager::setup_epoll()
   return add_to_epoll(server_fd_, EPOLLIN);
 }
 
-void ConnectionManager::accept_loop()
-{
-  while (running_.load()) {
-    struct epoll_event events[1];
-    int nfds = epoll_wait(epoll_fd_, events, 1, 100);  // 100ms timeout
-    
-    if (nfds < 0) {
-      if (errno == EINTR) continue;
-      std::cerr << "epoll_wait error in accept: " << strerror(errno) << std::endl;
-      break;
-    }
-    
-    for (int i = 0; i < nfds; i++) {
-      if (events[i].data.fd == server_fd_) {
-        accept_connection();
-      }
-    }
-  }
-}
-
 bool ConnectionManager::accept_connection()
 {
-  struct sockaddr_in client_addr;
-  socklen_t addr_len = sizeof(client_addr);
-  
-  int client_fd = accept(server_fd_, (struct sockaddr*)&client_addr, &addr_len);
-  if (client_fd < 0) {
-    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-      std::cerr << "Accept error: " << strerror(errno) << std::endl;
-      std::lock_guard<std::mutex> lock(stats_mutex_);
-      stats_.connection_errors++;
+  bool accepted_any = false;
+  while (running_.load()) {
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+
+    int client_fd = accept(server_fd_, (struct sockaddr*)&client_addr, &addr_len);
+    if (client_fd < 0) {
+      if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        std::cerr << "Accept error: " << strerror(errno) << std::endl;
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.connection_errors++;
+      }
+      return accepted_any;
     }
-    return false;
+
+    configure_socket(client_fd);
+
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
+    uint16_t port = ntohs(client_addr.sin_port);
+
+    auto connection = std::make_shared<ClientConnection>(client_fd, ip_str, port);
+    connection->send_queue.set_priority_scheduling_enabled(
+      config_.priority_scheduling_enabled);
+
+    {
+      std::lock_guard<std::mutex> lock(connections_mutex_);
+      connections_[client_fd] = std::move(connection);
+
+      std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+      stats_.total_connections++;
+      stats_.active_connections++;
+    }
+
+    add_to_epoll(client_fd, EPOLLIN | EPOLLET);
+
+    std::cout << "Client connected: " << ip_str << ":" << port << std::endl;
+
+    if (on_connect_callback_) {
+      on_connect_callback_(client_fd, ip_str, port);
+    }
+    accepted_any = true;
   }
-  
-  // Configure socket
-  configure_socket(client_fd);
-  
-  // Get client info
-  char ip_str[INET_ADDRSTRLEN];
-  inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
-  uint16_t port = ntohs(client_addr.sin_port);
-  
-  // Create connection object
-  auto connection = std::make_shared<ClientConnection>(client_fd, ip_str, port);
-  
-  {
-    std::lock_guard<std::mutex> lock(connections_mutex_);
-    connections_[client_fd] = std::move(connection);
-    
-    std::lock_guard<std::mutex> stats_lock(stats_mutex_);
-    stats_.total_connections++;
-    stats_.active_connections++;
-  }
-  
-  // Add to epoll for I/O
-  add_to_epoll(client_fd, EPOLLIN | EPOLLET);
-  
-  std::cout << "Client connected: " << ip_str << ":" << port << std::endl;
-  
-  // Notify callback
-  if (on_connect_callback_) {
-    on_connect_callback_(client_fd, ip_str, port);
-  }
-  
-  return true;
+
+  return accepted_any;
 }
 
 void ConnectionManager::io_loop()
@@ -396,8 +493,8 @@ void ConnectionManager::io_loop()
     for (int i = 0; i < nfds; i++) {
       int fd = events[i].data.fd;
       
-      // Skip server socket (handled in accept loop)
       if (fd == server_fd_) {
+        accept_connection();
         continue;
       }
       
@@ -447,10 +544,28 @@ void ConnectionManager::handle_client_read(int client_fd)
     
     // Parse messages
     std::vector<ProtocolMessage> messages;
-    conn->protocol->parse_messages(buffer.data(), bytes_read, messages);
+    try {
+      conn->protocol->parse_messages(buffer.data(), bytes_read, messages);
+    } catch (const std::exception& e) {
+      std::cerr << "Protocol parse error from client " << client_fd << ": " << e.what() << std::endl;
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.connection_errors++;
+      }
+      disconnect_client(client_fd);
+      return;
+    }
     
     // Process each message
     for (const auto& msg : messages) {
+      BridgeMetrics::instance().record(
+        "transport",
+        "message_received",
+        client_fd,
+        msg.destination,
+        msg.payload.size(),
+        static_cast<std::size_t>(bytes_read),
+        0);
       if (message_callback_) {
         message_callback_(client_fd, msg);
       }
@@ -501,6 +616,14 @@ void ConnectionManager::handle_client_write(int client_fd)
         should_disconnect = true;
         break;
       }
+      BridgeMetrics::instance().record(
+        "transport",
+        "bytes_sent",
+        client_fd,
+        message->destination,
+        0,
+        static_cast<std::size_t>(bytes_sent),
+        conn->send_queue.size());
 
       const size_t message_size = message->remaining_size();
       if (bytes_sent > 0 &&
@@ -641,6 +764,7 @@ bool ConnectionManager::send_to_client(int client_fd, const std::string& destina
   const auto resolved_policy = resolve_policy(destination, policy);
 
   OutboundMessageQueue::EnqueueResult enqueue_result;
+  size_t queue_depth = 0;
   {
     std::lock_guard<std::mutex> queue_lock(conn->queue_mutex);
     if (!conn->connected.load()) {
@@ -651,7 +775,38 @@ bool ConnectionManager::send_to_client(int client_fd, const std::string& destina
       std::move(serialized),
       resolved_policy,
       config_.message_queue_size);
+    queue_depth = conn->send_queue.size();
   }
+
+  {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    if (enqueue_result.accepted && !enqueue_result.replaced_existing) {
+      stats_.messages_enqueued++;
+    }
+    if (enqueue_result.replaced_existing) {
+      stats_.messages_replaced++;
+    }
+    if (enqueue_result.dropped_new_message) {
+      stats_.messages_dropped++;
+    }
+    if (enqueue_result.evicted_old_message) {
+      stats_.messages_evicted++;
+    }
+    stats_.queue_depth_peak = std::max<uint64_t>(
+      stats_.queue_depth_peak,
+      static_cast<uint64_t>(queue_depth));
+  }
+  BridgeMetrics::instance().record(
+    "transport",
+    enqueue_result.accepted ? "message_enqueued" : "message_enqueue_failed",
+    client_fd,
+    destination,
+    payload.size(),
+    0,
+    queue_depth,
+    std::string("{\"replaced_existing\":") + (enqueue_result.replaced_existing ? "true" : "false") +
+      ",\"dropped_new_message\":" + (enqueue_result.dropped_new_message ? "true" : "false") +
+      ",\"evicted_old_message\":" + (enqueue_result.evicted_old_message ? "true" : "false") + "}");
 
   if (enqueue_result.should_disconnect) {
     disconnect_client(client_fd);
@@ -695,6 +850,7 @@ void ConnectionManager::broadcast_message(const std::string& destination,
     auto serialized = conn->protocol->serialize_message(destination, payload);
 
     OutboundMessageQueue::EnqueueResult enqueue_result;
+    size_t queue_depth = 0;
     {
       std::lock_guard<std::mutex> queue_lock(conn->queue_mutex);
       if (!conn->connected.load()) {
@@ -705,7 +861,38 @@ void ConnectionManager::broadcast_message(const std::string& destination,
         std::move(serialized),
         resolved_policy,
         config_.message_queue_size);
+      queue_depth = conn->send_queue.size();
     }
+
+    {
+      std::lock_guard<std::mutex> lock(stats_mutex_);
+      if (enqueue_result.accepted && !enqueue_result.replaced_existing) {
+        stats_.messages_enqueued++;
+      }
+      if (enqueue_result.replaced_existing) {
+        stats_.messages_replaced++;
+      }
+      if (enqueue_result.dropped_new_message) {
+        stats_.messages_dropped++;
+      }
+      if (enqueue_result.evicted_old_message) {
+        stats_.messages_evicted++;
+      }
+      stats_.queue_depth_peak = std::max<uint64_t>(
+        stats_.queue_depth_peak,
+        static_cast<uint64_t>(queue_depth));
+    }
+    BridgeMetrics::instance().record(
+      "transport",
+      enqueue_result.accepted ? "broadcast_enqueued" : "broadcast_enqueue_failed",
+      client_fd,
+      destination,
+      payload.size(),
+      0,
+      queue_depth,
+      std::string("{\"replaced_existing\":") + (enqueue_result.replaced_existing ? "true" : "false") +
+        ",\"dropped_new_message\":" + (enqueue_result.dropped_new_message ? "true" : "false") +
+        ",\"evicted_old_message\":" + (enqueue_result.evicted_old_message ? "true" : "false") + "}");
 
     if (enqueue_result.should_disconnect) {
       clients_to_disconnect.push_back(client_fd);
@@ -752,7 +939,10 @@ OutboundMessagePolicy ConnectionManager::resolve_policy(
     return requested_policy;
   }
 
-  (void)destination;
+  if (destination.rfind("__", 0) == 0) {
+    return OutboundMessagePolicy::Realtime;
+  }
+
   return OutboundMessagePolicy::Strict;
 }
 

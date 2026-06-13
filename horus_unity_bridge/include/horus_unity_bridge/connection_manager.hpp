@@ -25,7 +25,10 @@ class MessageRouter;
 enum class OutboundMessagePolicy {
   Auto,
   Strict,
-  Replaceable
+  Replaceable,
+  Realtime,
+  Bulk,
+  BulkReplaceable
 };
 
 struct OutboundMessage
@@ -35,6 +38,7 @@ struct OutboundMessage
   size_t offset = 0;
   bool strict = true;
   bool replaceable = false;
+  int priority = 1;
 
   const uint8_t* data() const { return serialized.data() + offset; }
   size_t remaining_size() const { return serialized.size() - offset; }
@@ -56,6 +60,7 @@ public:
                         OutboundMessagePolicy policy,
                         size_t message_limit);
 
+  void set_priority_scheduling_enabled(bool enabled) { priority_scheduling_enabled_ = enabled; }
   bool empty() const { return queue_.empty(); }
   size_t size() const { return queue_.size(); }
 
@@ -70,12 +75,17 @@ private:
   using QueueIterator = QueueList::iterator;
 
   QueueIterator find_oldest_replaceable_evictable();
+  QueueIterator find_oldest_lower_priority_evictable(int priority);
+  QueueIterator select_front_iterator();
+  QueueList::const_iterator select_front_iterator() const;
   void erase_iterator(QueueIterator it);
   static bool is_replaceable_policy(OutboundMessagePolicy policy);
   static bool is_strict_policy(OutboundMessagePolicy policy);
+  static int priority_for_policy(OutboundMessagePolicy policy);
 
   QueueList queue_;
   std::unordered_map<std::string, QueueIterator> replaceable_by_destination_;
+  bool priority_scheduling_enabled_ = false;
 };
 
 /**
@@ -124,6 +134,7 @@ public:
     size_t message_queue_size = 1000;
     bool tcp_nodelay = true;
     int connection_timeout_ms = 5000;
+    bool priority_scheduling_enabled = false;
   };
   
   explicit ConnectionManager(const Config& config);
@@ -189,6 +200,11 @@ public:
     uint64_t bytes_sent = 0;
     uint64_t bytes_received = 0;
     uint64_t connection_errors = 0;
+    uint64_t messages_enqueued = 0;
+    uint64_t messages_replaced = 0;
+    uint64_t messages_dropped = 0;
+    uint64_t messages_evicted = 0;
+    uint64_t queue_depth_peak = 0;
   };
   
   Statistics get_statistics() const;
@@ -205,8 +221,7 @@ private:
   std::unordered_map<int, std::shared_ptr<ClientConnection>> connections_;
   mutable std::mutex connections_mutex_;
   
-  // Worker threads
-  std::thread accept_thread_;
+  // Worker thread
   std::thread io_thread_;
   
   // Callbacks
@@ -221,7 +236,6 @@ private:
   // Private methods
   bool setup_server_socket();
   bool setup_epoll();
-  void accept_loop();
   void io_loop();
   
   bool accept_connection();

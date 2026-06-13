@@ -69,6 +69,8 @@ void UnityBridgeNode::load_parameters()
     router_->declare_parameter<int>("message_queue_size", 1000));
   conn_config_.tcp_nodelay = router_->declare_parameter<bool>("tcp_nodelay", true);
   conn_config_.connection_timeout_ms = router_->declare_parameter<int>("connection_timeout_ms", 5000);
+  conn_config_.priority_scheduling_enabled = router_->declare_parameter<bool>(
+    "enable_priority_scheduling", false);
 
   const auto configured_worker_threads = router_->declare_parameter<int>("worker_threads", 4);
   worker_threads_ = std::max<int>(1, static_cast<int>(configured_worker_threads));
@@ -279,6 +281,14 @@ void UnityBridgeNode::print_statistics() const
               conn_stats.messages_sent, conn_stats.messages_received);
   RCLCPP_INFO(router_->get_logger(), "Bytes: %lu sent, %lu received",
               conn_stats.bytes_sent, conn_stats.bytes_received);
+  RCLCPP_INFO(
+    router_->get_logger(),
+    "Outbound queue: %lu enqueued, %lu replaced, %lu dropped, %lu evicted, peak_depth=%lu",
+    conn_stats.messages_enqueued,
+    conn_stats.messages_replaced,
+    conn_stats.messages_dropped,
+    conn_stats.messages_evicted,
+    conn_stats.queue_depth_peak);
   RCLCPP_INFO(router_->get_logger(), "Topics: %lu publishers, %lu subscribers",
               topic_stats.active_publishers, topic_stats.active_subscribers);
   RCLCPP_INFO(router_->get_logger(), "Router: %lu routed, %lu published, %lu commands",
