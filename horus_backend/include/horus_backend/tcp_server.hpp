@@ -6,8 +6,10 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace horus_backend
 {
@@ -31,6 +33,9 @@ private:
   int server_socket_;
   std::atomic<bool> running_;
   std::thread server_thread_;
+  std::mutex clients_mutex_;
+  std::vector<std::thread> client_threads_;
+  std::vector<int> client_sockets_;
   MessageCallback message_callback_;
 
   void server_loop();
@@ -42,6 +47,8 @@ private:
   bool bind_socket();
   bool listen_socket();
   void close_socket();
+  void shutdown_client_sockets();
+  void unregister_client_socket(int client_socket);
 };
 
 }  // namespace horus_backend

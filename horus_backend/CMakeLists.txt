@@ -98,14 +98,23 @@ install(DIRECTORY include/
 # Testing
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # ── disable the auto‐copyright test ──
+  find_package(ament_cmake_gtest REQUIRED)
+  # Disable the auto-copyright test.
   set(ament_cmake_copyright_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 
-  # TODO: Add tests later
-  # find_package(ament_cmake_gtest REQUIRED)
-  # ament_add_gtest(test_backend test/test_backend.cpp)
-  # target_link_libraries(test_backend ${PROJECT_NAME}_lib)
+  ament_add_gtest(test_backend test/test_backend.cpp)
+  if(TARGET test_backend)
+    target_compile_definitions(test_backend PRIVATE HORUS_BACKEND_ENABLE_TEST_ACCESS=1)
+    target_link_libraries(test_backend ${PROJECT_NAME}_lib)
+    ament_target_dependencies(test_backend
+      rclcpp
+      std_msgs
+      geometry_msgs
+      sensor_msgs
+      horus_interfaces
+    )
+  endif()
 endif()
 
 ament_package()

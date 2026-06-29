@@ -8,7 +8,7 @@
 #else
 namespace horus_backend
 {
-class Nav2ActionAdapter
+class Nav2ActionAdapte
 {
 public:
   explicit Nav2ActionAdapter(rclcpp::Node *) {}
@@ -36,11 +36,49 @@ public:
 #include <functional>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <unordered_map>
 #include <vector>
 
 namespace horus_backend
 {
+
+namespace
+{
+std::string escape_json_string(const std::string & value)
+{
+  std::ostringstream escaped;
+  for (char ch : value) {
+    switch (ch) {
+      case '"':
+        escaped << "\\\"";
+        break;
+      case '\\':
+        escaped << "\\\\";
+        break;
+      case '\b':
+        escaped << "\\b";
+        break;
+      case '\f':
+        escaped << "\\f";
+        break;
+      case '\n':
+        escaped << "\\n";
+        break;
+      case '\r':
+        escaped << "\\r";
+        break;
+      case '\t':
+        escaped << "\\t";
+        break;
+      default:
+        escaped << (static_cast<unsigned char>(ch) < 0x20 ? ' ' : ch);
+        break;
+    }
+  }
+  return escaped.str();
+}
+}  // namespace
 
 BackendNode::BackendNode()
 : Node("horus_backend_node")
@@ -268,7 +306,7 @@ std::string BackendNode::process_message(const std::string & message)
   RCLCPP_DEBUG(get_logger(), "Received TCP message: %s", message.c_str());
 
   // For now, just echo back a simple response
-  return "{\"status\": \"ok\", \"message\": \"Backend received: " + message +
+  return "{\"status\": \"ok\", \"message\": \"Backend received: " + escape_json_string(message) +
          "\"}";
 }
 
@@ -345,9 +383,9 @@ void BackendNode::register_robot_callback(
     }
 
     const auto get_metadata = [&metadata](const char * key) -> std::string {
-      auto it = metadata.find(key);
-      return it == metadata.end() ? std::string() : it->second;
-    };
+        auto it = metadata.find(key);
+        return it == metadata.end() ? std::string() : it->second;
+      };
 
     nav2_adapter_->register_robot(
       robot_id,

@@ -6,13 +6,21 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <iostream>
 
 namespace horus_backend
 {
+
+namespace
+{
+constexpr std::size_t kMaxBufferedMessageBytes = 1024u * 1024u;
+}  // namespace
 
 TcpServer::TcpServer(int port)
 : port_(port), server_socket_(-1), running_(false) {}
@@ -37,17 +45,33 @@ void TcpServer::start()
 
 void TcpServer::stop()
 {
-  if (!running_) {
+  if (!running_.exchange(false)) {
+    close_socket();
     return;
   }
 
-  running_ = false;
+  close_socket();
+  shutdown_client_sockets();
 
   if (server_thread_.joinable()) {
     server_thread_.join();
   }
 
-  close_socket();
+  std::vector<std::thread> client_threads;
+  {
+    std::lock_guard<std::mutex> lock(clients_mutex_);
+    client_threads.swap(client_threads_);
+    client_sockets_.clear();
+  }
+
+  for (auto & client_thread : client_threads) {
+    if (client_thread.joinable() &&
+      client_thread.get_id() != std::this_thread::get_id())
+    {
+      client_thread.join();
+    }
+  }
+
   std::cout << "TCP Server stopped" << std::endl;
 }
 
@@ -106,9 +130,28 @@ bool TcpServer::listen_socket()
 void TcpServer::close_socket()
 {
   if (server_socket_ >= 0) {
+    shutdown(server_socket_, SHUT_RDWR);
     close(server_socket_);
     server_socket_ = -1;
   }
+}
+
+void TcpServer::shutdown_client_sockets()
+{
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  for (int client_socket : client_sockets_) {
+    if (client_socket >= 0) {
+      shutdown(client_socket, SHUT_RDWR);
+    }
+  }
+}
+
+void TcpServer::unregister_client_socket(int client_socket)
+{
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  client_sockets_.erase(
+    std::remove(client_sockets_.begin(), client_sockets_.end(), client_socket),
+    client_sockets_.end());
 }
 
 void TcpServer::server_loop()
@@ -129,33 +172,66 @@ void TcpServer::server_loop()
     std::cout << "Client connected from " << inet_ntoa(address.sin_addr)
               << std::endl;
 
-    // Handle client in a separate thread
-    std::thread client_thread(&TcpServer::handle_client, this, client_socket);
-    client_thread.detach();
+    {
+      std::lock_guard<std::mutex> lock(clients_mutex_);
+      client_sockets_.push_back(client_socket);
+      client_threads_.emplace_back(&TcpServer::handle_client, this, client_socket);
+    }
   }
 }
 
 void TcpServer::handle_client(int client_socket)
 {
+  struct timeval timeout;
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 200000;
+  setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
   char buffer[1024] = {0};
+  std::string pending_message;
 
   while (running_) {
     ssize_t bytes_read = recv(client_socket, buffer, sizeof(buffer) - 1, 0);
     if (bytes_read <= 0) {
+      if (bytes_read < 0 && running_ &&
+        (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+      {
+        continue;
+      }
       break;
     }
 
     buffer[bytes_read] = '\0';
-    std::string message(buffer);
+    pending_message.append(buffer, static_cast<std::size_t>(bytes_read));
+    if (pending_message.size() > kMaxBufferedMessageBytes) {
+      const std::string response = "{\"status\":\"error\",\"message\":\"message too large\"}\n";
+      send(client_socket, response.c_str(), response.length(), 0);
+      break;
+    }
 
-    // Process message
-    std::string response = process_message(message);
+    std::size_t newline_pos = std::string::npos;
+    while ((newline_pos = pending_message.find('\n')) != std::string::npos) {
+      std::string message = pending_message.substr(0, newline_pos);
+      if (!message.empty() && message.back() == '\r') {
+        message.pop_back();
+      }
+      pending_message.erase(0, newline_pos + 1);
+      if (message.empty()) {
+        continue;
+      }
 
-    // Send response
+      const std::string response = process_message(message) + "\n";
+      send(client_socket, response.c_str(), response.length(), 0);
+    }
+  }
+
+  if (!pending_message.empty() && pending_message.size() <= kMaxBufferedMessageBytes) {
+    const std::string response = process_message(pending_message) + "\n";
     send(client_socket, response.c_str(), response.length(), 0);
   }
 
   close(client_socket);
+  unregister_client_socket(client_socket);
   std::cout << "Client disconnected" << std::endl;
 }
 

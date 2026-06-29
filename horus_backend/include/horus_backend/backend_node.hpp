@@ -33,6 +33,13 @@ public:
   void initialize();
   void shutdown();
 
+#ifdef HORUS_BACKEND_ENABLE_TEST_ACCESS
+  std::string process_message_for_test(const std::string & message)
+  {
+    return process_message(message);
+  }
+#endif
+
 private:
   // Core components
   std::unique_ptr<TcpServer> tcp_server_;
