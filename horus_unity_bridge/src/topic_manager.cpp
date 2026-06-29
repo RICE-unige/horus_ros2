@@ -184,25 +184,29 @@ bool TopicManager::register_subscriber(
           }
         }
 
-        if (BridgeMetrics::instance().enabled()) BridgeMetrics::instance().record(
-          "ros_to_unity",
-          "received",
-          -1,
-          topic,
-          static_cast<std::uint64_t>(rcl_msg.buffer_length),
-          static_cast<std::uint64_t>(rcl_msg.buffer_length),
-          static_cast<std::uint64_t>(callbacks.size()));
-
-        for (const auto & callback_pair : callbacks) {
-          callback_pair.second(topic, data);
-          if (BridgeMetrics::instance().enabled()) BridgeMetrics::instance().record(
+        if (BridgeMetrics::instance().enabled()) {
+          BridgeMetrics::instance().record(
             "ros_to_unity",
-            "forwarded",
-            callback_pair.first,
+            "received",
+            -1,
             topic,
             static_cast<std::uint64_t>(rcl_msg.buffer_length),
             static_cast<std::uint64_t>(rcl_msg.buffer_length),
             static_cast<std::uint64_t>(callbacks.size()));
+        }
+
+        for (const auto & callback_pair : callbacks) {
+          callback_pair.second(topic, data);
+          if (BridgeMetrics::instance().enabled()) {
+            BridgeMetrics::instance().record(
+              "ros_to_unity",
+              "forwarded",
+              callback_pair.first,
+              topic,
+              static_cast<std::uint64_t>(rcl_msg.buffer_length),
+              static_cast<std::uint64_t>(rcl_msg.buffer_length),
+              static_cast<std::uint64_t>(callbacks.size()));
+          }
         }
 
         stats_.messages_received++;
@@ -266,14 +270,16 @@ bool TopicManager::publish_message(
 
       it->second.publisher->publish(empty_serialized);
       stats_.messages_published++;
-      if (BridgeMetrics::instance().enabled()) BridgeMetrics::instance().record(
-        "unity_to_ros",
-        "published",
-        -1,
-        topic,
-        0,
-        static_cast<std::uint64_t>(
-          empty_serialized.get_rcl_serialized_message().buffer_length));
+      if (BridgeMetrics::instance().enabled()) {
+        BridgeMetrics::instance().record(
+          "unity_to_ros",
+          "published",
+          -1,
+          topic,
+          0,
+          static_cast<std::uint64_t>(
+            empty_serialized.get_rcl_serialized_message().buffer_length));
+      }
       return true;
     }
 
@@ -288,13 +294,15 @@ bool TopicManager::publish_message(
     // Publish
     it->second.publisher->publish(msg);
     stats_.messages_published++;
-    if (BridgeMetrics::instance().enabled()) BridgeMetrics::instance().record(
-      "unity_to_ros",
-      "published",
-      -1,
-      topic,
-      static_cast<std::uint64_t>(serialized_msg.size()),
-      static_cast<std::uint64_t>(rcl_msg.buffer_length));
+    if (BridgeMetrics::instance().enabled()) {
+      BridgeMetrics::instance().record(
+        "unity_to_ros",
+        "published",
+        -1,
+        topic,
+        static_cast<std::uint64_t>(serialized_msg.size()),
+        static_cast<std::uint64_t>(rcl_msg.buffer_length));
+    }
 
     return true;
   } catch (const std::exception & e) {
