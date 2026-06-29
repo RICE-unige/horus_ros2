@@ -1,4 +1,4 @@
-﻿# HORUS Unity Bridge (`horus_unity_bridge`)
+# HORUS Unity Bridge (`horus_unity_bridge`)
 
 <div align="center">
 
@@ -36,12 +36,12 @@ This package handles:
 
 | Dependency | Required | Why |
 |---|---|---|
-| ROS 2 Humble/Jazzy | Yes | Core runtime |
+| ROS 2 Jazzy | Yes | Core runtime |
 | `nlohmann-json3-dev` | Yes | Protocol payload serialization |
 | `libunwind-dev` | Yes | Runtime/toolchain dependency |
 | GStreamer dev libs | WebRTC mode | Media encode/payloader pipeline |
 | OpenCV dev libs | WebRTC mode | Image decode/format conversion |
-| `libdatachannel` | WebRTC mode | WebRTC signaling/peer connection (fetched by CMake) |
+| `libdatachannel` | WebRTC mode | WebRTC signaling/peer connection; prefer a system CMake package, or opt into the pinned source fallback |
 
 Install baseline + WebRTC deps:
 
@@ -62,6 +62,11 @@ sudo apt-get install -y \
   libopencv-dev
 ```
 
+`ENABLE_WEBRTC` is off by default for reproducible offline builds. If your system
+does not provide a `LibDataChannel` CMake package, the bridge can use a pinned
+source fallback only when explicitly requested with
+`-DHORUS_ALLOW_LIBDATACHANNEL_FETCH=ON`.
+
 ## Build and Launch
 
 ### WebRTC enabled
@@ -73,11 +78,19 @@ source install/setup.bash
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 ```
 
+If no system `LibDataChannel` package is installed, use the pinned fallback:
+
+```bash
+colcon build --packages-select horus_unity_bridge --cmake-args \
+  -DENABLE_WEBRTC=ON \
+  -DHORUS_ALLOW_LIBDATACHANNEL_FETCH=ON
+```
+
 ### WebRTC disabled
 
 ```bash
 cd ~/horus_ws/src/horus_ros2
-colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=OFF
+colcon build --packages-select horus_unity_bridge
 source install/setup.bash
 ros2 launch horus_unity_bridge unity_bridge.launch.py
 ```
@@ -147,7 +160,7 @@ Interpretation:
 ## Test Entry Points
 
 ```bash
-colcon build --packages-select horus_unity_bridge horus_unity_bridge_test --cmake-args -DENABLE_WEBRTC=ON
+colcon build --packages-select horus_unity_bridge horus_unity_bridge_test
 source install/setup.bash
 
 ros2 launch horus_unity_bridge unity_bridge.launch.py &

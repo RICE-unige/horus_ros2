@@ -1,6 +1,6 @@
 # HORUS ROS 2 Infrastructure
 
-[![ROS2](https://img.shields.io/badge/ROS2-Humble%20%7C%20Jazzy-22314E)](https://docs.ros.org)
+[![ROS2](https://img.shields.io/badge/ROS2-Jazzy-22314E)](https://docs.ros.org)
 ![Build](https://img.shields.io/badge/Build-colcon-blue)
 ![C++](https://img.shields.io/badge/C%2B%2B-17-00599C)
 [![License](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
@@ -111,7 +111,7 @@ Robot-task backend baseline:
 
 ## :white_check_mark: Prerequisites
 
-- ROS 2 Humble or Jazzy
+- ROS 2 Jazzy
 - `rosdep`
 - C++ build toolchain (`colcon`, CMake)
 - For WebRTC builds: GStreamer + OpenCV dependencies (see [`horus_unity_bridge/README.md`](horus_unity_bridge/README.md))
@@ -121,8 +121,9 @@ Robot-task backend baseline:
 | Mode | Command |
 |---|---|
 | Standard bridge | `colcon build --packages-select horus_unity_bridge` |
-| WebRTC-enabled bridge | `colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON` |
-| Backend + bridge (auto Nav2 detect) | `colcon build --packages-select horus_backend horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON` |
+| WebRTC-enabled bridge, system `LibDataChannel` | `colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON` |
+| WebRTC-enabled bridge, pinned source fallback | `colcon build --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON -DHORUS_ALLOW_LIBDATACHANNEL_FETCH=ON` |
+| Backend + bridge (auto Nav2 detect) | `colcon build --packages-select horus_backend horus_unity_bridge` |
 
 Recommended setup:
 
@@ -130,9 +131,13 @@ Recommended setup:
 git clone https://github.com/RICE-unige/horus_ros2.git ~/horus_ws/src/horus_ros2
 cd ~/horus_ws/src/horus_ros2
 rosdep install --from-paths . -y --ignore-src
-colcon build --symlink-install --packages-select horus_unity_bridge --cmake-args -DENABLE_WEBRTC=ON
+colcon build --symlink-install --packages-select horus_unity_bridge
 source install/setup.bash
 ```
+
+WebRTC builds are opt-in so the standard bridge can build without network fetches.
+Use `-DENABLE_WEBRTC=ON` with an installed `LibDataChannel` package, or add
+`-DHORUS_ALLOW_LIBDATACHANNEL_FETCH=ON` to use the pinned source fallback.
 
 ## :rocket: Launch
 
