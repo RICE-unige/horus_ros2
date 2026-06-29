@@ -1,3 +1,17 @@
+// Copyright 2025 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // SPDX-FileCopyrightText: 2025 RICE Lab, University of Genoa
 // SPDX-License-Identifier: Apache-2.0
 
@@ -25,8 +39,10 @@ namespace horus_unity_bridge
 class WebRTCManager
 {
 public:
-  using SignalingCallback = std::function<void(const std::string& type, const nlohmann::json& data)>;
-  struct Settings {
+  using SignalingCallback = std::function<void(const std::string & type,
+      const nlohmann::json & data)>;
+  struct Settings
+  {
     std::vector<std::string> stun_servers;
     std::string encoder = "x264enc";
     int bitrate_kbps = 2000;
@@ -39,18 +55,22 @@ public:
   ~WebRTCManager();
 
   // Initialize GStreamer and WebRTC configuration
-  bool initialize(const Settings& settings);
-  
+  bool initialize(const Settings & settings);
+
   // Set callback for sending signaling messages back to the client via TCP
   void set_signaling_callback(SignalingCallback callback);
 
   // Handle incoming signaling messages from the client
-  bool handle_offer(const std::string& sdp);
-  void handle_answer(const std::string& sdp);
-  void handle_candidate(const std::string& candidate, const std::string& sdp_mid, int sdp_mline_index);
+  bool handle_offer(const std::string & sdp);
+  void handle_answer(const std::string & sdp);
+  void handle_candidate(
+    const std::string & candidate, const std::string & sdp_mid,
+    int sdp_mline_index);
 
   // Feed video frame to the streaming pipeline
-  void push_frame(const std::vector<uint8_t>& data, int width, int height, const std::string& format);
+  void push_frame(
+    const std::vector<uint8_t> & data, int width, int height,
+    const std::string & format);
 
   // Request a keyframe from the encoder (useful for packet loss recovery)
   void request_keyframe();
@@ -77,11 +97,11 @@ private:
   std::shared_ptr<rtc::PeerConnection> peer_connection_;
   std::shared_ptr<rtc::Track> video_track_;
   std::shared_ptr<rtc::DataChannel> data_channel_;
-  
+
   // GStreamer pipeline
-  GstElement* pipeline_ = nullptr;
-  GstElement* appsrc_ = nullptr;
-  GstElement* appsink_ = nullptr;
+  GstElement * pipeline_ = nullptr;
+  GstElement * appsrc_ = nullptr;
+  GstElement * appsink_ = nullptr;
   std::atomic<bool> pipeline_started_{false};
   std::mutex frame_mutex_;
   std::atomic<bool> peer_connected_{false};
@@ -97,7 +117,7 @@ private:
   int last_width_ = 0;
   int last_height_ = 0;
   std::string last_format_;
-  
+
   SignalingCallback signaling_callback_;
   std::mutex signaling_mutex_;
   std::mutex pending_description_mutex_;
@@ -105,24 +125,26 @@ private:
   std::string pending_local_description_type_;
   nlohmann::json pending_local_description_data_;
   std::mutex pipeline_mutex_;
-  
+
   // Configuration
   rtc::Configuration config_;
-  
+
   // Internal helpers
   void create_peer_connection();
-  bool parse_offer_video_negotiation(const std::string& sdp, OfferVideoNegotiation& negotiation) const;
-  bool configure_video_track_for_offer(const OfferVideoNegotiation& negotiation);
+  bool parse_offer_video_negotiation(
+    const std::string & sdp,
+    OfferVideoNegotiation & negotiation) const;
+  bool configure_video_track_for_offer(const OfferVideoNegotiation & negotiation);
   bool apply_video_payload_type(int payload_type);
   static bool parse_payload_type_from_rtpmap(
-    const std::string& line,
-    const std::string& codec_name,
-    int& payload_type);
-  static std::string trim_copy(const std::string& value);
+    const std::string & line,
+    const std::string & codec_name,
+    int & payload_type);
+  static std::string trim_copy(const std::string & value);
   bool setup_gstreamer_pipeline();
   void start_pipeline();
   void stop_pipeline();
-  static GstFlowReturn on_new_sample(GstElement* sink, gpointer user_data);
+  static GstFlowReturn on_new_sample(GstElement * sink, gpointer user_data);
 };
 
 } // namespace horus_unity_bridge

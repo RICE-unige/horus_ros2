@@ -1,26 +1,43 @@
+// Copyright 2026 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // SPDX-FileCopyrightText: 2025 RICE Lab, University of Genoa
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/topic_manager.hpp"
+#include "horus_unity_bridge/bridge_metrics.hpp"
 #include <rclcpp/serialization.hpp>
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
 #include <dlfcn.h>
 #include <algorithm>
+#include <utility>
 #include <std_msgs/msg/empty.hpp>
 
 namespace horus_unity_bridge
 {
 
-TopicManager::TopicManager(rclcpp::Node* node)
-  : node_(node)
+TopicManager::TopicManager(rclcpp::Node * node)
+: node_(node)
 {
   stats_ = TopicStatistics{};
 }
 
-bool TopicManager::register_publisher(const std::string& topic,
-                                     const std::string& message_type,
-                                     int client_fd,
-                                     const rclcpp::QoS& qos)
+bool TopicManager::register_publisher(
+  const std::string & topic,
+  const std::string & message_type,
+  int client_fd,
+  const rclcpp::QoS & qos)
 {
   std::lock_guard<std::mutex> lock(publishers_mutex_);
 
@@ -51,20 +68,29 @@ bool TopicManager::register_publisher(const std::string& topic,
     node_->get_logger();
     RCLCPP_INFO(node_->get_logger(), "Registered publisher: %s [%s]",
                 topic.c_str(), normalized_type.c_str());
+    BridgeMetrics::instance().record(
+      "unity_to_ros",
+      "publisher_registered",
+      client_fd,
+      topic,
+      0,
+      0,
+      static_cast<std::uint64_t>(publishers_.size()));
 
     return true;
-  } catch (const std::exception& e) {
+  } catch (const std::exception & e) {
     RCLCPP_ERROR(node_->get_logger(), "Failed to register publisher %s: %s",
                  topic.c_str(), e.what());
     return false;
   }
 }
 
-bool TopicManager::register_subscriber(const std::string& topic,
-                                       const std::string& message_type,
-                                       int client_fd,
-                                       MessageCallback callback,
-                                       const rclcpp::QoS& qos)
+bool TopicManager::register_subscriber(
+  const std::string & topic,
+  const std::string & message_type,
+  int client_fd,
+  MessageCallback callback,
+  const rclcpp::QoS & qos)
 {
   std::lock_guard<std::mutex> lock(subscribers_mutex_);
 
@@ -80,10 +106,12 @@ bool TopicManager::register_subscriber(const std::string& topic,
       if (stats_.active_subscribers > 0) {
         stats_.active_subscribers--;
       }
-      RCLCPP_INFO(node_->get_logger(), "Recreating subscriber for static TF on reconnect: %s", topic.c_str());
+      RCLCPP_INFO(node_->get_logger(), "Recreating subscriber for static TF on reconnect: %s",
+          topic.c_str());
     } else {
       it->second.client_callbacks[client_fd] = std::move(callback);
-      RCLCPP_INFO(node_->get_logger(), "Updated subscriber callback: %s (client_fd=%d, total_clients=%zu)",
+      RCLCPP_INFO(node_->get_logger(),
+          "Updated subscriber callback: %s (client_fd=%d, total_clients=%zu)",
                   topic.c_str(), client_fd, it->second.client_callbacks.size());
       return true;
     }
@@ -96,16 +124,21 @@ bool TopicManager::register_subscriber(const std::string& topic,
     // Create generic subscription with callback
     // PATCH: Force Transient Local QoS for tf_static topics
     rclcpp::QoS final_qos = qos;
+    const bool is_webrtc_signal_topic =
+      topic.find("webrtc") != std::string::npos &&
+      topic.find("server_signal") != std::string::npos;
     if (topic.length() >= 9 && topic.substr(topic.length() - 9) == "tf_static") {
-        final_qos.transient_local();
-        RCLCPP_INFO(node_->get_logger(), "Forcing Transient Local QoS for static TF topic: %s", topic.c_str());
-    } else if (topic.find("webrtc") != std::string::npos && topic.find("server_signal") != std::string::npos) {
-        // Match exact QoS of webrtc_signal_pub_ in message_router.cpp:
-        // KeepLast(100), Reliable, Volatile
-        final_qos = rclcpp::QoS(rclcpp::KeepLast(100))
-            .reliability(rclcpp::ReliabilityPolicy::Reliable)
-            .durability(rclcpp::DurabilityPolicy::Volatile);
-        RCLCPP_INFO(node_->get_logger(), "Forcing matching WebRTC signal QoS (reliable+volatile) for topic: %s", topic.c_str());
+      final_qos.transient_local();
+      RCLCPP_INFO(node_->get_logger(), "Forcing Transient Local QoS for static TF topic: %s",
+          topic.c_str());
+    } else if (is_webrtc_signal_topic) {
+      // Match exact QoS of webrtc_signal_pub_ in message_router.cpp:
+      // KeepLast(100), Reliable, Volatile
+      final_qos = rclcpp::QoS(rclcpp::KeepLast(100))
+        .reliability(rclcpp::ReliabilityPolicy::Reliable)
+        .durability(rclcpp::DurabilityPolicy::Volatile);
+      RCLCPP_INFO(node_->get_logger(),
+          "Forcing matching WebRTC signal QoS (reliable+volatile) for topic: %s", topic.c_str());
     }
 
     auto sub = node_->create_generic_subscription(
@@ -114,7 +147,7 @@ bool TopicManager::register_subscriber(const std::string& topic,
       final_qos,
       [this, topic](std::shared_ptr<rclcpp::SerializedMessage> msg) {
         // Convert serialized message to vector
-        const auto& rcl_msg = msg->get_rcl_serialized_message();
+        const auto & rcl_msg = msg->get_rcl_serialized_message();
 
         // PATCH: Strip CDR Header (4 bytes) for StringMsg on Registration Topic
         // Unity ROS-TCP-Connector expects [Len][Bytes], but ROS 2 CDR is [Header][Len][Bytes]
@@ -122,12 +155,12 @@ bool TopicManager::register_subscriber(const std::string& topic,
         bool is_reg = (topic.find("registration") != std::string::npos);
 
         if (protocol_logging_enabled_ && is_reg) {
-            std::stringstream ss;
-            ss << "DEBUG_MSG [" << topic << "] Len: " << rcl_msg.buffer_length << " Bytes: ";
-            for(size_t i=0; i< std::min((size_t)8, rcl_msg.buffer_length); ++i) {
-                ss << std::hex << (int)rcl_msg.buffer[i] << " ";
-            }
-            RCLCPP_DEBUG(node_->get_logger(), "%s", ss.str().c_str());
+          std::stringstream ss;
+          ss << "DEBUG_MSG [" << topic << "] Len: " << rcl_msg.buffer_length << " Bytes: ";
+          for (size_t i = 0; i < std::min(static_cast < size_t > (8), rcl_msg.buffer_length); ++i) {
+            ss << std::hex << static_cast<int>(rcl_msg.buffer[i]) << " ";
+          }
+          RCLCPP_DEBUG(node_->get_logger(), "%s", ss.str().c_str());
         }
 
         // Send the raw message (ROS 2 CDR formatted)
@@ -137,22 +170,39 @@ bool TopicManager::register_subscriber(const std::string& topic,
         std::vector<uint8_t> data;
         data.assign(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
 
-        std::vector<MessageCallback> callbacks;
+        std::vector<std::pair<int, MessageCallback>> callbacks;
         {
           std::lock_guard<std::mutex> callbacks_lock(subscribers_mutex_);
           auto sub_it = subscribers_.find(topic);
           if (sub_it != subscribers_.end()) {
             callbacks.reserve(sub_it->second.client_callbacks.size());
-            for (const auto& client_pair : sub_it->second.client_callbacks) {
+            for (const auto & client_pair : sub_it->second.client_callbacks) {
               if (client_pair.second) {
-                callbacks.push_back(client_pair.second);
+                callbacks.emplace_back(client_pair.first, client_pair.second);
               }
             }
           }
         }
 
-        for (const auto& cb : callbacks) {
-          cb(topic, data);
+        if (BridgeMetrics::instance().enabled()) BridgeMetrics::instance().record(
+          "ros_to_unity",
+          "received",
+          -1,
+          topic,
+          static_cast<std::uint64_t>(rcl_msg.buffer_length),
+          static_cast<std::uint64_t>(rcl_msg.buffer_length),
+          static_cast<std::uint64_t>(callbacks.size()));
+
+        for (const auto & callback_pair : callbacks) {
+          callback_pair.second(topic, data);
+          if (BridgeMetrics::instance().enabled()) BridgeMetrics::instance().record(
+            "ros_to_unity",
+            "forwarded",
+            callback_pair.first,
+            topic,
+            static_cast<std::uint64_t>(rcl_msg.buffer_length),
+            static_cast<std::uint64_t>(rcl_msg.buffer_length),
+            static_cast<std::uint64_t>(callbacks.size()));
         }
 
         stats_.messages_received++;
@@ -174,17 +224,26 @@ bool TopicManager::register_subscriber(const std::string& topic,
 
     RCLCPP_INFO(node_->get_logger(), "Registered subscriber: %s [%s]",
                 topic.c_str(), normalized_type.c_str());
+    BridgeMetrics::instance().record(
+      "ros_to_unity",
+      "subscriber_registered",
+      client_fd,
+      topic,
+      0,
+      0,
+      static_cast<std::uint64_t>(subscribers_.size()));
 
     return true;
-  } catch (const std::exception& e) {
+  } catch (const std::exception & e) {
     RCLCPP_ERROR(node_->get_logger(), "Failed to register subscriber %s: %s",
                  topic.c_str(), e.what());
     return false;
   }
 }
 
-bool TopicManager::publish_message(const std::string& topic,
-                                   const std::vector<uint8_t>& serialized_msg)
+bool TopicManager::publish_message(
+  const std::string & topic,
+  const std::vector<uint8_t> & serialized_msg)
 {
   std::lock_guard<std::mutex> lock(publishers_mutex_);
 
@@ -197,7 +256,7 @@ bool TopicManager::publish_message(const std::string& topic,
   }
 
   try {
-    const std::string& message_type = it->second.message_type;
+    const std::string & message_type = it->second.message_type;
     if (message_type == "std_msgs/msg/Empty") {
       // Use a typed serialization path for std_msgs/Empty to avoid payload edge cases.
       std_msgs::msg::Empty empty_msg;
@@ -207,12 +266,20 @@ bool TopicManager::publish_message(const std::string& topic,
 
       it->second.publisher->publish(empty_serialized);
       stats_.messages_published++;
+      if (BridgeMetrics::instance().enabled()) BridgeMetrics::instance().record(
+        "unity_to_ros",
+        "published",
+        -1,
+        topic,
+        0,
+        static_cast<std::uint64_t>(
+          empty_serialized.get_rcl_serialized_message().buffer_length));
       return true;
     }
 
     // Create ROS serialized message
     rclcpp::SerializedMessage msg(serialized_msg.size());
-    auto& rcl_msg = msg.get_rcl_serialized_message();
+    auto & rcl_msg = msg.get_rcl_serialized_message();
 
     // Copy data
     std::memcpy(rcl_msg.buffer, serialized_msg.data(), serialized_msg.size());
@@ -221,9 +288,16 @@ bool TopicManager::publish_message(const std::string& topic,
     // Publish
     it->second.publisher->publish(msg);
     stats_.messages_published++;
+    if (BridgeMetrics::instance().enabled()) BridgeMetrics::instance().record(
+      "unity_to_ros",
+      "published",
+      -1,
+      topic,
+      static_cast<std::uint64_t>(serialized_msg.size()),
+      static_cast<std::uint64_t>(rcl_msg.buffer_length));
 
     return true;
-  } catch (const std::exception& e) {
+  } catch (const std::exception & e) {
     RCLCPP_ERROR(node_->get_logger(), "Failed to publish message on %s: %s",
                  topic.c_str(), e.what());
     stats_.publish_errors++;
@@ -231,7 +305,7 @@ bool TopicManager::publish_message(const std::string& topic,
   }
 }
 
-bool TopicManager::unregister_publisher(const std::string& topic, int client_fd)
+bool TopicManager::unregister_publisher(const std::string & topic, int client_fd)
 {
   std::lock_guard<std::mutex> lock(publishers_mutex_);
 
@@ -265,7 +339,7 @@ size_t TopicManager::unregister_all_client_publishers(int client_fd)
   std::vector<std::string> topics_to_erase;
   topics_to_erase.reserve(publishers_.size());
 
-  for (auto& pair : publishers_) {
+  for (auto & pair : publishers_) {
     auto erased = pair.second.owner_client_fds.erase(client_fd);
     if (erased == 0) {
       continue;
@@ -283,7 +357,7 @@ size_t TopicManager::unregister_all_client_publishers(int client_fd)
     }
   }
 
-  for (const auto& topic : topics_to_erase) {
+  for (const auto & topic : topics_to_erase) {
     publishers_.erase(topic);
     if (stats_.active_publishers > 0) {
       stats_.active_publishers--;
@@ -293,7 +367,7 @@ size_t TopicManager::unregister_all_client_publishers(int client_fd)
   return removed_topics;
 }
 
-bool TopicManager::unregister_subscriber(const std::string& topic, int client_fd)
+bool TopicManager::unregister_subscriber(const std::string & topic, int client_fd)
 {
   std::lock_guard<std::mutex> lock(subscribers_mutex_);
 
@@ -304,7 +378,8 @@ bool TopicManager::unregister_subscriber(const std::string& topic, int client_fd
 
   it->second.client_callbacks.erase(client_fd);
   if (!it->second.client_callbacks.empty()) {
-    RCLCPP_INFO(node_->get_logger(), "Removed subscriber client callback: %s (client_fd=%d, remaining=%zu)",
+    RCLCPP_INFO(node_->get_logger(),
+        "Removed subscriber client callback: %s (client_fd=%d, remaining=%zu)",
                 topic.c_str(), client_fd, it->second.client_callbacks.size());
     return true;
   }
@@ -314,7 +389,8 @@ bool TopicManager::unregister_subscriber(const std::string& topic, int client_fd
     stats_.active_subscribers--;
   }
 
-  RCLCPP_INFO(node_->get_logger(), "Unregistered subscriber: %s (last client removed)", topic.c_str());
+  RCLCPP_INFO(node_->get_logger(), "Unregistered subscriber: %s (last client removed)",
+      topic.c_str());
   return true;
 }
 
@@ -326,7 +402,7 @@ size_t TopicManager::unregister_all_client_subscribers(int client_fd)
   std::vector<std::string> topics_to_erase;
   topics_to_erase.reserve(subscribers_.size());
 
-  for (auto& pair : subscribers_) {
+  for (auto & pair : subscribers_) {
     auto erased = pair.second.client_callbacks.erase(client_fd);
     if (erased == 0) {
       continue;
@@ -343,12 +419,13 @@ size_t TopicManager::unregister_all_client_subscribers(int client_fd)
     }
   }
 
-  for (const auto& topic : topics_to_erase) {
+  for (const auto & topic : topics_to_erase) {
     subscribers_.erase(topic);
     if (stats_.active_subscribers > 0) {
       stats_.active_subscribers--;
     }
-    RCLCPP_INFO(node_->get_logger(), "Unregistered subscriber on disconnect cleanup: %s", topic.c_str());
+    RCLCPP_INFO(node_->get_logger(), "Unregistered subscriber on disconnect cleanup: %s",
+        topic.c_str());
   }
 
   return removed_topics;
@@ -359,7 +436,7 @@ std::vector<std::string> TopicManager::get_client_subscription_topics(int client
   std::lock_guard<std::mutex> lock(subscribers_mutex_);
   std::vector<std::string> topics;
 
-  for (const auto& pair : subscribers_) {
+  for (const auto & pair : subscribers_) {
     if (pair.second.client_callbacks.find(client_fd) != pair.second.client_callbacks.end()) {
       topics.push_back(pair.first);
     }
@@ -368,13 +445,13 @@ std::vector<std::string> TopicManager::get_client_subscription_topics(int client
   return topics;
 }
 
-bool TopicManager::has_publisher(const std::string& topic) const
+bool TopicManager::has_publisher(const std::string & topic) const
 {
   std::lock_guard<std::mutex> lock(publishers_mutex_);
   return publishers_.find(topic) != publishers_.end();
 }
 
-bool TopicManager::has_subscriber(const std::string& topic) const
+bool TopicManager::has_subscriber(const std::string & topic) const
 {
   std::lock_guard<std::mutex> lock(subscribers_mutex_);
   return subscribers_.find(topic) != subscribers_.end();
@@ -386,7 +463,7 @@ std::vector<std::string> TopicManager::get_publisher_topics() const
   std::vector<std::string> topics;
   topics.reserve(publishers_.size());
 
-  for (const auto& pair : publishers_) {
+  for (const auto & pair : publishers_) {
     topics.push_back(pair.first);
   }
 
@@ -399,21 +476,22 @@ std::vector<std::string> TopicManager::get_subscriber_topics() const
   std::vector<std::string> topics;
   topics.reserve(subscribers_.size());
 
-  for (const auto& pair : subscribers_) {
+  for (const auto & pair : subscribers_) {
     topics.push_back(pair.first);
   }
 
   return topics;
 }
 
-std::string TopicManager::normalize_message_type(const std::string& message_type)
+std::string TopicManager::normalize_message_type(const std::string & message_type)
 {
   // Convert from Unity format (package/MessageType) to ROS2 format (package/msg/MessageType)
   std::string normalized = message_type;
 
   // If already in correct format, return as-is
   if (normalized.find("/msg/") != std::string::npos ||
-      normalized.find("/srv/") != std::string::npos) {
+    normalized.find("/srv/") != std::string::npos)
+  {
     return normalized;
   }
 
@@ -430,8 +508,8 @@ std::string TopicManager::normalize_message_type(const std::string& message_type
   return normalized;
 }
 
-const rosidl_message_type_support_t* TopicManager::get_type_support(
-    const std::string& message_type)
+const rosidl_message_type_support_t * TopicManager::get_type_support(
+  const std::string & message_type)
 {
   (void)message_type;
   // This function would dynamically load type support

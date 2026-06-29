@@ -1,3 +1,17 @@
+// Copyright 2026 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // SPDX-FileCopyrightText: 2025 RICE Lab, University of Genoa
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,9 +24,9 @@
 namespace horus_unity_bridge
 {
 
-UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions& options)
-  : node_options_(options),
-    running_(false)
+UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions & options)
+: node_options_(options),
+  running_(false)
 {
   // Initialize ROS if not already done
   if (!rclcpp::ok()) {
@@ -24,20 +38,20 @@ UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions& options)
 
   // Load parameters
   load_parameters();
-  
+
   // Create connection manager
   connection_manager_ = std::make_unique<ConnectionManager>(conn_config_);
-  
+
   // Setup callbacks
   setup_callbacks();
-  
+
   // Create executor
   rclcpp::ExecutorOptions executor_options;
   executor_ = std::make_shared<rclcpp::executors::MultiThreadedExecutor>(
     executor_options, worker_threads_, false
   );
   executor_->add_node(router_);
-  
+
   if (!reserved_parameter_warnings_.empty()) {
     std::ostringstream warning_stream;
     warning_stream << "Reserved bridge parameters currently ignored: ";
@@ -68,9 +82,8 @@ void UnityBridgeNode::load_parameters()
   conn_config_.message_queue_size = static_cast<size_t>(
     router_->declare_parameter<int>("message_queue_size", 1000));
   conn_config_.tcp_nodelay = router_->declare_parameter<bool>("tcp_nodelay", true);
-  conn_config_.connection_timeout_ms = router_->declare_parameter<int>("connection_timeout_ms", 5000);
-  conn_config_.priority_scheduling_enabled = router_->declare_parameter<bool>(
-    "enable_priority_scheduling", false);
+  conn_config_.connection_timeout_ms = router_->declare_parameter<int>("connection_timeout_ms",
+      5000);
 
   const auto configured_worker_threads = router_->declare_parameter<int>("worker_threads", 4);
   worker_threads_ = std::max<int>(1, static_cast<int>(configured_worker_threads));
@@ -78,14 +91,15 @@ void UnityBridgeNode::load_parameters()
   router_->set_log_protocol_messages(log_protocol_messages_);
 
   reserved_parameter_warnings_.clear();
-  auto add_reserved_warning = [this](const std::string& name) {
-    if (std::find(
+  auto add_reserved_warning = [this](const std::string & name) {
+      if (std::find(
           reserved_parameter_warnings_.begin(),
           reserved_parameter_warnings_.end(),
-          name) == reserved_parameter_warnings_.end()) {
-      reserved_parameter_warnings_.push_back(name);
-    }
-  };
+          name) == reserved_parameter_warnings_.end())
+      {
+        reserved_parameter_warnings_.push_back(name);
+      }
+    };
 
   router_->declare_parameter<int>("message_pool_size", 10000);
   router_->declare_parameter<bool>("enable_zero_copy", true);
@@ -123,38 +137,38 @@ void UnityBridgeNode::setup_callbacks()
 {
   // Message from Unity -> Router
   connection_manager_->set_message_callback(
-    [this](int fd, const ProtocolMessage& msg) {
+    [this](int fd, const ProtocolMessage & msg) {
       handle_message_from_unity(fd, msg);
     }
   );
-  
-  // Router wants to send to Unity -> Connection Manager  
+
+  // Router wants to send to Unity -> Connection Manager
   router_->set_send_callback(
     [this](int fd,
-           const std::string& dest,
-           const std::vector<uint8_t>& payload,
-           OutboundMessagePolicy policy) {
+    const std::string & dest,
+    const std::vector<uint8_t> & payload,
+    OutboundMessagePolicy policy) {
       return connection_manager_->send_to_client(fd, dest, payload, policy);
     }
   );
-  
+
   router_->set_broadcast_callback(
-    [this](const std::string& dest,
-           const std::vector<uint8_t>& payload,
-           OutboundMessagePolicy policy) {
+    [this](const std::string & dest,
+    const std::vector<uint8_t> & payload,
+    OutboundMessagePolicy policy) {
       connection_manager_->broadcast_message(dest, payload, policy);
     }
   );
-  
+
   // Connection events
   connection_manager_->set_connection_callback(
-    [this](int fd, const std::string& ip, uint16_t port) {
+    [this](int fd, const std::string & ip, uint16_t port) {
       handle_client_connected(fd, ip, port);
     }
   );
-  
+
   connection_manager_->set_disconnection_callback(
-    [this](int fd, const std::string& ip, uint16_t port) {
+    [this](int fd, const std::string & ip, uint16_t port) {
       handle_client_disconnected(fd, ip, port);
     }
   );
@@ -165,36 +179,36 @@ bool UnityBridgeNode::start()
   if (running_.load()) {
     return true;
   }
-  
+
   // Start connection manager
   if (!connection_manager_->start()) {
     RCLCPP_ERROR(router_->get_logger(), "Failed to start connection manager");
     return false;
   }
-  
+
   running_ = true;
-  
+
   // Start ROS executor in separate thread
   spin_thread_ = std::thread([this]() {
-    RCLCPP_INFO(router_->get_logger(), "ROS executor thread started");
-    executor_->spin();
-    RCLCPP_INFO(router_->get_logger(), "ROS executor thread stopped");
+        RCLCPP_INFO(router_->get_logger(), "ROS executor thread started");
+        executor_->spin();
+        RCLCPP_INFO(router_->get_logger(), "ROS executor thread stopped");
   });
-  
+
   // Create statistics timer
   stats_timer_ = router_->create_wall_timer(
     std::chrono::seconds(30),
-    [this]() { stats_timer_callback(); }
+    [this]() {stats_timer_callback();}
   );
-  
+
   // Create service response processing timer (1ms for low latency)
   service_timer_ = router_->create_wall_timer(
     std::chrono::milliseconds(1),
-    [this]() { router_->get_service_manager().process_pending_responses(); }
+    [this]() {router_->get_service_manager().process_pending_responses();}
   );
-  
+
   RCLCPP_INFO(router_->get_logger(), "Unity Bridge started successfully");
-  
+
   return true;
 }
 
@@ -203,11 +217,11 @@ void UnityBridgeNode::stop()
   if (!running_.load()) {
     return;
   }
-  
+
   RCLCPP_INFO(router_->get_logger(), "Stopping Unity Bridge...");
-  
+
   running_ = false;
-  
+
   // Stop statistics timer
   if (stats_timer_) {
     stats_timer_->cancel();
@@ -215,20 +229,20 @@ void UnityBridgeNode::stop()
   if (service_timer_) {
     service_timer_->cancel();
   }
-  
+
   // Stop connection manager
   connection_manager_->stop();
-  
+
   // Stop ROS executor
   if (executor_) {
     executor_->cancel();
   }
-  
+
   // Wait for spin thread
   if (spin_thread_.joinable()) {
     spin_thread_.join();
   }
-  
+
   RCLCPP_INFO(router_->get_logger(), "Unity Bridge stopped");
 }
 
@@ -240,20 +254,22 @@ void UnityBridgeNode::run()
   }
 }
 
-void UnityBridgeNode::handle_message_from_unity(int client_fd, const ProtocolMessage& message)
+void UnityBridgeNode::handle_message_from_unity(int client_fd, const ProtocolMessage & message)
 {
   // Route message through the router
   router_->route_message(client_fd, message);
 }
 
-void UnityBridgeNode::handle_client_connected(int client_fd, const std::string& ip, uint16_t port)
+void UnityBridgeNode::handle_client_connected(int client_fd, const std::string & ip, uint16_t port)
 {
   RCLCPP_INFO(router_->get_logger(), "Unity client connected: %s:%u (fd=%d)",
               ip.c_str(), port, client_fd);
   router_->send_handshake(client_fd);
 }
 
-void UnityBridgeNode::handle_client_disconnected(int client_fd, const std::string& ip, uint16_t port)
+void UnityBridgeNode::handle_client_disconnected(
+  int client_fd, const std::string & ip,
+  uint16_t port)
 {
   RCLCPP_INFO(router_->get_logger(), "Unity client disconnected: %s:%u (fd=%d)",
               ip.c_str(), port, client_fd);
@@ -273,7 +289,7 @@ void UnityBridgeNode::print_statistics() const
   auto router_stats = router_->get_statistics();
   auto topic_stats = router_->get_topic_manager().get_statistics();
   auto service_stats = router_->get_service_manager().get_statistics();
-  
+
   RCLCPP_INFO(router_->get_logger(), "=== Unity Bridge Statistics ===");
   RCLCPP_INFO(router_->get_logger(), "Connections: %lu active, %lu total",
               conn_stats.active_connections, conn_stats.total_connections);
@@ -281,23 +297,16 @@ void UnityBridgeNode::print_statistics() const
               conn_stats.messages_sent, conn_stats.messages_received);
   RCLCPP_INFO(router_->get_logger(), "Bytes: %lu sent, %lu received",
               conn_stats.bytes_sent, conn_stats.bytes_received);
-  RCLCPP_INFO(
-    router_->get_logger(),
-    "Outbound queue: %lu enqueued, %lu replaced, %lu dropped, %lu evicted, peak_depth=%lu",
-    conn_stats.messages_enqueued,
-    conn_stats.messages_replaced,
-    conn_stats.messages_dropped,
-    conn_stats.messages_evicted,
-    conn_stats.queue_depth_peak);
   RCLCPP_INFO(router_->get_logger(), "Topics: %lu publishers, %lu subscribers",
               topic_stats.active_publishers, topic_stats.active_subscribers);
   RCLCPP_INFO(router_->get_logger(), "Router: %lu routed, %lu published, %lu commands",
               router_stats.messages_routed, router_stats.messages_published,
               router_stats.system_commands_processed);
-  RCLCPP_INFO(router_->get_logger(), "Services: %lu ROS calls, %lu Unity calls, %lu responses, %lu timeouts, %lu errors",
+  RCLCPP_INFO(router_->get_logger(),
+      "Services: %lu ROS calls, %lu Unity calls, %lu responses, %lu timeouts, %lu errors",
               service_stats.ros_services_called, service_stats.unity_services_called,
               service_stats.responses_sent, service_stats.timeouts, service_stats.errors);
-  
+
   if (conn_stats.connection_errors > 0 || router_stats.routing_errors > 0) {
     RCLCPP_WARN(router_->get_logger(), "Errors: %lu connection, %lu routing",
                 conn_stats.connection_errors, router_stats.routing_errors);

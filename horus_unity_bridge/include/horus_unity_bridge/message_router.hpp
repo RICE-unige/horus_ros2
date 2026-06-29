@@ -1,3 +1,17 @@
+// Copyright 2025 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // SPDX-FileCopyrightText: 2025 RICE Lab, University of Genoa
 // SPDX-License-Identifier: Apache-2.0
 
@@ -35,10 +49,10 @@ namespace horus_unity_bridge
 
 /**
  * @brief Central message router for Unity-ROS2 communication
- * 
+ *
  * Single-node architecture that manages all publishers, subscribers, and services.
  * This avoids the overhead of creating separate nodes for each topic.
- * 
+ *
  * Features:
  * - Centralized ROS2 node for all topics
  * - Dynamic topic registration
@@ -50,70 +64,73 @@ class MessageRouter : public rclcpp::Node
 {
 public:
   using SendCallback = std::function<bool(
-    int client_fd,
-    const std::string&,
-    const std::vector<uint8_t>&,
-    OutboundMessagePolicy)>;
+        int client_fd,
+        const std::string &,
+        const std::vector<uint8_t> &,
+        OutboundMessagePolicy)>;
   using BroadcastCallback = std::function<void(
-    const std::string&,
-    const std::vector<uint8_t>&,
-    OutboundMessagePolicy)>;
-  
-  explicit MessageRouter(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
+        const std::string &,
+        const std::vector<uint8_t> &,
+        OutboundMessagePolicy)>;
+
+  explicit MessageRouter(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   ~MessageRouter();
-  
+
   /**
    * @brief Set callbacks for sending messages to Unity clients
    */
-  void set_send_callback(SendCallback callback) {
+  void set_send_callback(SendCallback callback)
+  {
     send_callback_ = std::move(callback);
   }
-  
-  void set_broadcast_callback(BroadcastCallback callback) {
+
+  void set_broadcast_callback(BroadcastCallback callback)
+  {
     broadcast_callback_ = std::move(callback);
   }
-  
+
   /**
    * @brief Route an incoming message from Unity
-   * 
+   *
    * @param client_fd Client that sent the message
    * @param message Protocol message
    * @return true if message was handled successfully
    */
-  bool route_message(int client_fd, const ProtocolMessage& message);
-  
+  bool route_message(int client_fd, const ProtocolMessage & message);
+
   /**
    * @brief Handle system commands from Unity
    */
-  bool handle_system_command(int client_fd, const ProtocolMessage& message);
-  
+  bool handle_system_command(int client_fd, const ProtocolMessage & message);
+
   /**
    * @brief Get topic manager
    */
-  TopicManager& get_topic_manager() { return *topic_manager_; }
-  
+  TopicManager & get_topic_manager() {return *topic_manager_;}
+
   /**
    * @brief Get service manager
    */
-  ServiceManager& get_service_manager() { return *service_manager_; }
-  
+  ServiceManager & get_service_manager() {return *service_manager_;}
+
   /**
    * @brief Send handshake payload to a client
    */
   void send_handshake(int client_fd);
-  
+
   /**
    * @brief Get routing statistics
    */
-  struct Statistics {
+  struct Statistics
+  {
     uint64_t messages_routed = 0;
     uint64_t messages_published = 0;
     uint64_t messages_received = 0;
     uint64_t system_commands_processed = 0;
     uint64_t routing_errors = 0;
   };
-  
-  const Statistics& get_statistics() const { return stats_; }
+
+  const Statistics & get_statistics() const {return stats_;}
   void set_log_protocol_messages(bool enabled);
 
 private:
@@ -121,13 +138,14 @@ private:
   std::unique_ptr<TopicManager> topic_manager_;
   std::unique_ptr<ServiceManager> service_manager_;
   std::unique_ptr<ControlLeaseManager> control_lease_manager_;
-  
+
 #ifdef ENABLE_WEBRTC
   using FrameVariant = std::variant<
     sensor_msgs::msg::Image::SharedPtr,
     sensor_msgs::msg::CompressedImage::SharedPtr>;
 
-  struct WebRtcSession {
+  struct WebRtcSession
+  {
     std::string session_id;
     int owner_client_fd = -1;
     std::string stream_topic;
@@ -172,55 +190,56 @@ private:
   std::mutex webrtc_sessions_mutex_;
 
   void handle_webrtc_signal_msg(const std_msgs::msg::String::SharedPtr msg);
-  void handle_webrtc_offer(const nlohmann::json& payload);
-  void handle_webrtc_candidate(const nlohmann::json& payload);
-  void handle_webrtc_stop(const nlohmann::json& payload);
-  void process_webrtc_frames(const std::shared_ptr<WebRtcSession>& session);
+  void handle_webrtc_offer(const nlohmann::json & payload);
+  void handle_webrtc_candidate(const nlohmann::json & payload);
+  void handle_webrtc_stop(const nlohmann::json & payload);
+  void process_webrtc_frames(const std::shared_ptr<WebRtcSession> & session);
   void enqueue_webrtc_raw_frame(
-    const std::shared_ptr<WebRtcSession>& session,
-    const sensor_msgs::msg::Image::SharedPtr& msg);
+    const std::shared_ptr<WebRtcSession> & session,
+    const sensor_msgs::msg::Image::SharedPtr & msg);
   void enqueue_webrtc_compressed_frame(
-    const std::shared_ptr<WebRtcSession>& session,
-    const sensor_msgs::msg::CompressedImage::SharedPtr& msg);
+    const std::shared_ptr<WebRtcSession> & session,
+    const sensor_msgs::msg::CompressedImage::SharedPtr & msg);
   bool convert_to_rgb(
-    const sensor_msgs::msg::Image& msg,
-    std::vector<uint8_t>& output,
-    bool& warned_flag);
+    const sensor_msgs::msg::Image & msg,
+    std::vector<uint8_t> & output,
+    bool & warned_flag);
   bool decompress_to_rgb(
-    const sensor_msgs::msg::CompressedImage& msg,
-    std::vector<uint8_t>& output,
-    int& width,
-    int& height,
-    bool& warned_flag);
-  void remove_webrtc_session(const std::string& session_id);
+    const sensor_msgs::msg::CompressedImage & msg,
+    std::vector<uint8_t> & output,
+    int & width,
+    int & height,
+    bool & warned_flag);
+  void remove_webrtc_session(const std::string & session_id);
   void shutdown_webrtc_sessions();
   void cleanup_stale_webrtc_sessions();
-  void publish_webrtc_signal(const nlohmann::json& payload);
+  void publish_webrtc_signal(const nlohmann::json & payload);
 #endif
 
   // Callbacks
   SendCallback send_callback_;
   BroadcastCallback broadcast_callback_;
-  
+
   // Statistics
   Statistics stats_;
-  
+
   // System command handlers
-  void handle_subscribe_command(int client_fd, const std::string& params);
-  void handle_publish_command(int client_fd, const std::string& params);
-  void handle_remove_subscriber_command(int client_fd, const std::string& params);
-  void handle_remove_publisher_command(int client_fd, const std::string& params);
-  void handle_remove_ros_service_command(int client_fd, const std::string& params);
-  void handle_remove_unity_service_command(int client_fd, const std::string& params);
-  void handle_ros_service_command(int client_fd, const std::string& params);
-  void handle_unity_service_command(int client_fd, const std::string& params);
-  void handle_request_command(int client_fd, const std::string& params);
-  void handle_response_command(int client_fd, const std::string& params);
+  void handle_subscribe_command(int client_fd, const std::string & params);
+  void handle_publish_command(int client_fd, const std::string & params);
+  void handle_remove_subscriber_command(int client_fd, const std::string & params);
+  void handle_remove_publisher_command(int client_fd, const std::string & params);
+  void handle_remove_ros_service_command(int client_fd, const std::string & params);
+  void handle_remove_unity_service_command(int client_fd, const std::string & params);
+  void handle_ros_service_command(int client_fd, const std::string & params);
+  void handle_unity_service_command(int client_fd, const std::string & params);
+  void handle_request_command(int client_fd, const std::string & params);
+  void handle_response_command(int client_fd, const std::string & params);
   void handle_topic_list_command(int client_fd);
   void handle_handshake_command(int client_fd);
-  
+
   // Service request/response tracking
-  struct PendingServiceState {
+  struct PendingServiceState
+  {
     uint32_t pending_request_id = 0;
     uint32_t pending_response_id = 0;
   };
@@ -231,21 +250,25 @@ private:
   std::mutex service_response_mutex_;
   std::mutex send_mutex_; // Protects socket writes for atomicity
   bool log_protocol_messages_ = true;
-  
+
   // Utility
-  void send_error_to_client(int client_fd, const std::string& error_message);
-  void send_log_to_client(int client_fd, const std::string& level, const std::string& message);
+  void send_error_to_client(int client_fd, const std::string & error_message);
+  void send_log_to_client(int client_fd, const std::string & level, const std::string & message);
   PendingServiceState consume_pending_service_state(int client_fd);
   static OutboundMessagePolicy classify_subscription_policy(
-    const std::string& topic,
-    const std::string& message_type);
-  
-  bool parse_json_params(const std::string& json_str, 
-                        std::unordered_map<std::string, std::string>& params);
+    const std::string & topic,
+    const std::string & message_type);
+
+  bool parse_json_params(
+    const std::string & json_str,
+    std::unordered_map<std::string, std::string> & params);
+
 public:
   void on_client_disconnected(int client_fd);
+
 private:
-  struct ClientResourceState {
+  struct ClientResourceState
+  {
     std::unordered_set<std::string> subscribed_topics;
     std::unordered_set<std::string> published_topics;
     std::unordered_set<std::string> ros_services;
@@ -254,16 +277,16 @@ private:
   };
   std::unordered_map<int, ClientResourceState> client_resources_;
   std::mutex client_resources_mutex_;
-  void track_client_subscriber(int client_fd, const std::string& topic);
-  void track_client_publisher(int client_fd, const std::string& topic);
-  void track_client_ros_service(int client_fd, const std::string& service_name);
-  void track_client_unity_service(int client_fd, const std::string& service_name);
-  void track_client_webrtc_session(int client_fd, const std::string& session_id);
-  void untrack_client_webrtc_session(int client_fd, const std::string& session_id);
-  void untrack_client_subscriber(int client_fd, const std::string& topic);
-  void untrack_client_publisher(int client_fd, const std::string& topic);
-  void untrack_client_ros_service(int client_fd, const std::string& service_name);
-  void untrack_client_unity_service(int client_fd, const std::string& service_name);
+  void track_client_subscriber(int client_fd, const std::string & topic);
+  void track_client_publisher(int client_fd, const std::string & topic);
+  void track_client_ros_service(int client_fd, const std::string & service_name);
+  void track_client_unity_service(int client_fd, const std::string & service_name);
+  void track_client_webrtc_session(int client_fd, const std::string & session_id);
+  void untrack_client_webrtc_session(int client_fd, const std::string & session_id);
+  void untrack_client_subscriber(int client_fd, const std::string & topic);
+  void untrack_client_publisher(int client_fd, const std::string & topic);
+  void untrack_client_ros_service(int client_fd, const std::string & service_name);
+  void untrack_client_unity_service(int client_fd, const std::string & service_name);
 
   friend class MessageRouterTestPeer;
 };

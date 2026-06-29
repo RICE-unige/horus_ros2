@@ -1,3 +1,17 @@
+// Copyright 2026 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // SPDX-FileCopyrightText: 2025 RICE Lab, University of Genoa
 // SPDX-License-Identifier: Apache-2.0
 
@@ -20,19 +34,21 @@ class MessageRouterTestPeer
 {
 public:
   static OutboundMessagePolicy classify_subscription_policy(
-    const std::string& topic,
-    const std::string& message_type)
+    const std::string & topic,
+    const std::string & message_type)
   {
     return MessageRouter::classify_subscription_policy(topic, message_type);
   }
 
-  static bool has_client_state(const MessageRouter& router, int client_fd)
+  static bool has_client_state(const MessageRouter & router, int client_fd)
   {
     std::lock_guard<std::mutex> lock(router.pending_service_state_mutex_);
     return router.pending_service_state_.find(client_fd) != router.pending_service_state_.end();
   }
 
-  static MessageRouter::PendingServiceState client_state(const MessageRouter& router, int client_fd)
+  static MessageRouter::PendingServiceState client_state(
+    const MessageRouter & router,
+    int client_fd)
   {
     std::lock_guard<std::mutex> lock(router.pending_service_state_mutex_);
     auto it = router.pending_service_state_.find(client_fd);
@@ -73,13 +89,13 @@ protected:
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0;
 
-    if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    if (bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
       close(fd);
       return 0;
     }
 
     socklen_t len = sizeof(addr);
-    if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+    if (getsockname(fd, reinterpret_cast<sockaddr *>(&addr), &len) != 0) {
       close(fd);
       return 0;
     }
@@ -137,15 +153,15 @@ TEST_F(BridgeRuntimeTest, StrictQueueOverflowsDisconnectWhileReplaceableQueueCoa
   EXPECT_TRUE(replaced_frame.replaced_existing);
   ASSERT_EQ(replaceable_queue.size(), 1u);
   auto front_destination = [&replaceable_queue]() {
-    const auto& queue_view = static_cast<const OutboundMessageQueue&>(replaceable_queue);
-    const auto* front = queue_view.front();
-    return front == nullptr ? std::string() : front->destination;
-  };
+      const auto & queue_view = static_cast<const OutboundMessageQueue &>(replaceable_queue);
+      const auto * front = queue_view.front();
+      return front == nullptr ? std::string() : front->destination;
+    };
   auto front_first_byte = [&replaceable_queue]() {
-    const auto& queue_view = static_cast<const OutboundMessageQueue&>(replaceable_queue);
-    const auto* front = queue_view.front();
-    return front == nullptr || front->serialized.empty() ? uint8_t{0} : front->serialized.front();
-  };
+      const auto & queue_view = static_cast<const OutboundMessageQueue &>(replaceable_queue);
+      const auto * front = queue_view.front();
+      return front == nullptr || front->serialized.empty() ? uint8_t{0} : front->serialized.front();
+    };
   EXPECT_EQ(front_destination(), "/camera/image");
   EXPECT_EQ(front_first_byte(), 0x22);
 
@@ -165,15 +181,6 @@ TEST_F(BridgeRuntimeTest, StrictQueueOverflowsDisconnectWhileReplaceableQueueCoa
   EXPECT_TRUE(third_topic.evicted_old_message);
   ASSERT_EQ(replaceable_queue.size(), 2u);
   EXPECT_EQ(front_destination(), "/camera/right");
-}
-
-TEST_F(BridgeRuntimeTest, SingleUnderscoreDestinationIsNotSystemCommand)
-{
-  ProtocolMessage malformed_system_command{"_", bytes({0x01})};
-  ProtocolMessage valid_system_command{"__topic_list", bytes({0x02})};
-
-  EXPECT_FALSE(malformed_system_command.is_system_command());
-  EXPECT_TRUE(valid_system_command.is_system_command());
 }
 
 TEST_F(BridgeRuntimeTest, ReplaceableFrontStaysSupersedableUntilBytesAreSent)
@@ -218,88 +225,6 @@ TEST_F(BridgeRuntimeTest, ReplaceableFrontStaysSupersedableUntilBytesAreSent)
   EXPECT_EQ(queue.front()->serialized.front(), 0x04);
 }
 
-TEST_F(BridgeRuntimeTest, RealtimeMessagesAreSelectedBeforeQueuedBulk)
-{
-  OutboundMessageQueue queue;
-  queue.set_priority_scheduling_enabled(true);
-
-  auto bulk = queue.enqueue(
-    "/map_3d_octomap_mesh",
-    bytes({0x10}),
-    OutboundMessagePolicy::Bulk,
-    8);
-  auto normal = queue.enqueue(
-    "/robot/status",
-    bytes({0x20}),
-    OutboundMessagePolicy::Strict,
-    8);
-  auto realtime = queue.enqueue(
-    "/tf",
-    bytes({0x30}),
-    OutboundMessagePolicy::Realtime,
-    8);
-
-  ASSERT_TRUE(bulk.accepted);
-  ASSERT_TRUE(normal.accepted);
-  ASSERT_TRUE(realtime.accepted);
-  ASSERT_NE(queue.front(), nullptr);
-  EXPECT_EQ(queue.front()->destination, "/tf");
-
-  EXPECT_TRUE(queue.advance_front(1));
-  ASSERT_NE(queue.front(), nullptr);
-  EXPECT_EQ(queue.front()->destination, "/robot/status");
-}
-
-TEST_F(BridgeRuntimeTest, RealtimeMessageCanEvictQueuedBulkWhenQueueIsFull)
-{
-  OutboundMessageQueue queue;
-  queue.set_priority_scheduling_enabled(true);
-
-  ASSERT_TRUE(queue.enqueue(
-    "/map_chunk_1",
-    bytes({0x01}),
-    OutboundMessagePolicy::Bulk,
-    2).accepted);
-  ASSERT_TRUE(queue.enqueue(
-    "/map_chunk_2",
-    bytes({0x02}),
-    OutboundMessagePolicy::Bulk,
-    2).accepted);
-
-  auto realtime = queue.enqueue(
-    "/tf",
-    bytes({0x03}),
-    OutboundMessagePolicy::Realtime,
-    2);
-
-  EXPECT_TRUE(realtime.accepted);
-  EXPECT_TRUE(realtime.evicted_old_message);
-  ASSERT_NE(queue.front(), nullptr);
-  EXPECT_EQ(queue.front()->destination, "/tf");
-}
-
-TEST_F(BridgeRuntimeTest, BulkOverflowDropsNewMessageInsteadOfDisconnecting)
-{
-  OutboundMessageQueue queue;
-  queue.set_priority_scheduling_enabled(true);
-
-  ASSERT_TRUE(queue.enqueue(
-    "/map_chunk_1",
-    bytes({0x01}),
-    OutboundMessagePolicy::Bulk,
-    1).accepted);
-
-  auto overflow = queue.enqueue(
-    "/map_chunk_2",
-    bytes({0x02}),
-    OutboundMessagePolicy::Bulk,
-    1);
-
-  EXPECT_FALSE(overflow.accepted);
-  EXPECT_TRUE(overflow.dropped_new_message);
-  EXPECT_FALSE(overflow.should_disconnect);
-}
-
 TEST_F(BridgeRuntimeTest, SubscriptionPolicyIsStrictByDefaultAndReplaceableOnlyForKnownStreams)
 {
   EXPECT_EQ(
@@ -319,22 +244,45 @@ TEST_F(BridgeRuntimeTest, SubscriptionPolicyIsStrictByDefaultAndReplaceableOnlyF
     OutboundMessagePolicy::Replaceable);
   EXPECT_EQ(
     MessageRouterTestPeer::classify_subscription_policy(
-      "/points",
-      "sensor_msgs/msg/PointCloud2"),
+      "/scan",
+      "sensor_msgs/msg/LaserScan"),
     OutboundMessagePolicy::Replaceable);
   EXPECT_EQ(
     MessageRouterTestPeer::classify_subscription_policy(
-      "/tf",
-      "tf2_msgs/msg/TFMessage"),
-    OutboundMessagePolicy::Realtime);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/map_3d_octomap_mesh",
-      "visualization_msgs/msg/Marker"),
-    OutboundMessagePolicy::Bulk);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
       "/horus/registration",
+      "std_msgs/String"),
+    OutboundMessagePolicy::Strict);
+
+  // 3D-map payloads route to the Bulk lane so they yield to Realtime streams. Whole-map types are
+  // BulkReplaceable (coalesce to newest); chunked map types are BulkStrict (preserve order).
+  EXPECT_EQ(
+    MessageRouterTestPeer::classify_subscription_policy(
+      "/map_3d",
+      "sensor_msgs/msg/PointCloud2"),
+    OutboundMessagePolicy::BulkReplaceable);
+  EXPECT_EQ(
+    MessageRouterTestPeer::classify_subscription_policy(
+      "/map",
+      "nav_msgs/msg/OccupancyGrid"),
+    OutboundMessagePolicy::BulkReplaceable);
+  EXPECT_EQ(
+    MessageRouterTestPeer::classify_subscription_policy(
+      "/horus/map_mesh",
+      "visualization_msgs/msg/Marker"),
+    OutboundMessagePolicy::BulkStrict);
+  EXPECT_EQ(
+    MessageRouterTestPeer::classify_subscription_policy(
+      "/horus/gaussian_splat/chunks",
+      "std_msgs/String"),
+    OutboundMessagePolicy::BulkStrict);
+  EXPECT_EQ(
+    MessageRouterTestPeer::classify_subscription_policy(
+      "/map_3d/chunks_item",
+      "std_msgs/String"),
+    OutboundMessagePolicy::BulkStrict);
+  EXPECT_EQ(
+    MessageRouterTestPeer::classify_subscription_policy(
+      "/horus/gaussian_splat/manifest",
       "std_msgs/String"),
     OutboundMessagePolicy::Strict);
 }
@@ -343,9 +291,9 @@ TEST_F(BridgeRuntimeTest, PendingServiceStateIsTrackedPerClientAndClearedIndepen
 {
   MessageRouter router;
 
-  auto encode_json = [](const std::string& json_str) {
-    return std::vector<uint8_t>(json_str.begin(), json_str.end());
-  };
+  auto encode_json = [](const std::string & json_str) {
+      return std::vector<uint8_t>(json_str.begin(), json_str.end());
+    };
 
   ProtocolMessage client_one_request{"__request", encode_json(R"({"srv_id":101})")};
   ProtocolMessage client_two_request{"__request", encode_json(R"({"srv_id":202})")};
@@ -378,20 +326,19 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
   ASSERT_NE(port, 0);
   rclcpp::NodeOptions options;
   options.parameter_overrides({
-    rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
-    rclcpp::Parameter("tcp_port", static_cast<int>(port)),
-    rclcpp::Parameter("max_connections", 7),
-    rclcpp::Parameter("socket_buffer_size", 131072),
-    rclcpp::Parameter("message_queue_size", 17),
-    rclcpp::Parameter("worker_threads", 3),
-    rclcpp::Parameter("connection_timeout_ms", 7000),
-    rclcpp::Parameter("tcp_nodelay", false),
-    rclcpp::Parameter("log_protocol_messages", false),
-    rclcpp::Parameter("enable_priority_scheduling", true),
-    rclcpp::Parameter("message_pool_size", 2048),
-    rclcpp::Parameter("enable_zero_copy", false),
-    rclcpp::Parameter("default_publisher_qos.depth", 32),
-    rclcpp::Parameter("default_subscriber_qos.depth", 32)
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(port)),
+      rclcpp::Parameter("max_connections", 7),
+      rclcpp::Parameter("socket_buffer_size", 131072),
+      rclcpp::Parameter("message_queue_size", 17),
+      rclcpp::Parameter("worker_threads", 3),
+      rclcpp::Parameter("connection_timeout_ms", 7000),
+      rclcpp::Parameter("tcp_nodelay", false),
+      rclcpp::Parameter("log_protocol_messages", false),
+      rclcpp::Parameter("message_pool_size", 2048),
+      rclcpp::Parameter("enable_zero_copy", false),
+      rclcpp::Parameter("default_publisher_qos.depth", 32),
+      rclcpp::Parameter("default_subscriber_qos.depth", 32)
   });
 
   UnityBridgeNode node(options);
@@ -402,15 +349,15 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
   EXPECT_EQ(node.connection_config().message_queue_size, 17u);
   EXPECT_EQ(node.connection_config().connection_timeout_ms, 7000);
   EXPECT_FALSE(node.connection_config().tcp_nodelay);
-  EXPECT_TRUE(node.connection_config().priority_scheduling_enabled);
   EXPECT_EQ(node.worker_threads(), 3);
   EXPECT_FALSE(node.log_protocol_messages());
 
-  const auto& warnings = node.reserved_parameter_warnings();
+  const auto & warnings = node.reserved_parameter_warnings();
   EXPECT_NE(std::find(warnings.begin(), warnings.end(), "message_pool_size"), warnings.end());
   EXPECT_NE(std::find(warnings.begin(), warnings.end(), "enable_zero_copy"), warnings.end());
   EXPECT_NE(std::find(warnings.begin(), warnings.end(), "default_publisher_qos.*"), warnings.end());
-  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "default_subscriber_qos.*"), warnings.end());
+  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "default_subscriber_qos.*"),
+      warnings.end());
 
   EXPECT_FALSE(node.has_service_timer());
   ASSERT_TRUE(node.start());

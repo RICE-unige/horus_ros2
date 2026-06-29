@@ -1,7 +1,23 @@
+// Copyright 2025 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // SPDX-FileCopyrightText: 2025 RICE Lab, University of Genoa
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/message_router.hpp"
+#include <cinttypes>
+
 #include <sstream>
 #include <nlohmann/json.hpp>
 #include <sensor_msgs/image_encodings.hpp>
@@ -38,14 +54,54 @@ std::string normalize_message_type_for_policy(std::string message_type)
     message_type.begin(),
     message_type.end(),
     message_type.begin(),
-    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    [](unsigned char c) {return static_cast<char>(std::tolower(c));});
   return message_type;
+}
+
+// Map an OPTIONAL declarative lane/QoS token (carried from the SDK through Unity's __subscribe
+// params as the "policy" key) onto an OutboundMessagePolicy. Returns true and sets `out` only for a
+// recognized token; an empty/unknown token returns false so the caller falls back to the
+// heuristic classify_subscription_policy() (the unchanged default behavior).
+bool parse_outbound_policy_token(const std::string & raw_token, OutboundMessagePolicy & out)
+{
+  std::string token = raw_token;
+  if (!token.empty() && token.back() == '\0') {
+    token.pop_back();
+  }
+  // Trim surrounding whitespace; tolerate Unity sending the token padded.
+  auto not_space = [](unsigned char ch) {return !std::isspace(ch);};
+  token.erase(token.begin(), std::find_if(token.begin(), token.end(), not_space));
+  token.erase(std::find_if(token.rbegin(), token.rend(), not_space).base(), token.end());
+  std::transform(
+    token.begin(), token.end(), token.begin(),
+    [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+
+  if (token.empty()) {
+    return false;
+  }
+  if (token == "strict") {
+    out = OutboundMessagePolicy::Strict;
+    return true;
+  }
+  if (token == "replaceable") {
+    out = OutboundMessagePolicy::Replaceable;
+    return true;
+  }
+  if (token == "bulk_strict") {
+    out = OutboundMessagePolicy::BulkStrict;
+    return true;
+  }
+  if (token == "bulk_replaceable") {
+    out = OutboundMessagePolicy::BulkReplaceable;
+    return true;
+  }
+  return false;
 }
 
 }  // namespace
 
-MessageRouter::MessageRouter(const rclcpp::NodeOptions& options)
-  : Node("horus_unity_bridge", options)
+MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
+: Node("horus_unity_bridge", options)
 {
   topic_manager_ = std::make_unique<TopicManager>(this);
   service_manager_ = std::make_unique<ServiceManager>(this);
@@ -103,10 +159,10 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions& options)
       "webrtc.enabled is true but this bridge was built without WebRTC support");
   }
 #endif
-  
+
   // Setup service manager callback for sending responses to Unity
   service_manager_->set_response_callback(
-    [this](uint32_t srv_id, const std::vector<uint8_t>& response) {
+    [this](uint32_t srv_id, const std::vector<uint8_t> & response) {
       // Send service response back to the requesting Unity client
       int target_fd = -1;
       {
@@ -125,15 +181,15 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions& options)
         std::string json_str = response_cmd.dump();
         std::vector<uint8_t> cmd_data(json_str.begin(), json_str.end());
         send_callback_(target_fd, "__response", cmd_data, OutboundMessagePolicy::Strict);
-        
+
         // Then send the serialized response payload
         send_callback_(target_fd, "__response_payload", response, OutboundMessagePolicy::Strict);
       }
     }
   );
-  
+
   stats_ = Statistics{};
-  
+
   RCLCPP_INFO(get_logger(), "Message router initialized");
 }
 
@@ -144,15 +200,15 @@ MessageRouter::~MessageRouter()
 #endif
 }
 
-bool MessageRouter::route_message(int client_fd, const ProtocolMessage& message)
+bool MessageRouter::route_message(int client_fd, const ProtocolMessage & message)
 {
   stats_.messages_routed++;
-  
+
   // Ignore keepalive messages
   if (message.is_keepalive()) {
     return true;
   }
-  
+
   // Handle system commands
   if (message.is_system_command()) {
     return handle_system_command(client_fd, message);
@@ -163,24 +219,26 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage& message)
   // If a service request was announced, treat this payload as the request body
   if (pending_state.pending_request_id != 0) {
     uint32_t srv_id = pending_state.pending_request_id;
-    bool ok = service_manager_->call_ros_service_async(srv_id, message.destination, message.payload);
+    bool ok = service_manager_->call_ros_service_async(srv_id, message.destination,
+        message.payload);
     if (!ok) {
       stats_.routing_errors++;
       return false;
     }
     return true;
   }
-  
+
   // If a service response was announced, treat this payload as Unity's response
   if (pending_state.pending_response_id != 0) {
     uint32_t srv_id = pending_state.pending_response_id;
     service_manager_->handle_unity_service_response(srv_id, message.payload);
     return true;
   }
-  
+
   // Regular message - publish to ROS
   if (control_lease_manager_ && control_lease_manager_->is_internal_topic(message.destination)) {
-    bool handled = control_lease_manager_->handle_internal_message(client_fd, message.destination, message.payload);
+    bool handled = control_lease_manager_->handle_internal_message(client_fd, message.destination,
+        message.payload);
     if (!handled) {
       stats_.routing_errors++;
     }
@@ -190,8 +248,9 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage& message)
   std::string denied_reason;
   std::string denied_robot_name;
   if (control_lease_manager_ &&
-      !control_lease_manager_->authorize_command_publish(
-        client_fd, message.destination, &denied_reason, &denied_robot_name)) {
+    !control_lease_manager_->authorize_command_publish(
+        client_fd, message.destination, &denied_reason, &denied_robot_name))
+  {
     stats_.routing_errors++;
     RCLCPP_WARN_THROTTLE(
       get_logger(),
@@ -206,25 +265,25 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage& message)
   }
 
   bool success = topic_manager_->publish_message(message.destination, message.payload);
-  
+
   if (success) {
     stats_.messages_published++;
   } else {
     stats_.routing_errors++;
   }
-  
+
   return success;
 }
 
-bool MessageRouter::handle_system_command(int client_fd, const ProtocolMessage& message)
+bool MessageRouter::handle_system_command(int client_fd, const ProtocolMessage & message)
 {
   stats_.system_commands_processed++;
-  
+
   std::string command = message.destination;
   std::string params_json(message.payload.begin(), message.payload.end());
-  
+
   RCLCPP_DEBUG(get_logger(), "System command: %s", command.c_str());
-  
+
   try {
     if (command == "__subscribe") {
       handle_subscribe_command(client_fd, params_json);
@@ -255,10 +314,10 @@ bool MessageRouter::handle_system_command(int client_fd, const ProtocolMessage& 
       send_error_to_client(client_fd, "Unknown system command: " + command);
       return false;
     }
-    
+
     return true;
-  } catch (const std::exception& e) {
-    RCLCPP_ERROR(get_logger(), "Error handling system command %s: %s", 
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(get_logger(), "Error handling system command %s: %s",
                  command.c_str(), e.what());
     send_error_to_client(client_fd, std::string("Error: ") + e.what());
     stats_.routing_errors++;
@@ -266,7 +325,7 @@ bool MessageRouter::handle_system_command(int client_fd, const ProtocolMessage& 
   }
 }
 
-void MessageRouter::handle_subscribe_command(int client_fd, const std::string& params)
+void MessageRouter::handle_subscribe_command(int client_fd, const std::string & params)
 {
   // Parse JSON parameters
   std::unordered_map<std::string, std::string> param_map;
@@ -274,23 +333,43 @@ void MessageRouter::handle_subscribe_command(int client_fd, const std::string& p
     send_error_to_client(client_fd, "Failed to parse subscribe parameters");
     return;
   }
-  
+
   std::string topic = param_map["topic"];
   std::string message_name = param_map["message_name"];
-  
+
   if (topic.empty() || message_name.empty()) {
     send_error_to_client(client_fd, "Missing required parameters: topic, message_name");
     return;
   }
-  
+
+  // OPTIONAL declarative lane/QoS override. If Unity forwarded a valid "policy" key (declared by
+  // the SDK's transport_lane), honor it verbatim; otherwise fall back to the heuristic classifier
+  // (UNCHANGED default behavior, so an absent/unknown key is fully backward-compatible).
+  OutboundMessagePolicy policy = classify_subscription_policy(topic, message_name);
+  bool policy_declared = false;
+  const auto policy_it = param_map.find("policy");
+  if (policy_it != param_map.end()) {
+    OutboundMessagePolicy declared_policy = policy;
+    if (parse_outbound_policy_token(policy_it->second, declared_policy)) {
+      policy = declared_policy;
+      policy_declared = true;
+    } else if (!policy_it->second.empty()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Ignoring unrecognized subscribe policy '%s' for topic '%s'; using classified lane",
+        policy_it->second.c_str(),
+        topic.c_str());
+    }
+  }
+
   // Register subscriber to forward ROS messages to Unity
   bool success = topic_manager_->register_subscriber(
     topic,
     message_name,
     client_fd,
-    [this, client_fd, policy = classify_subscription_policy(topic, message_name)](
-      const std::string& topic,
-      const std::vector<uint8_t>& data)
+    [this, client_fd, policy](
+      const std::string & topic,
+      const std::vector<uint8_t> & data)
     {
       // Forward to Unity client
       if (send_callback_) {
@@ -298,19 +377,20 @@ void MessageRouter::handle_subscribe_command(int client_fd, const std::string& p
       }
     }
   );
-  
+
   if (success) {
     track_client_subscriber(client_fd, topic);
-    RCLCPP_INFO(get_logger(), "Registered Unity subscriber: %s [%s]", 
-                topic.c_str(), message_name.c_str());
-    send_log_to_client(client_fd, "info", 
+    RCLCPP_INFO(get_logger(), "Registered Unity subscriber: %s [%s]%s",
+                topic.c_str(), message_name.c_str(),
+                policy_declared ? " (declared lane)" : "");
+    send_log_to_client(client_fd, "info",
                       "RegisterSubscriber(" + topic + ", " + message_name + ") OK");
   } else {
     send_error_to_client(client_fd, "Failed to register subscriber: " + topic);
   }
 }
 
-void MessageRouter::handle_publish_command(int client_fd, const std::string& params)
+void MessageRouter::handle_publish_command(int client_fd, const std::string & params)
 {
   // Parse JSON parameters
   std::unordered_map<std::string, std::string> param_map;
@@ -318,21 +398,21 @@ void MessageRouter::handle_publish_command(int client_fd, const std::string& par
     send_error_to_client(client_fd, "Failed to parse publish parameters");
     return;
   }
-  
+
   std::string topic = param_map["topic"];
   std::string message_name = param_map["message_name"];
-  
+
   if (topic.empty() || message_name.empty()) {
     send_error_to_client(client_fd, "Missing required parameters: topic, message_name");
     return;
   }
-  
+
   // Register publisher so Unity can publish to ROS
   bool success = topic_manager_->register_publisher(topic, message_name, client_fd);
-  
+
   if (success) {
     track_client_publisher(client_fd, topic);
-    RCLCPP_INFO(get_logger(), "Registered Unity publisher: %s [%s]", 
+    RCLCPP_INFO(get_logger(), "Registered Unity publisher: %s [%s]",
                 topic.c_str(), message_name.c_str());
     send_log_to_client(client_fd, "info",
                       "RegisterPublisher(" + topic + ", " + message_name + ") OK");
@@ -341,7 +421,7 @@ void MessageRouter::handle_publish_command(int client_fd, const std::string& par
   }
 }
 
-void MessageRouter::handle_remove_subscriber_command(int client_fd, const std::string& params)
+void MessageRouter::handle_remove_subscriber_command(int client_fd, const std::string & params)
 {
   std::unordered_map<std::string, std::string> param_map;
   if (!parse_json_params(params, param_map)) {
@@ -360,11 +440,12 @@ void MessageRouter::handle_remove_subscriber_command(int client_fd, const std::s
   if (success) {
     send_log_to_client(client_fd, "info", "RemoveSubscriber(" + topic + ") OK");
   } else {
-    send_log_to_client(client_fd, "warning", "RemoveSubscriber(" + topic + ") ignored (not registered)");
+    send_log_to_client(client_fd, "warning",
+        "RemoveSubscriber(" + topic + ") ignored (not registered)");
   }
 }
 
-void MessageRouter::handle_remove_publisher_command(int client_fd, const std::string& params)
+void MessageRouter::handle_remove_publisher_command(int client_fd, const std::string & params)
 {
   std::unordered_map<std::string, std::string> param_map;
   if (!parse_json_params(params, param_map)) {
@@ -383,11 +464,12 @@ void MessageRouter::handle_remove_publisher_command(int client_fd, const std::st
   if (success) {
     send_log_to_client(client_fd, "info", "RemovePublisher(" + topic + ") OK");
   } else {
-    send_log_to_client(client_fd, "warning", "RemovePublisher(" + topic + ") ignored (not registered)");
+    send_log_to_client(client_fd, "warning",
+        "RemovePublisher(" + topic + ") ignored (not registered)");
   }
 }
 
-void MessageRouter::handle_remove_ros_service_command(int client_fd, const std::string& params)
+void MessageRouter::handle_remove_ros_service_command(int client_fd, const std::string & params)
 {
   std::unordered_map<std::string, std::string> param_map;
   if (!parse_json_params(params, param_map)) {
@@ -406,11 +488,12 @@ void MessageRouter::handle_remove_ros_service_command(int client_fd, const std::
   if (success) {
     send_log_to_client(client_fd, "info", "RemoveRosService(" + service_name + ") OK");
   } else {
-    send_log_to_client(client_fd, "warning", "RemoveRosService(" + service_name + ") ignored (not registered)");
+    send_log_to_client(client_fd, "warning",
+        "RemoveRosService(" + service_name + ") ignored (not registered)");
   }
 }
 
-void MessageRouter::handle_remove_unity_service_command(int client_fd, const std::string& params)
+void MessageRouter::handle_remove_unity_service_command(int client_fd, const std::string & params)
 {
   std::unordered_map<std::string, std::string> param_map;
   if (!parse_json_params(params, param_map)) {
@@ -429,11 +512,12 @@ void MessageRouter::handle_remove_unity_service_command(int client_fd, const std
   if (success) {
     send_log_to_client(client_fd, "info", "RemoveUnityService(" + service_name + ") OK");
   } else {
-    send_log_to_client(client_fd, "warning", "RemoveUnityService(" + service_name + ") ignored (not registered)");
+    send_log_to_client(client_fd, "warning",
+        "RemoveUnityService(" + service_name + ") ignored (not registered)");
   }
 }
 
-void MessageRouter::handle_ros_service_command(int client_fd, const std::string& params)
+void MessageRouter::handle_ros_service_command(int client_fd, const std::string & params)
 {
   // Parse JSON parameters
   std::unordered_map<std::string, std::string> param_map;
@@ -441,18 +525,18 @@ void MessageRouter::handle_ros_service_command(int client_fd, const std::string&
     send_error_to_client(client_fd, "Failed to parse ROS service parameters");
     return;
   }
-  
+
   std::string service_name = param_map["topic"];
   std::string service_type = param_map["message_name"];
-  
+
   if (service_name.empty() || service_type.empty()) {
     send_error_to_client(client_fd, "Missing required parameters: topic, message_name");
     return;
   }
-  
+
   // Register ROS service client (Unity will call this ROS service)
   bool success = service_manager_->register_ros_service(service_name, service_type);
-  
+
   if (success) {
     track_client_ros_service(client_fd, service_name);
     RCLCPP_INFO(get_logger(), "Registered ROS service client: %s [%s]",
@@ -465,7 +549,7 @@ void MessageRouter::handle_ros_service_command(int client_fd, const std::string&
 }
 
 
-void MessageRouter::handle_unity_service_command(int client_fd, const std::string& params)
+void MessageRouter::handle_unity_service_command(int client_fd, const std::string & params)
 {
   // Parse JSON parameters
   std::unordered_map<std::string, std::string> param_map;
@@ -473,39 +557,39 @@ void MessageRouter::handle_unity_service_command(int client_fd, const std::strin
     send_error_to_client(client_fd, "Failed to parse Unity service parameters");
     return;
   }
-  
+
   std::string service_name = param_map["topic"];
   std::string service_type = param_map["message_name"];
-  
+
   if (service_name.empty() || service_type.empty()) {
     send_error_to_client(client_fd, "Missing required parameters: topic, message_name");
     return;
   }
-  
+
   // Register Unity service server (ROS can call this service, Unity responds)
   auto request_callback = [this, client_fd](
     uint32_t srv_id,
-    const std::string& service_name,
-    const std::vector<uint8_t>& request)
-  {
+    const std::string & service_name,
+    const std::vector<uint8_t> & request)
+    {
     // Send request to Unity client
-    if (send_callback_) {
-      std::lock_guard<std::mutex> lock(send_mutex_);
+      if (send_callback_) {
+        std::lock_guard<std::mutex> lock(send_mutex_);
       // Send __request command with srv_id first
-      nlohmann::json req_cmd;
-      req_cmd["srv_id"] = srv_id;
-      std::string json_str = req_cmd.dump();
-      std::vector<uint8_t> cmd_data(json_str.begin(), json_str.end());
-      send_callback_(client_fd, "__request", cmd_data, OutboundMessagePolicy::Strict);
-      
+        nlohmann::json req_cmd;
+        req_cmd["srv_id"] = srv_id;
+        std::string json_str = req_cmd.dump();
+        std::vector<uint8_t> cmd_data(json_str.begin(), json_str.end());
+        send_callback_(client_fd, "__request", cmd_data, OutboundMessagePolicy::Strict);
+
       // Then send the actual request data
-      send_callback_(client_fd, service_name, request, OutboundMessagePolicy::Strict);
-    }
-  };
-  
+        send_callback_(client_fd, service_name, request, OutboundMessagePolicy::Strict);
+      }
+    };
+
   bool success = service_manager_->register_unity_service(
     service_name, service_type, request_callback);
-  
+
   if (success) {
     track_client_unity_service(client_fd, service_name);
     RCLCPP_INFO(get_logger(), "Registered Unity service server: %s [%s]",
@@ -517,7 +601,7 @@ void MessageRouter::handle_unity_service_command(int client_fd, const std::strin
   }
 }
 
-void MessageRouter::handle_request_command(int client_fd, const std::string& params)
+void MessageRouter::handle_request_command(int client_fd, const std::string & params)
 {
   // Parse srv_id from JSON
   std::unordered_map<std::string, std::string> param_map;
@@ -525,24 +609,24 @@ void MessageRouter::handle_request_command(int client_fd, const std::string& par
     send_error_to_client(client_fd, "Failed to parse request parameters");
     return;
   }
-  
+
   uint32_t srv_id = std::stoul(param_map["srv_id"]);
-  
+
   {
     std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
     pending_service_state_[client_fd].pending_request_id = srv_id;
   }
-  
+
   // Remember which client should receive the response
   {
     std::lock_guard<std::mutex> lock(service_response_mutex_);
     service_response_client_[srv_id] = client_fd;
   }
-  
+
   RCLCPP_DEBUG(get_logger(), "Request command received [ID: %u]", srv_id);
 }
 
-void MessageRouter::handle_response_command(int client_fd, const std::string& params)
+void MessageRouter::handle_response_command(int client_fd, const std::string & params)
 {
   // Parse srv_id from JSON
   std::unordered_map<std::string, std::string> param_map;
@@ -550,14 +634,14 @@ void MessageRouter::handle_response_command(int client_fd, const std::string& pa
     send_error_to_client(client_fd, "Failed to parse response parameters");
     return;
   }
-  
+
   uint32_t srv_id = std::stoul(param_map["srv_id"]);
-  
+
   {
     std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
     pending_service_state_[client_fd].pending_response_id = srv_id;
   }
-  
+
   RCLCPP_DEBUG(get_logger(), "Response command received [ID: %u]", srv_id);
 }
 
@@ -566,20 +650,20 @@ void MessageRouter::handle_topic_list_command(int client_fd)
 {
   // Get all ROS topics
   auto topic_names_and_types = get_topic_names_and_types();
-  
+
   // Build response
   nlohmann::json response;
   response["topics"] = nlohmann::json::array();
   response["types"] = nlohmann::json::array();
-  
-  for (const auto& [topic, types] : topic_names_and_types) {
+
+  for (const auto & [topic, types] : topic_names_and_types) {
     response["topics"].push_back(topic);
     if (!types.empty()) {
       // PATCH: Denormalize type name for Unity (remove /msg/ or /srv/)
       // Unity expects "std_msgs/String", ROS 2 gives "std_msgs/msg/String"
       std::string type = types[0];
       std::string denormalized = type;
-      
+
       size_t msg_pos = type.find("/msg/");
       if (msg_pos != std::string::npos) {
         denormalized = type.substr(0, msg_pos) + "/" + type.substr(msg_pos + 5);
@@ -589,22 +673,22 @@ void MessageRouter::handle_topic_list_command(int client_fd)
           denormalized = type.substr(0, srv_pos) + "/" + type.substr(srv_pos + 5);
         }
       }
-      
+
       response["types"].push_back(denormalized);
     } else {
       response["types"].push_back("unknown");
     }
   }
-  
+
   std::string json_str = response.dump();
-  
+
   // Send as system command response
   if (send_callback_) {
     std::vector<uint8_t> data(json_str.begin(), json_str.end());
     send_callback_(client_fd, "__topic_list", data, OutboundMessagePolicy::Strict);
   }
-  
-  RCLCPP_DEBUG(get_logger(), "Sent topic list with %zu topics", 
+
+  RCLCPP_DEBUG(get_logger(), "Sent topic list with %zu topics",
                topic_names_and_types.size());
 }
 
@@ -618,40 +702,41 @@ void MessageRouter::send_handshake(int client_fd)
   if (!send_callback_) {
     return;
   }
-  
+
   nlohmann::json handshake;
   handshake["version"] = "v0.7.0";
-  
+
   // FIX: Flatten metadata to string for Unity compatibility
   nlohmann::json metadata;
   metadata["protocol"] = "ROS2";
   metadata["bridge"] = "HORUS";
   handshake["metadata"] = metadata.dump();
-  
+
   std::string json_str = handshake.dump();
   std::vector<uint8_t> data(json_str.begin(), json_str.end());
   send_callback_(client_fd, "__handshake", data, OutboundMessagePolicy::Strict);
   RCLCPP_INFO(get_logger(), "Sent handshake to client %d", client_fd);
 }
 
-void MessageRouter::send_error_to_client(int client_fd, const std::string& error_message)
+void MessageRouter::send_error_to_client(int client_fd, const std::string & error_message)
 {
   send_log_to_client(client_fd, "error", error_message);
 }
 
-void MessageRouter::send_log_to_client(int client_fd, const std::string& level,
-                                      const std::string& message)
+void MessageRouter::send_log_to_client(
+  int client_fd, const std::string & level,
+  const std::string & message)
 {
   if (!send_callback_) {
     return;
   }
-  
+
   nlohmann::json log_msg;
   log_msg["text"] = message;
-  
+
   std::string json_str = log_msg.dump();
   std::string command = "__" + level;
-  
+
   std::vector<uint8_t> data(json_str.begin(), json_str.end());
   send_callback_(client_fd, command, data, OutboundMessagePolicy::Strict);
 }
@@ -680,78 +765,70 @@ MessageRouter::PendingServiceState MessageRouter::consume_pending_service_state(
 }
 
 OutboundMessagePolicy MessageRouter::classify_subscription_policy(
-  const std::string& topic,
-  const std::string& message_type)
+  const std::string & topic,
+  const std::string & message_type)
 {
-  if (topic.rfind("__", 0) == 0) {
-    return OutboundMessagePolicy::Realtime;
-  }
-
-  if (topic == "/tf" ||
-      topic == "tf" ||
-      topic == "/tf_static" ||
-      topic == "tf_static" ||
-      (topic.size() >= 3 && topic.compare(topic.size() - 3, 3, "/tf") == 0) ||
-      (topic.size() >= 10 && topic.compare(topic.size() - 10, 10, "/tf_static") == 0)) {
-    return OutboundMessagePolicy::Realtime;
-  }
-
-  if (topic.find("chunk_item") != std::string::npos ||
-      topic.find("gaussian_splat") != std::string::npos) {
-    return OutboundMessagePolicy::Bulk;
-  }
-
   const std::string normalized_type = normalize_message_type_for_policy(message_type);
-  static const std::unordered_set<std::string> kRealtimeTypes = {
-    "tf2_msgs/tfmessage",
-    "geometry_msgs/transform",
-    "geometry_msgs/transformstamped",
-    "geometry_msgs/pose",
-    "geometry_msgs/posestamped",
-    "geometry_msgs/posewithcovariance",
-    "geometry_msgs/posewithcovariancestamped",
-    "geometry_msgs/twist",
-    "geometry_msgs/twiststamped",
-    "nav_msgs/odometry"
+
+  // 3D-map payloads route to the Bulk lane so they always yield to Realtime streams (TF / camera /
+  // LaserScan / control) at message boundaries and are shed under back-pressure instead of
+  // head-of-line-blocking them. Replaceable = keep newest full-resolution frame (whole-map types);
+  // Strict = preserve chunk order (chunked map types).
+  static const std::unordered_set<std::string> kBulkReplaceableTypes = {
+    "sensor_msgs/pointcloud2",
+    "nav_msgs/occupancygrid"
   };
-
-  if (kRealtimeTypes.find(normalized_type) != kRealtimeTypes.end()) {
-    return OutboundMessagePolicy::Realtime;
-  }
-
-  static const std::unordered_set<std::string> kBulkTypes = {
+  static const std::unordered_set<std::string> kBulkStrictTypes = {
     "visualization_msgs/marker",
     "visualization_msgs/markerarray"
   };
 
-  if (kBulkTypes.find(normalized_type) != kBulkTypes.end()) {
-    return OutboundMessagePolicy::Bulk;
+  // Chunk streams (gaussian-splat, point-cloud, and any future chunked map transport): an ordered
+  // flood of begin/item/end chunk frames -> Bulk lane, strict order, so they yield to Realtime
+  // streams at every frame boundary. The tiny manifest stays on the Realtime control path so it is
+  // delivered promptly.
+  if (topic.find("chunk") != std::string::npos &&
+    topic.find("manifest") == std::string::npos)
+  {
+    return OutboundMessagePolicy::BulkStrict;
+  }
+  if (topic.find("gaussian_splat") != std::string::npos &&
+    topic.find("manifest") == std::string::npos)
+  {
+    return OutboundMessagePolicy::BulkStrict;
   }
 
-  if (topic.rfind("/horus/", 0) == 0) {
+  // Classify by message type BEFORE the /horus/ prefix rule, so a mesh/octomap map published on a
+  // /horus/* topic is not force-promoted onto the Realtime Strict path (the old behavior, which
+  // let map chunks starve TF/camera/scan).
+  if (kBulkReplaceableTypes.find(normalized_type) != kBulkReplaceableTypes.end()) {
+    return OutboundMessagePolicy::BulkReplaceable;
+  }
+  if (kBulkStrictTypes.find(normalized_type) != kBulkStrictTypes.end()) {
+    return OutboundMessagePolicy::BulkStrict;
+  }
+
+  // Realtime control-plane and system topics: small, strictly ordered, never coalesced.
+  if (topic.rfind("/horus/", 0) == 0 || topic.rfind("__", 0) == 0) {
     return OutboundMessagePolicy::Strict;
   }
 
+  // Realtime sensor streams that are safe to coalesce to the newest frame (camera / LaserScan).
   static const std::unordered_set<std::string> kReplaceableTypes = {
     "sensor_msgs/image",
     "sensor_msgs/compressedimage",
-    "sensor_msgs/pointcloud2",
     "sensor_msgs/laserscan"
   };
-
   if (kReplaceableTypes.find(normalized_type) != kReplaceableTypes.end()) {
     return OutboundMessagePolicy::Replaceable;
-  }
-
-  if (normalized_type == "nav_msgs/occupancygrid") {
-    return OutboundMessagePolicy::BulkReplaceable;
   }
 
   return OutboundMessagePolicy::Strict;
 }
 
-bool MessageRouter::parse_json_params(const std::string& json_str,
-                                     std::unordered_map<std::string, std::string>& params)
+bool MessageRouter::parse_json_params(
+  const std::string & json_str,
+  std::unordered_map<std::string, std::string> & params)
 {
   try {
     // Remove trailing null character if present
@@ -759,58 +836,58 @@ bool MessageRouter::parse_json_params(const std::string& json_str,
     if (!cleaned_json.empty() && cleaned_json.back() == '\0') {
       cleaned_json.pop_back();
     }
-    
+
     auto json_obj = nlohmann::json::parse(cleaned_json);
-    
-    for (auto& [key, value] : json_obj.items()) {
+
+    for (auto & [key, value] : json_obj.items()) {
       if (value.is_string()) {
         params[key] = value.get<std::string>();
       } else {
         params[key] = value.dump();
       }
     }
-    
+
     return true;
-  } catch (const std::exception& e) {
+  } catch (const std::exception & e) {
     RCLCPP_ERROR(get_logger(), "Failed to parse JSON: %s", e.what());
     return false;
   }
 }
 
-void MessageRouter::track_client_subscriber(int client_fd, const std::string& topic)
+void MessageRouter::track_client_subscriber(int client_fd, const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  auto& state = client_resources_[client_fd];
+  auto & state = client_resources_[client_fd];
   state.subscribed_topics.insert(topic);
   RCLCPP_INFO(get_logger(), "Client %d subscribed topics=%zu (last=%s)",
               client_fd, state.subscribed_topics.size(), topic.c_str());
 }
 
-void MessageRouter::track_client_publisher(int client_fd, const std::string& topic)
+void MessageRouter::track_client_publisher(int client_fd, const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   client_resources_[client_fd].published_topics.insert(topic);
 }
 
-void MessageRouter::track_client_ros_service(int client_fd, const std::string& service_name)
+void MessageRouter::track_client_ros_service(int client_fd, const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   client_resources_[client_fd].ros_services.insert(service_name);
 }
 
-void MessageRouter::track_client_unity_service(int client_fd, const std::string& service_name)
+void MessageRouter::track_client_unity_service(int client_fd, const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   client_resources_[client_fd].unity_services.insert(service_name);
 }
 
-void MessageRouter::track_client_webrtc_session(int client_fd, const std::string& session_id)
+void MessageRouter::track_client_webrtc_session(int client_fd, const std::string & session_id)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   client_resources_[client_fd].webrtc_session_ids.insert(session_id);
 }
 
-void MessageRouter::untrack_client_webrtc_session(int client_fd, const std::string& session_id)
+void MessageRouter::untrack_client_webrtc_session(int client_fd, const std::string & session_id)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   auto it = client_resources_.find(client_fd);
@@ -820,7 +897,7 @@ void MessageRouter::untrack_client_webrtc_session(int client_fd, const std::stri
   it->second.webrtc_session_ids.erase(session_id);
 }
 
-void MessageRouter::untrack_client_subscriber(int client_fd, const std::string& topic)
+void MessageRouter::untrack_client_subscriber(int client_fd, const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   auto it = client_resources_.find(client_fd);
@@ -832,7 +909,7 @@ void MessageRouter::untrack_client_subscriber(int client_fd, const std::string& 
               client_fd, it->second.subscribed_topics.size(), topic.c_str());
 }
 
-void MessageRouter::untrack_client_publisher(int client_fd, const std::string& topic)
+void MessageRouter::untrack_client_publisher(int client_fd, const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   auto it = client_resources_.find(client_fd);
@@ -842,7 +919,7 @@ void MessageRouter::untrack_client_publisher(int client_fd, const std::string& t
   it->second.published_topics.erase(topic);
 }
 
-void MessageRouter::untrack_client_ros_service(int client_fd, const std::string& service_name)
+void MessageRouter::untrack_client_ros_service(int client_fd, const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   auto it = client_resources_.find(client_fd);
@@ -852,7 +929,7 @@ void MessageRouter::untrack_client_ros_service(int client_fd, const std::string&
   it->second.ros_services.erase(service_name);
 }
 
-void MessageRouter::untrack_client_unity_service(int client_fd, const std::string& service_name)
+void MessageRouter::untrack_client_unity_service(int client_fd, const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
   auto it = client_resources_.find(client_fd);
@@ -884,14 +961,14 @@ void MessageRouter::on_client_disconnected(int client_fd)
   }
 
   size_t removed_ros_services = 0;
-  for (const auto& service_name : resources.ros_services) {
+  for (const auto & service_name : resources.ros_services) {
     if (service_manager_->unregister_ros_service(service_name)) {
       removed_ros_services++;
     }
   }
 
   size_t removed_unity_services = 0;
-  for (const auto& service_name : resources.unity_services) {
+  for (const auto & service_name : resources.unity_services) {
     if (service_manager_->unregister_unity_service(service_name)) {
       removed_unity_services++;
     }
@@ -914,7 +991,7 @@ void MessageRouter::on_client_disconnected(int client_fd)
   }
 
 #ifdef ENABLE_WEBRTC
-  for (const auto& session_id : resources.webrtc_session_ids) {
+  for (const auto & session_id : resources.webrtc_session_ids) {
     remove_webrtc_session(session_id);
   }
 #endif
@@ -933,7 +1010,7 @@ void MessageRouter::on_client_disconnected(int client_fd)
 }
 
 #ifdef ENABLE_WEBRTC
-void MessageRouter::publish_webrtc_signal(const nlohmann::json& payload)
+void MessageRouter::publish_webrtc_signal(const nlohmann::json & payload)
 {
   if (!webrtc_signal_pub_) {
     return;
@@ -971,9 +1048,11 @@ void MessageRouter::handle_webrtc_signal_msg(const std_msgs::msg::String::Shared
     std::remove(clean_json.begin(), clean_json.end(), '\0'),
     clean_json.end());
   // Trim leading/trailing whitespace after sanitizing CDR null terminators.
-  auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-  clean_json.erase(clean_json.begin(), std::find_if(clean_json.begin(), clean_json.end(), not_space));
-  clean_json.erase(std::find_if(clean_json.rbegin(), clean_json.rend(), not_space).base(), clean_json.end());
+  auto not_space = [](unsigned char ch) {return !std::isspace(ch);};
+  clean_json.erase(clean_json.begin(),
+      std::find_if(clean_json.begin(), clean_json.end(), not_space));
+  clean_json.erase(std::find_if(clean_json.rbegin(), clean_json.rend(), not_space).base(),
+      clean_json.end());
   if (clean_json.empty()) {
     return;
   }
@@ -981,14 +1060,14 @@ void MessageRouter::handle_webrtc_signal_msg(const std_msgs::msg::String::Shared
   nlohmann::json payload;
   try {
     payload = nlohmann::json::parse(clean_json);
-  } catch (const std::exception& e) {
+  } catch (const std::exception & e) {
     RCLCPP_WARN(get_logger(), "Failed to parse WebRTC signal JSON: %s", e.what());
     return;
   }
 
   std::string type = payload.value("type", "");
   std::transform(type.begin(), type.end(), type.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
+      return static_cast<char>(std::tolower(c));
   });
 
   if (type == "offer") {
@@ -1002,14 +1081,14 @@ void MessageRouter::handle_webrtc_signal_msg(const std_msgs::msg::String::Shared
   }
 }
 
-void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
+void MessageRouter::handle_webrtc_offer(const nlohmann::json & payload)
 {
   const std::string session_id = payload.value("session_id", "");
   const std::string sdp = payload.value("sdp", "");
   const std::string stream_topic = payload.value("stream_topic", "");
   std::string image_type = payload.value("image_type", "");
   std::transform(image_type.begin(), image_type.end(), image_type.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
+      return static_cast<char>(std::tolower(c));
   });
 
   if (session_id.empty() || sdp.empty() || stream_topic.empty()) {
@@ -1033,9 +1112,9 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
   session->session_id = session_id;
   if (payload.contains("client_fd")) {
     try {
-      session->owner_client_fd = payload.at("client_fd").is_number_integer()
-        ? payload.at("client_fd").get<int>()
-        : std::stoi(payload.at("client_fd").get<std::string>());
+      session->owner_client_fd = payload.at("client_fd").is_number_integer() ?
+        payload.at("client_fd").get<int>() :
+        std::stoi(payload.at("client_fd").get<std::string>());
     } catch (...) {
       session->owner_client_fd = -1;
     }
@@ -1059,18 +1138,18 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
   settings.pipeline = webrtc_default_pipeline_;
   settings.wait_for_complete_gathering = true;
 
-  auto get_int = [&payload](const char* key, int fallback) {
-    if (!payload.contains(key)) {
-      return fallback;
-    }
-    try {
-      return payload.at(key).is_number_integer()
-               ? payload.at(key).get<int>()
-               : std::stoi(payload.at(key).get<std::string>());
-    } catch (...) {
-      return fallback;
-    }
-  };
+  auto get_int = [&payload](const char * key, int fallback) {
+      if (!payload.contains(key)) {
+        return fallback;
+      }
+      try {
+        return payload.at(key).is_number_integer() ?
+               payload.at(key).get<int>() :
+               std::stoi(payload.at(key).get<std::string>());
+      } catch (...) {
+        return fallback;
+      }
+    };
 
   if (payload.contains("encoder") && payload.at("encoder").is_string()) {
     settings.encoder = payload.at("encoder").get<std::string>();
@@ -1078,9 +1157,9 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
   if (payload.contains("wait_for_complete_gathering")) {
     try {
       settings.wait_for_complete_gathering =
-        payload.at("wait_for_complete_gathering").is_boolean()
-          ? payload.at("wait_for_complete_gathering").get<bool>()
-          : (payload.at("wait_for_complete_gathering").get<std::string>() != "false");
+        payload.at("wait_for_complete_gathering").is_boolean() ?
+        payload.at("wait_for_complete_gathering").get<bool>() :
+        (payload.at("wait_for_complete_gathering").get<std::string>() != "false");
     } catch (...) {
       settings.wait_for_complete_gathering = true;
     }
@@ -1089,7 +1168,7 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
     try {
       settings.stun_servers.clear();
       if (payload.at("stun_servers").is_array()) {
-        for (const auto& entry : payload.at("stun_servers")) {
+        for (const auto & entry : payload.at("stun_servers")) {
           if (entry.is_string()) {
             const auto value = entry.get<std::string>();
             if (!value.empty()) {
@@ -1130,7 +1209,7 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
   }
 
   session->manager->set_signaling_callback(
-    [this, session_id](const std::string& type, const nlohmann::json& data) {
+    [this, session_id](const std::string & type, const nlohmann::json & data) {
       nlohmann::json out;
       out["session_id"] = session_id;
       out["type"] = type;
@@ -1199,7 +1278,7 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json& payload)
     stream_topic.c_str());
 }
 
-void MessageRouter::handle_webrtc_candidate(const nlohmann::json& payload)
+void MessageRouter::handle_webrtc_candidate(const nlohmann::json & payload)
 {
   const std::string session_id = payload.value("session_id", "");
   if (session_id.empty()) {
@@ -1229,9 +1308,9 @@ void MessageRouter::handle_webrtc_candidate(const nlohmann::json& payload)
   int sdp_mline_index = 0;
   if (payload.contains("sdpMLineIndex")) {
     try {
-      sdp_mline_index = payload.at("sdpMLineIndex").is_number_integer()
-        ? payload.at("sdpMLineIndex").get<int>()
-        : std::stoi(payload.at("sdpMLineIndex").get<std::string>());
+      sdp_mline_index = payload.at("sdpMLineIndex").is_number_integer() ?
+        payload.at("sdpMLineIndex").get<int>() :
+        std::stoi(payload.at("sdpMLineIndex").get<std::string>());
     } catch (...) {
       sdp_mline_index = 0;
     }
@@ -1268,7 +1347,7 @@ void MessageRouter::handle_webrtc_candidate(const nlohmann::json& payload)
   session->manager->handle_candidate(candidate, sdp_mid, sdp_mline_index);
 }
 
-void MessageRouter::handle_webrtc_stop(const nlohmann::json& payload)
+void MessageRouter::handle_webrtc_stop(const nlohmann::json & payload)
 {
   const std::string session_id = payload.value("session_id", "");
   if (session_id.empty()) {
@@ -1278,8 +1357,8 @@ void MessageRouter::handle_webrtc_stop(const nlohmann::json& payload)
 }
 
 void MessageRouter::enqueue_webrtc_raw_frame(
-  const std::shared_ptr<WebRtcSession>& session,
-  const sensor_msgs::msg::Image::SharedPtr& msg)
+  const std::shared_ptr<WebRtcSession> & session,
+  const sensor_msgs::msg::Image::SharedPtr & msg)
 {
   if (!session || !session->running || !msg) {
     return;
@@ -1299,8 +1378,8 @@ void MessageRouter::enqueue_webrtc_raw_frame(
 }
 
 void MessageRouter::enqueue_webrtc_compressed_frame(
-  const std::shared_ptr<WebRtcSession>& session,
-  const sensor_msgs::msg::CompressedImage::SharedPtr& msg)
+  const std::shared_ptr<WebRtcSession> & session,
+  const sensor_msgs::msg::CompressedImage::SharedPtr & msg)
 {
   if (!session || !session->running || !msg) {
     return;
@@ -1319,7 +1398,7 @@ void MessageRouter::enqueue_webrtc_compressed_frame(
   session->frame_queue_cv.notify_one();
 }
 
-void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& session)
+void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> & session)
 {
   const auto kWarmupWindow = std::chrono::milliseconds(2000);
   const auto kIncomingActivityWindow = std::chrono::milliseconds(2500);
@@ -1332,7 +1411,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
     {
       std::unique_lock<std::mutex> lock(session->frame_queue_mutex);
       session->frame_queue_cv.wait_for(lock, std::chrono::milliseconds(200), [&session] {
-        return !session->frame_queue.empty() || !session->running;
+          return !session->frame_queue.empty() || !session->running;
       });
       if (!session->running) {
         break;
@@ -1353,7 +1432,8 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
         continue;
       }
       if (convert_to_rgb(*raw, rgb_data, session->warned_unsupported_encoding)) {
-        session->manager->push_frame(rgb_data, static_cast<int>(raw->width), static_cast<int>(raw->height), "RGB");
+        session->manager->push_frame(rgb_data, static_cast<int>(raw->width),
+            static_cast<int>(raw->height), "RGB");
         pushed_frame = true;
       }
     } else {
@@ -1363,7 +1443,9 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
       }
       int width = 0;
       int height = 0;
-      if (decompress_to_rgb(*compressed, rgb_data, width, height, session->warned_unsupported_encoding)) {
+      if (decompress_to_rgb(*compressed, rgb_data, width, height,
+          session->warned_unsupported_encoding))
+      {
         session->manager->push_frame(rgb_data, width, height, "RGB");
         pushed_frame = true;
       }
@@ -1413,7 +1495,8 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
         session->last_rtp_progress_time.time_since_epoch().count() > 0 &&
         (now - session->last_rtp_progress_time) > kRtpStallThreshold;
       if (rtp_stalled &&
-          (now - session->last_keyframe_request_time) > kKeyframeCooldown) {
+        (now - session->last_keyframe_request_time) > kKeyframeCooldown)
+      {
         session->last_keyframe_request_time = now;
         should_request_keyframe = true;
       }
@@ -1432,26 +1515,31 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
       session->manager->request_keyframe();
       RCLCPP_WARN(
         get_logger(),
-        "WebRTC session '%s' stall detected (incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu). Requested keyframe (cooldown=%ldms, stall_threshold=%ldms).",
+        "WebRTC session '%s' stall detected (incoming=%" PRIu64
+        " pushed=%" PRIu64 " dropped=%" PRIu64 " rtp_packets=%" PRIu64
+        "). Requested keyframe (cooldown=%" PRId64
+        "ms, stall_threshold=%" PRId64 "ms).",
         session->session_id.c_str(),
-        static_cast<unsigned long long>(incoming_frames),
-        static_cast<unsigned long long>(pushed_frames),
-        static_cast<unsigned long long>(dropped_frames),
-        static_cast<unsigned long long>(rtp_packets),
-        static_cast<long>(kKeyframeCooldown.count()),
-        static_cast<long>(kRtpStallThreshold.count()));
+        incoming_frames,
+        pushed_frames,
+        dropped_frames,
+        rtp_packets,
+        static_cast<int64_t>(kKeyframeCooldown.count()),
+        static_cast<int64_t>(kRtpStallThreshold.count()));
     }
 
     if (should_log_telemetry) {
       RCLCPP_INFO(
         get_logger(),
-        "WebRTC session '%s' telemetry: incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu rtp_bytes=%llu peer=%s track=%s",
+        "WebRTC session '%s' telemetry: incoming=%" PRIu64
+        " pushed=%" PRIu64 " dropped=%" PRIu64 " rtp_packets=%" PRIu64
+        " rtp_bytes=%" PRIu64 " peer=%s track=%s",
         session->session_id.c_str(),
-        static_cast<unsigned long long>(incoming_frames),
-        static_cast<unsigned long long>(pushed_frames),
-        static_cast<unsigned long long>(dropped_frames),
-        static_cast<unsigned long long>(rtp_packets),
-        static_cast<unsigned long long>(rtp_bytes),
+        incoming_frames,
+        pushed_frames,
+        dropped_frames,
+        rtp_packets,
+        rtp_bytes,
         peer_connected ? "connected" : "disconnected",
         track_open ? "open" : "closed");
     }
@@ -1461,9 +1549,9 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession>& 
 }
 
 bool MessageRouter::convert_to_rgb(
-  const sensor_msgs::msg::Image& msg,
-  std::vector<uint8_t>& output,
-  bool& warned_flag)
+  const sensor_msgs::msg::Image & msg,
+  std::vector<uint8_t> & output,
+  bool & warned_flag)
 {
   const auto width = static_cast<size_t>(msg.width);
   const auto height = static_cast<size_t>(msg.height);
@@ -1472,23 +1560,24 @@ bool MessageRouter::convert_to_rgb(
     return false;
   }
 
-  auto equals_ignore_case = [](const std::string& lhs, const std::string& rhs) {
-    if (lhs.size() != rhs.size()) {
-      return false;
-    }
-    for (size_t i = 0; i < lhs.size(); ++i) {
-      if (std::tolower(static_cast<unsigned char>(lhs[i])) !=
-          std::tolower(static_cast<unsigned char>(rhs[i]))) {
+  auto equals_ignore_case = [](const std::string & lhs, const std::string & rhs) {
+      if (lhs.size() != rhs.size()) {
         return false;
       }
-    }
-    return true;
-  };
+      for (size_t i = 0; i < lhs.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(lhs[i])) !=
+          std::tolower(static_cast<unsigned char>(rhs[i])))
+        {
+          return false;
+        }
+      }
+      return true;
+    };
 
   if (equals_ignore_case(msg.encoding, sensor_msgs::image_encodings::RGB8)) {
     output.resize(width * height * 3);
     for (size_t y = 0; y < height; ++y) {
-      const uint8_t* row = msg.data.data() + (y * row_stride);
+      const uint8_t * row = msg.data.data() + (y * row_stride);
       std::memcpy(output.data() + (y * width * 3), row, width * 3);
     }
     return true;
@@ -1497,9 +1586,9 @@ bool MessageRouter::convert_to_rgb(
   if (equals_ignore_case(msg.encoding, sensor_msgs::image_encodings::BGR8)) {
     output.resize(width * height * 3);
     for (size_t y = 0; y < height; ++y) {
-      const uint8_t* row = msg.data.data() + (y * row_stride);
+      const uint8_t * row = msg.data.data() + (y * row_stride);
       for (size_t x = 0; x < width; ++x) {
-        const uint8_t* pixel = row + (x * 3);
+        const uint8_t * pixel = row + (x * 3);
         size_t dst_index = (y * width + x) * 3;
         output[dst_index] = pixel[2];
         output[dst_index + 1] = pixel[1];
@@ -1512,7 +1601,7 @@ bool MessageRouter::convert_to_rgb(
   if (equals_ignore_case(msg.encoding, sensor_msgs::image_encodings::MONO8)) {
     output.resize(width * height * 3);
     for (size_t y = 0; y < height; ++y) {
-      const uint8_t* row = msg.data.data() + (y * row_stride);
+      const uint8_t * row = msg.data.data() + (y * row_stride);
       for (size_t x = 0; x < width; ++x) {
         const uint8_t value = row[x];
         const size_t dst_index = (y * width + x) * 3;
@@ -1525,21 +1614,23 @@ bool MessageRouter::convert_to_rgb(
   }
 
   if (!warned_flag) {
-    RCLCPP_WARN(get_logger(), "Unsupported image encoding for WebRTC stream: %s", msg.encoding.c_str());
+    RCLCPP_WARN(get_logger(), "Unsupported image encoding for WebRTC stream: %s",
+        msg.encoding.c_str());
     warned_flag = true;
   }
   return false;
 }
 
 bool MessageRouter::decompress_to_rgb(
-  const sensor_msgs::msg::CompressedImage& msg,
-  std::vector<uint8_t>& output,
-  int& width,
-  int& height,
-  bool& warned_flag)
+  const sensor_msgs::msg::CompressedImage & msg,
+  std::vector<uint8_t> & output,
+  int & width,
+  int & height,
+  bool & warned_flag)
 {
   try {
-    cv::Mat encoded(1, static_cast<int>(msg.data.size()), CV_8UC1, const_cast<uint8_t*>(msg.data.data()));
+    cv::Mat encoded(1, static_cast<int>(msg.data.size()), CV_8UC1,
+      const_cast<uint8_t *>(msg.data.data()));
     cv::Mat decoded = cv::imdecode(encoded, cv::IMREAD_COLOR);
     if (decoded.empty()) {
       if (!warned_flag) {
@@ -1555,7 +1646,7 @@ bool MessageRouter::decompress_to_rgb(
     height = rgb.rows;
     output.assign(rgb.data, rgb.data + (rgb.total() * rgb.elemSize()));
     return true;
-  } catch (const cv::Exception& e) {
+  } catch (const cv::Exception & e) {
     if (!warned_flag) {
       RCLCPP_ERROR(get_logger(), "OpenCV decode exception in WebRTC session: %s", e.what());
       warned_flag = true;
@@ -1564,7 +1655,7 @@ bool MessageRouter::decompress_to_rgb(
   }
 }
 
-void MessageRouter::remove_webrtc_session(const std::string& session_id)
+void MessageRouter::remove_webrtc_session(const std::string & session_id)
 {
   std::shared_ptr<WebRtcSession> session;
   {
@@ -1594,14 +1685,16 @@ void MessageRouter::remove_webrtc_session(const std::string& session_id)
     uint64_t rtp_bytes = session->manager ? session->manager->get_rtp_bytes_sent() : 0;
     RCLCPP_INFO(
       get_logger(),
-      "Stopping WebRTC session '%s' topic='%s' telemetry: incoming=%llu pushed=%llu dropped=%llu rtp_packets=%llu rtp_bytes=%llu",
+      "Stopping WebRTC session '%s' topic='%s' telemetry: incoming=%" PRIu64
+      " pushed=%" PRIu64 " dropped=%" PRIu64 " rtp_packets=%" PRIu64
+      " rtp_bytes=%" PRIu64,
       session->session_id.c_str(),
       session->stream_topic.c_str(),
-      static_cast<unsigned long long>(incoming_frames),
-      static_cast<unsigned long long>(pushed_frames),
-      static_cast<unsigned long long>(dropped_frames),
-      static_cast<unsigned long long>(rtp_packets),
-      static_cast<unsigned long long>(rtp_bytes));
+      incoming_frames,
+      pushed_frames,
+      dropped_frames,
+      rtp_packets,
+      rtp_bytes);
 
     session->running = false;
     session->frame_queue_cv.notify_all();
@@ -1620,11 +1713,11 @@ void MessageRouter::shutdown_webrtc_sessions()
   {
     std::lock_guard<std::mutex> lock(webrtc_sessions_mutex_);
     session_ids.reserve(webrtc_sessions_.size());
-    for (const auto& item : webrtc_sessions_) {
+    for (const auto & item : webrtc_sessions_) {
       session_ids.push_back(item.first);
     }
   }
-  for (const auto& session_id : session_ids) {
+  for (const auto & session_id : session_ids) {
     remove_webrtc_session(session_id);
   }
 }
@@ -1639,8 +1732,8 @@ void MessageRouter::cleanup_stale_webrtc_sessions()
   std::vector<std::string> stale_ids;
   {
     std::lock_guard<std::mutex> lock(webrtc_sessions_mutex_);
-    for (const auto& item : webrtc_sessions_) {
-      const auto& session = item.second;
+    for (const auto & item : webrtc_sessions_) {
+      const auto & session = item.second;
       if (!session) {
         stale_ids.push_back(item.first);
         continue;
@@ -1653,7 +1746,7 @@ void MessageRouter::cleanup_stale_webrtc_sessions()
     }
   }
 
-  for (const auto& session_id : stale_ids) {
+  for (const auto & session_id : stale_ids) {
     RCLCPP_INFO(get_logger(), "Cleaning stale WebRTC session '%s'", session_id.c_str());
     remove_webrtc_session(session_id);
   }

@@ -1,3 +1,17 @@
+// Copyright 2025 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // SPDX-FileCopyrightText: 2025 RICE Lab, University of Genoa
 // SPDX-License-Identifier: Apache-2.0
 
@@ -15,10 +29,10 @@ namespace horus_unity_bridge
 
 /**
  * @brief Main HORUS Unity Bridge node
- * 
+ *
  * Integrates connection management and message routing for high-performance
  * Unity-ROS2 communication.
- * 
+ *
  * Key improvements over ROS-TCP-Endpoint:
  * - Single-node architecture (vs one node per topic)
  * - Epoll-based async I/O (vs Python threading)
@@ -30,38 +44,39 @@ namespace horus_unity_bridge
 class UnityBridgeNode
 {
 public:
-  explicit UnityBridgeNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions());
+  explicit UnityBridgeNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   ~UnityBridgeNode();
-  
+
   /**
    * @brief Initialize and start the bridge
    */
   bool start();
-  
+
   /**
    * @brief Stop the bridge and cleanup
    */
   void stop();
-  
+
   /**
    * @brief Run the bridge (blocking until stopped)
    */
   void run();
-  
+
   /**
    * @brief Check if bridge is running
    */
-  bool is_running() const { return running_.load(); }
-  const ConnectionManager::Config& connection_config() const { return conn_config_; }
-  uint16_t port() const { return conn_config_.port; }
-  const std::string& bind_address() const { return conn_config_.bind_address; }
-  int worker_threads() const { return worker_threads_; }
-  bool log_protocol_messages() const { return log_protocol_messages_; }
-  bool has_service_timer() const { return static_cast<bool>(service_timer_); }
-  const std::vector<std::string>& reserved_parameter_warnings() const {
+  bool is_running() const {return running_.load();}
+  const ConnectionManager::Config & connection_config() const {return conn_config_;}
+  uint16_t port() const {return conn_config_.port;}
+  const std::string & bind_address() const {return conn_config_.bind_address;}
+  int worker_threads() const {return worker_threads_;}
+  bool log_protocol_messages() const {return log_protocol_messages_;}
+  bool has_service_timer() const {return static_cast<bool>(service_timer_);}
+  const std::vector<std::string> & reserved_parameter_warnings() const
+  {
     return reserved_parameter_warnings_;
   }
-  
+
   /**
    * @brief Print comprehensive statistics
    */
@@ -72,25 +87,25 @@ private:
   std::shared_ptr<MessageRouter> router_;
   std::unique_ptr<ConnectionManager> connection_manager_;
   std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor_;
-  
+
   // Configuration
   ConnectionManager::Config conn_config_;
   int worker_threads_ = 4;
   bool log_protocol_messages_ = true;
   std::vector<std::string> reserved_parameter_warnings_;
   rclcpp::NodeOptions node_options_;
-  
+
   // State
   std::atomic<bool> running_;
   std::thread spin_thread_;
-  
+
   // Private methods
   void load_parameters();
   void setup_callbacks();
-  void handle_message_from_unity(int client_fd, const ProtocolMessage& message);
-  void handle_client_connected(int client_fd, const std::string& ip, uint16_t port);
-  void handle_client_disconnected(int client_fd, const std::string& ip, uint16_t port);
-  
+  void handle_message_from_unity(int client_fd, const ProtocolMessage & message);
+  void handle_client_connected(int client_fd, const std::string & ip, uint16_t port);
+  void handle_client_disconnected(int client_fd, const std::string & ip, uint16_t port);
+
   // Statistics timer
   rclcpp::TimerBase::SharedPtr stats_timer_;
   rclcpp::TimerBase::SharedPtr service_timer_;
