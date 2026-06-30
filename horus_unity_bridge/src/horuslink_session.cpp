@@ -22,8 +22,19 @@ namespace horus_unity_bridge::horuslink
 
 std::vector<Frame> Session::handle_frame(const Frame & frame)
 {
+  return handle_frame(frame, Lane::Realtime);
+}
+
+std::vector<Frame> Session::handle_frame(const Frame & frame, Lane lane)
+{
   if (frame.header.msg_type == MessageType::Control) {
     return handle_control_frame(frame);
+  }
+
+  if (frame.header.msg_type == MessageType::Data &&
+    channel_table_.can_accept_data_frame(frame.header, lane))
+  {
+    return {frame};
   }
 
   return {};

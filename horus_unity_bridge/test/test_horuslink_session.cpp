@@ -36,6 +36,31 @@ Frame make_control_frame(std::vector<uint8_t> payload, uint32_t seq = 1)
   return frame;
 }
 
+Frame make_data_frame(uint16_t channel_id, std::vector<uint8_t> payload, uint32_t seq = 1)
+{
+  Frame frame;
+  frame.header.channel_id = channel_id;
+  frame.header.msg_type = MessageType::Data;
+  frame.header.flags = FrameFlags::RawOpaque;
+  frame.header.seq = seq;
+  frame.header.length = static_cast<uint32_t>(payload.size());
+  frame.payload = std::move(payload);
+  return frame;
+}
+
+void register_bulk_channel(Session & session, uint16_t channel_id)
+{
+  const SubscribeRequest request{
+    channel_id,
+    "/camera",
+    "sensor_msgs/msg/Image",
+    Lane::Bulk,
+    Delivery::ReplaceLatest
+  };
+  auto responses = session.handle_frame(make_control_frame(encode_subscribe_request(request)));
+  ASSERT_EQ(responses.size(), 1u);
+}
+
 }  // namespace
 
 TEST(HorusLinkSessionTest, HelloFrameStoresPeerRoleWithoutResponse)
@@ -103,6 +128,40 @@ TEST(HorusLinkSessionTest, DuplicateSubscribeRequestReturnsRejectedAck)
   EXPECT_EQ(first_ack->status, SubscribeStatus::Accepted);
   EXPECT_EQ(second_ack->status, SubscribeStatus::Rejected);
   EXPECT_FALSE(second_ack->error.empty());
+}
+
+TEST(HorusLinkSessionTest, DataFrameIsAcceptedOnlyAfterSubscriptionAckOnNegotiatedLane)
+{
+  Session session;
+  register_bulk_channel(session, 22);
+  Frame data = make_data_frame(22, {0x01, 0x02, 0x03});
+
+  auto accepted = session.handle_frame(data, Lane::Bulk);
+
+  ASSERT_EQ(accepted.size(), 1u);
+  EXPECT_EQ(accepted[0].header.channel_id, 22);
+  EXPECT_EQ(accepted[0].payload, data.payload);
+}
+
+TEST(HorusLinkSessionTest, DataFrameOnWrongLaneIsRejected)
+{
+  Session session;
+  register_bulk_channel(session, 22);
+  Frame data = make_data_frame(22, {0x01});
+
+  auto rejected = session.handle_frame(data, Lane::Realtime);
+
+  EXPECT_TRUE(rejected.empty());
+}
+
+TEST(HorusLinkSessionTest, DataFrameForUnknownChannelIsRejected)
+{
+  Session session;
+  Frame data = make_data_frame(99, {0x01});
+
+  auto rejected = session.handle_frame(data, Lane::Bulk);
+
+  EXPECT_TRUE(rejected.empty());
 }
 
 }  // namespace horus_unity_bridge::horuslink

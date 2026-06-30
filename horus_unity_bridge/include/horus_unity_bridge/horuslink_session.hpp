@@ -32,6 +32,7 @@ class Session
 {
 public:
   std::vector<Frame> handle_frame(const Frame & frame);
+  std::vector<Frame> handle_frame(const Frame & frame, Lane lane);
 
   const ChannelTable & channel_table() const {return channel_table_;}
   ChannelTable & channel_table() {return channel_table_;}
