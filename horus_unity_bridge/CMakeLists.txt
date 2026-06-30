@@ -182,9 +182,7 @@ set(BRIDGE_CORE_SOURCES
   src/horuslink_outbound_lane_queue.cpp
   src/horuslink_protocol.cpp
   src/horuslink_session.cpp
-  src/protocol_handler.cpp
   src/bridge_metrics.cpp
-  src/connection_manager.cpp
   src/message_router.cpp
   src/control_lease_manager.cpp
   src/topic_manager.cpp

@@ -17,8 +17,6 @@
 
 #pragma once
 
-#include "connection_manager.hpp"
-#include "protocol_handler.hpp"
 #include "horus_unity_bridge/horuslink_channel_table.hpp"
 #include "horus_unity_bridge/horuslink_control_messages.hpp"
 #include "topic_manager.hpp"
@@ -69,12 +67,7 @@ public:
   using SendCallback = std::function<bool(
         int client_fd,
         const std::string &,
-        const std::vector<uint8_t> &,
-        OutboundMessagePolicy)>;
-  using BroadcastCallback = std::function<void(
-        const std::string &,
-        const std::vector<uint8_t> &,
-        OutboundMessagePolicy)>;
+        const std::vector<uint8_t> &)>;
   using HorusLinkServiceResponseCallback = std::function<bool(
         int client_fd,
         const std::string & service_name,
@@ -92,24 +85,10 @@ public:
     send_callback_ = std::move(callback);
   }
 
-  void set_broadcast_callback(BroadcastCallback callback)
-  {
-    broadcast_callback_ = std::move(callback);
-  }
-
   void set_horuslink_service_response_callback(HorusLinkServiceResponseCallback callback)
   {
     horuslink_service_response_callback_ = std::move(callback);
   }
-
-  /**
-   * @brief Route an incoming message from Unity
-   *
-   * @param client_fd Client that sent the message
-   * @param message Protocol message
-   * @return true if message was handled successfully
-   */
-  bool route_message(int client_fd, const ProtocolMessage & message);
 
   /**
    * @brief Build the HorusLink topic discovery table from the current ROS graph.
@@ -176,11 +155,6 @@ public:
     const std::vector<uint8_t> & request);
 
   /**
-   * @brief Handle system commands from Unity
-   */
-  bool handle_system_command(int client_fd, const ProtocolMessage & message);
-
-  /**
    * @brief Get topic manager
    */
   TopicManager & get_topic_manager() {return *topic_manager_;}
@@ -189,11 +163,6 @@ public:
    * @brief Get service manager
    */
   ServiceManager & get_service_manager() {return *service_manager_;}
-
-  /**
-   * @brief Send handshake payload to a client
-   */
-  void send_handshake(int client_fd);
 
   /**
    * @brief Get routing statistics
@@ -246,7 +215,7 @@ private:
     std::chrono::steady_clock::time_point last_rtp_progress_time{};
     std::chrono::steady_clock::time_point last_keyframe_request_time{};
     std::chrono::steady_clock::time_point last_telemetry_log_time{};
-    bool warned_unsupported_encoding = false;
+    bool waned_unsupported_encoding = false;
   };
 
   bool webrtc_enabled_ = false;
@@ -280,13 +249,13 @@ private:
   bool convert_to_rgb(
     const sensor_msgs::msg::Image & msg,
     std::vector<uint8_t> & output,
-    bool & warned_flag);
+    bool & waned_flag);
   bool decompress_to_rgb(
     const sensor_msgs::msg::CompressedImage & msg,
     std::vector<uint8_t> & output,
     int & width,
     int & height,
-    bool & warned_flag);
+    bool & waned_flag);
   void remove_webrtc_session(const std::string & session_id);
   void shutdown_webrtc_sessions();
   void cleanup_stale_webrtc_sessions();
@@ -295,52 +264,16 @@ private:
 
   // Callbacks
   SendCallback send_callback_;
-  BroadcastCallback broadcast_callback_;
   HorusLinkServiceResponseCallback horuslink_service_response_callback_;
 
   // Statistics
   Statistics stats_;
 
-  // System command handlers
-  void handle_subscribe_command(int client_fd, const std::string & params);
-  void handle_publish_command(int client_fd, const std::string & params);
-  void handle_remove_subscriber_command(int client_fd, const std::string & params);
-  void handle_remove_publisher_command(int client_fd, const std::string & params);
-  void handle_remove_ros_service_command(int client_fd, const std::string & params);
-  void handle_remove_unity_service_command(int client_fd, const std::string & params);
-  void handle_ros_service_command(int client_fd, const std::string & params);
-  void handle_unity_service_command(int client_fd, const std::string & params);
-  void handle_request_command(int client_fd, const std::string & params);
-  void handle_response_command(int client_fd, const std::string & params);
-  void handle_topic_list_command(int client_fd);
-  void handle_handshake_command(int client_fd);
-
-  // Service request/response tracking
-  struct PendingServiceState
-  {
-    uint32_t pending_request_id = 0;
-    uint32_t pending_response_id = 0;
-  };
-  std::unordered_map<int, PendingServiceState> pending_service_state_;
-  mutable std::mutex pending_service_state_mutex_;
   // Map service request IDs to client FDs for routing responses
   std::unordered_map<uint32_t, int> service_response_client_;
   std::unordered_map<uint32_t, std::string> service_response_topic_;
   std::mutex service_response_mutex_;
-  std::mutex send_mutex_; // Protects socket writes for atomicity
   bool log_protocol_messages_ = true;
-
-  // Utility
-  void send_error_to_client(int client_fd, const std::string & error_message);
-  void send_log_to_client(int client_fd, const std::string & level, const std::string & message);
-  PendingServiceState consume_pending_service_state(int client_fd);
-  static OutboundMessagePolicy classify_subscription_policy(
-    const std::string & topic,
-    const std::string & message_type);
-
-  bool parse_json_params(
-    const std::string & json_str,
-    std::unordered_map<std::string, std::string> & params);
 
 public:
   void on_client_disconnected(int client_fd);
@@ -366,8 +299,6 @@ private:
   void untrack_client_publisher(int client_fd, const std::string & topic);
   void untrack_client_ros_service(int client_fd, const std::string & service_name);
   void untrack_client_unity_service(int client_fd, const std::string & service_name);
-
-  friend class MessageRouterTestPeer;
 };
 
 } // namespace horus_unity_bridge

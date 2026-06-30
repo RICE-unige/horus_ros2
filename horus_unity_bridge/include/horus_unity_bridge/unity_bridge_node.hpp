@@ -17,7 +17,6 @@
 
 #pragma once
 
-#include "connection_manager.hpp"
 #include "horus_unity_bridge/horuslink_connection_manager.hpp"
 #include "message_router.hpp"
 
@@ -47,7 +46,6 @@ class UnityBridgeNode
 public:
   enum class TransportProtocol
   {
-    LegacyConnector,
     HorusLink
   };
 
@@ -73,10 +71,12 @@ public:
    * @brief Check if bridge is running
    */
   bool is_running() const {return running_.load();}
-  const ConnectionManager::Config & connection_config() const {return conn_config_;}
-  uint16_t port() const {return conn_config_.port;}
+  uint16_t port() const {return horuslink_config_.realtime_port;}
   uint16_t horuslink_bulk_port() const {return horuslink_config_.bulk_port;}
-  const std::string & bind_address() const {return conn_config_.bind_address;}
+  const std::string & bind_address() const {return horuslink_config_.bind_address;}
+  int max_connections() const {return horuslink_config_.max_connections;}
+  size_t socket_buffer_size() const {return horuslink_config_.socket_buffer_size;}
+  bool tcp_nodelay() const {return horuslink_config_.tcp_nodelay;}
   TransportProtocol transport_protocol() const {return transport_protocol_;}
   const std::string & transport_protocol_name() const {return transport_protocol_name_;}
   int worker_threads() const {return worker_threads_;}
@@ -95,12 +95,10 @@ public:
 private:
   // Core components
   std::shared_ptr<MessageRouter> router_;
-  std::unique_ptr<ConnectionManager> connection_manager_;
   std::unique_ptr<horuslink::HorusLinkConnectionManager> horuslink_connection_manager_;
   std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor_;
 
   // Configuration
-  ConnectionManager::Config conn_config_;
   horuslink::HorusLinkConnectionManager::Config horuslink_config_;
   TransportProtocol transport_protocol_ = TransportProtocol::HorusLink;
   std::string transport_protocol_name_ = "horuslink";
@@ -116,11 +114,7 @@ private:
   // Private methods
   void load_parameters();
   void setup_callbacks();
-  void setup_legacy_callbacks();
   void setup_horuslink_callbacks();
-  void handle_message_from_unity(int client_fd, const ProtocolMessage & message);
-  void handle_client_connected(int client_fd, const std::string & ip, uint16_t port);
-  void handle_client_disconnected(int client_fd, const std::string & ip, uint16_t port);
   void handle_horuslink_client_connected(int connection_id, const std::string & ip);
   void handle_horuslink_client_disconnected(int connection_id, const std::string & ip);
   bool handle_horuslink_subscribe(

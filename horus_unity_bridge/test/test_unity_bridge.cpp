@@ -15,7 +15,6 @@
 // SPDX-FileCopyrightText: 2025 RICE Lab, University of Genoa
 // SPDX-License-Identifier: Apache-2.0
 
-#include "horus_unity_bridge/connection_manager.hpp"
 #include "horus_unity_bridge/horuslink_control_messages.hpp"
 #include "horus_unity_bridge/horuslink_light_codecs.hpp"
 #include "horus_unity_bridge/horuslink_protocol.hpp"
@@ -31,6 +30,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <sensor_msgs/msg/joy.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <algorithm>
@@ -283,35 +283,6 @@ example_interfaces::srv::AddTwoInts::Response deserialize_add_two_ints_response(
 
 }  // namespace
 
-class MessageRouterTestPeer
-{
-public:
-  static OutboundMessagePolicy classify_subscription_policy(
-    const std::string & topic,
-    const std::string & message_type)
-  {
-    return MessageRouter::classify_subscription_policy(topic, message_type);
-  }
-
-  static bool has_client_state(const MessageRouter & router, int client_fd)
-  {
-    std::lock_guard<std::mutex> lock(router.pending_service_state_mutex_);
-    return router.pending_service_state_.find(client_fd) != router.pending_service_state_.end();
-  }
-
-  static MessageRouter::PendingServiceState client_state(
-    const MessageRouter & router,
-    int client_fd)
-  {
-    std::lock_guard<std::mutex> lock(router.pending_service_state_mutex_);
-    auto it = router.pending_service_state_.find(client_fd);
-    if (it == router.pending_service_state_.end()) {
-      return {};
-    }
-    return it->second;
-  }
-};
-
 class BridgeRuntimeTest : public ::testing::Test
 {
 protected:
@@ -363,183 +334,6 @@ protected:
   }
 };
 
-TEST_F(BridgeRuntimeTest, StrictQueueOverflowsDisconnectWhileReplaceableQueueCoalesces)
-{
-  OutboundMessageQueue queue;
-
-  auto strict_first = queue.enqueue(
-    "/horus/registration",
-    bytes({0x01}),
-    OutboundMessagePolicy::Strict,
-    2);
-  auto strict_second = queue.enqueue(
-    "/horus/registration_ack",
-    bytes({0x02}),
-    OutboundMessagePolicy::Strict,
-    2);
-  auto strict_overflow = queue.enqueue(
-    "/horus/heartbeat",
-    bytes({0x03}),
-    OutboundMessagePolicy::Strict,
-    2);
-
-  EXPECT_TRUE(strict_first.accepted);
-  EXPECT_TRUE(strict_second.accepted);
-  EXPECT_FALSE(strict_overflow.accepted);
-  EXPECT_TRUE(strict_overflow.should_disconnect);
-  EXPECT_EQ(queue.size(), 2u);
-
-  OutboundMessageQueue replaceable_queue;
-  auto first_frame = replaceable_queue.enqueue(
-    "/camera/image",
-    bytes({0x11}),
-    OutboundMessagePolicy::Replaceable,
-    2);
-  auto replaced_frame = replaceable_queue.enqueue(
-    "/camera/image",
-    bytes({0x22}),
-    OutboundMessagePolicy::Replaceable,
-    2);
-
-  EXPECT_TRUE(first_frame.accepted);
-  EXPECT_TRUE(replaced_frame.accepted);
-  EXPECT_TRUE(replaced_frame.replaced_existing);
-  ASSERT_EQ(replaceable_queue.size(), 1u);
-  auto front_destination = [&replaceable_queue]() {
-      const auto & queue_view = static_cast<const OutboundMessageQueue &>(replaceable_queue);
-      const auto * front = queue_view.front();
-      return front == nullptr ? std::string() : front->destination;
-    };
-  auto front_first_byte = [&replaceable_queue]() {
-      const auto & queue_view = static_cast<const OutboundMessageQueue &>(replaceable_queue);
-      const auto * front = queue_view.front();
-      return front == nullptr || front->serialized.empty() ? uint8_t{0} : front->serialized.front();
-    };
-  EXPECT_EQ(front_destination(), "/camera/image");
-  EXPECT_EQ(front_first_byte(), 0x22);
-
-  auto second_topic = replaceable_queue.enqueue(
-    "/camera/right",
-    bytes({0x33}),
-    OutboundMessagePolicy::Replaceable,
-    2);
-  auto third_topic = replaceable_queue.enqueue(
-    "/scan",
-    bytes({0x44}),
-    OutboundMessagePolicy::Replaceable,
-    2);
-
-  EXPECT_TRUE(second_topic.accepted);
-  EXPECT_TRUE(third_topic.accepted);
-  EXPECT_TRUE(third_topic.evicted_old_message);
-  ASSERT_EQ(replaceable_queue.size(), 2u);
-  EXPECT_EQ(front_destination(), "/camera/right");
-}
-
-TEST_F(BridgeRuntimeTest, ReplaceableFrontStaysSupersedableUntilBytesAreSent)
-{
-  OutboundMessageQueue queue;
-
-  auto initial = queue.enqueue(
-    "/camera/image",
-    bytes({0x01, 0x02, 0x03}),
-    OutboundMessagePolicy::Replaceable,
-    4);
-  ASSERT_TRUE(initial.accepted);
-  ASSERT_TRUE(queue.front_is_replaceable());
-
-  auto replaced = queue.enqueue(
-    "/camera/image",
-    bytes({0x04, 0x05, 0x06}),
-    OutboundMessagePolicy::Replaceable,
-    4);
-  ASSERT_TRUE(replaced.accepted);
-  ASSERT_TRUE(replaced.replaced_existing);
-  ASSERT_EQ(queue.size(), 1u);
-  ASSERT_NE(queue.front(), nullptr);
-  EXPECT_EQ(queue.front()->serialized.front(), 0x04);
-  EXPECT_TRUE(queue.front_is_replaceable());
-
-  queue.mark_front_in_flight();
-  EXPECT_FALSE(queue.front_is_replaceable());
-
-  auto next_frame = queue.enqueue(
-    "/camera/image",
-    bytes({0x07, 0x08, 0x09}),
-    OutboundMessagePolicy::Replaceable,
-    4);
-  ASSERT_TRUE(next_frame.accepted);
-  ASSERT_EQ(queue.size(), 2u);
-  ASSERT_NE(queue.front(), nullptr);
-  EXPECT_EQ(queue.front()->serialized.front(), 0x04);
-
-  EXPECT_FALSE(queue.advance_front(1));
-  ASSERT_NE(queue.front(), nullptr);
-  EXPECT_EQ(queue.front()->serialized.front(), 0x04);
-}
-
-TEST_F(BridgeRuntimeTest, SubscriptionPolicyIsStrictByDefaultAndReplaceableOnlyForKnownStreams)
-{
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/robot/goal_status",
-      "std_msgs/String"),
-    OutboundMessagePolicy::Strict);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/robot/waypoint_status",
-      "std_msgs/msg/String"),
-    OutboundMessagePolicy::Strict);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/camera/front/image",
-      "sensor_msgs/Image"),
-    OutboundMessagePolicy::Replaceable);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/scan",
-      "sensor_msgs/msg/LaserScan"),
-    OutboundMessagePolicy::Replaceable);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/horus/registration",
-      "std_msgs/String"),
-    OutboundMessagePolicy::Strict);
-
-  // 3D-map payloads route to the Bulk lane so they yield to Realtime streams. Whole-map types are
-  // BulkReplaceable (coalesce to newest); chunked map types are BulkStrict (preserve order).
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/map_3d",
-      "sensor_msgs/msg/PointCloud2"),
-    OutboundMessagePolicy::BulkReplaceable);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/map",
-      "nav_msgs/msg/OccupancyGrid"),
-    OutboundMessagePolicy::BulkReplaceable);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/horus/map_mesh",
-      "visualization_msgs/msg/Marker"),
-    OutboundMessagePolicy::BulkStrict);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/horus/gaussian_splat/chunks",
-      "std_msgs/String"),
-    OutboundMessagePolicy::BulkStrict);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/map_3d/chunks_item",
-      "std_msgs/String"),
-    OutboundMessagePolicy::BulkStrict);
-  EXPECT_EQ(
-    MessageRouterTestPeer::classify_subscription_policy(
-      "/horus/gaussian_splat/manifest",
-      "std_msgs/String"),
-    OutboundMessagePolicy::Strict);
-}
-
 TEST_F(BridgeRuntimeTest, HorusLinkTopicTableIsSortedByTopicAndType)
 {
   MessageRouter router;
@@ -586,37 +380,69 @@ TEST_F(BridgeRuntimeTest, HorusLinkTopicTableIsSortedByTopicAndType)
   (void)a_publisher;
 }
 
-TEST_F(BridgeRuntimeTest, PendingServiceStateIsTrackedPerClientAndClearedIndependently)
+TEST_F(BridgeRuntimeTest, HorusLinkTopicTableAssignsLaneAndDelivery)
 {
   MessageRouter router;
+  auto fixture_node = std::make_shared<rclcpp::Node>("horuslink_topic_table_route_fixture");
+  auto camera_publisher = fixture_node->create_publisher<sensor_msgs::msg::Image>(
+    "/camera/front/image",
+    rclcpp::QoS(1));
+  auto cloud_publisher = fixture_node->create_publisher<sensor_msgs::msg::PointCloud2>(
+    "/map_3d",
+    rclcpp::QoS(1));
+  auto control_publisher = fixture_node->create_publisher<std_msgs::msg::String>(
+    "/horus/registration",
+    rclcpp::QoS(1));
 
-  auto encode_json = [](const std::string & json_str) {
-      return std::vector<uint8_t>(json_str.begin(), json_str.end());
+  std::vector<horuslink::TopicEntry> entries;
+  bool observed_fixture_topics = false;
+  for (int attempt = 0; attempt < 100 && !observed_fixture_topics; ++attempt) {
+    rclcpp::spin_some(fixture_node);
+    entries = router.get_horuslink_topic_table();
+
+    bool saw_camera = false;
+    bool saw_cloud = false;
+    bool saw_control = false;
+    for (const auto & entry : entries) {
+      saw_camera = saw_camera || entry.topic == "/camera/front/image";
+      saw_cloud = saw_cloud || entry.topic == "/map_3d";
+      saw_control = saw_control || entry.topic == "/horus/registration";
+    }
+    observed_fixture_topics = saw_camera && saw_cloud && saw_control;
+    if (!observed_fixture_topics) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+
+  ASSERT_TRUE(observed_fixture_topics);
+  auto find_topic = [&entries](const std::string & topic) {
+      auto it = std::find_if(
+        entries.begin(),
+        entries.end(),
+        [&topic](const horuslink::TopicEntry & entry) {
+          return entry.topic == topic;
+        });
+      if (it == entries.end()) {
+        throw std::runtime_error("missing topic table entry: " + topic);
+      }
+      return *it;
     };
 
-  ProtocolMessage client_one_request{"__request", encode_json(R"({"srv_id":101})")};
-  ProtocolMessage client_two_request{"__request", encode_json(R"({"srv_id":202})")};
+  const auto camera_entry = find_topic("/camera/front/image");
+  EXPECT_EQ(camera_entry.lane, horuslink::Lane::Realtime);
+  EXPECT_EQ(camera_entry.delivery, horuslink::Delivery::ReplaceLatest);
 
-  EXPECT_TRUE(router.route_message(11, client_one_request));
-  EXPECT_TRUE(router.route_message(22, client_two_request));
+  const auto cloud_entry = find_topic("/map_3d");
+  EXPECT_EQ(cloud_entry.lane, horuslink::Lane::Bulk);
+  EXPECT_EQ(cloud_entry.delivery, horuslink::Delivery::ReplaceLatest);
 
-  auto client_one_state = MessageRouterTestPeer::client_state(router, 11);
-  auto client_two_state = MessageRouterTestPeer::client_state(router, 22);
-  EXPECT_EQ(client_one_state.pending_request_id, 101u);
-  EXPECT_EQ(client_two_state.pending_request_id, 202u);
+  const auto control_entry = find_topic("/horus/registration");
+  EXPECT_EQ(control_entry.lane, horuslink::Lane::Realtime);
+  EXPECT_EQ(control_entry.delivery, horuslink::Delivery::ReliableFifo);
 
-  ProtocolMessage client_one_payload{"/test_service", bytes({0xAA})};
-  EXPECT_FALSE(router.route_message(11, client_one_payload));
-  EXPECT_FALSE(MessageRouterTestPeer::has_client_state(router, 11));
-  EXPECT_TRUE(MessageRouterTestPeer::has_client_state(router, 22));
-
-  ProtocolMessage client_two_response{"__response", encode_json(R"({"srv_id":303})")};
-  EXPECT_TRUE(router.route_message(22, client_two_response));
-  client_two_state = MessageRouterTestPeer::client_state(router, 22);
-  EXPECT_EQ(client_two_state.pending_response_id, 303u);
-
-  router.on_client_disconnected(22);
-  EXPECT_FALSE(MessageRouterTestPeer::has_client_state(router, 22));
+  (void)camera_publisher;
+  (void)cloud_publisher;
+  (void)control_publisher;
 }
 
 TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAlive)
@@ -648,18 +474,18 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
   EXPECT_EQ(node.bind_address(), "127.0.0.1");
   EXPECT_EQ(node.transport_protocol(), UnityBridgeNode::TransportProtocol::HorusLink);
   EXPECT_EQ(node.transport_protocol_name(), "horuslink");
-  EXPECT_EQ(node.connection_config().port, port);
+  EXPECT_EQ(node.port(), port);
   EXPECT_EQ(node.horuslink_bulk_port(), bulk_port);
-  EXPECT_EQ(node.connection_config().max_connections, 7);
-  EXPECT_EQ(node.connection_config().socket_buffer_size, 131072u);
-  EXPECT_EQ(node.connection_config().message_queue_size, 17u);
-  EXPECT_EQ(node.connection_config().connection_timeout_ms, 7000);
-  EXPECT_FALSE(node.connection_config().tcp_nodelay);
+  EXPECT_EQ(node.max_connections(), 7);
+  EXPECT_EQ(node.socket_buffer_size(), 131072u);
+  EXPECT_FALSE(node.tcp_nodelay());
   EXPECT_EQ(node.worker_threads(), 3);
   EXPECT_FALSE(node.log_protocol_messages());
 
   const auto & warnings = node.reserved_parameter_warnings();
   EXPECT_NE(std::find(warnings.begin(), warnings.end(), "message_pool_size"), warnings.end());
+  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "message_queue_size"), warnings.end());
+  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "connection_timeout_ms"), warnings.end());
   EXPECT_NE(std::find(warnings.begin(), warnings.end(), "enable_zero_copy"), warnings.end());
   EXPECT_NE(std::find(warnings.begin(), warnings.end(), "default_publisher_qos.*"), warnings.end());
   EXPECT_NE(std::find(warnings.begin(), warnings.end(), "default_subscriber_qos.*"),
@@ -668,27 +494,6 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
   EXPECT_FALSE(node.has_service_timer());
   ASSERT_TRUE(node.start());
   EXPECT_TRUE(node.has_service_timer());
-  node.stop();
-}
-
-TEST_F(BridgeRuntimeTest, UnityBridgeNodeCanStartLegacyTransportWhenExplicitlyRequested)
-{
-  const uint16_t port = find_unused_port();
-  ASSERT_NE(port, 0);
-  rclcpp::NodeOptions options;
-  options.parameter_overrides({
-      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
-      rclcpp::Parameter("tcp_port", static_cast<int>(port)),
-      rclcpp::Parameter("transport_protocol", std::string("legacy")),
-      rclcpp::Parameter("log_protocol_messages", false)
-  });
-
-  UnityBridgeNode node(options);
-  EXPECT_EQ(node.transport_protocol(), UnityBridgeNode::TransportProtocol::LegacyConnector);
-  EXPECT_EQ(node.transport_protocol_name(), "legacy");
-  EXPECT_EQ(node.connection_config().port, port);
-
-  ASSERT_TRUE(node.start());
   node.stop();
 }
 
@@ -712,7 +517,7 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeCanStartHorusLinkTransport)
   UnityBridgeNode node(options);
   EXPECT_EQ(node.transport_protocol(), UnityBridgeNode::TransportProtocol::HorusLink);
   EXPECT_EQ(node.transport_protocol_name(), "horuslink");
-  EXPECT_EQ(node.connection_config().port, realtime_port);
+  EXPECT_EQ(node.port(), realtime_port);
   EXPECT_EQ(node.horuslink_bulk_port(), bulk_port);
 
   EXPECT_FALSE(node.has_service_timer());

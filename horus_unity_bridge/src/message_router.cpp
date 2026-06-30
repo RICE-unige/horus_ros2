@@ -58,60 +58,56 @@ std::string normalize_message_type_for_policy(std::string message_type)
   return message_type;
 }
 
-// Map an OPTIONAL declarative lane/QoS token (carried from the SDK through Unity's __subscribe
-// params as the "policy" key) onto an OutboundMessagePolicy. Returns true and sets `out` only for a
-// recognized token; an empty/unknown token returns false so the caller falls back to the
-// heuristic classify_subscription_policy() (the unchanged default behavior).
-bool parse_outbound_policy_token(const std::string & raw_token, OutboundMessagePolicy & out)
+struct HorusLinkRoute
 {
-  std::string token = raw_token;
-  if (!token.empty() && token.back() == '\0') {
-    token.pop_back();
-  }
-  // Trim surrounding whitespace; tolerate Unity sending the token padded.
-  auto not_space = [](unsigned char ch) {return !std::isspace(ch);};
-  token.erase(token.begin(), std::find_if(token.begin(), token.end(), not_space));
-  token.erase(std::find_if(token.rbegin(), token.rend(), not_space).base(), token.end());
-  std::transform(
-    token.begin(), token.end(), token.begin(),
-    [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+  horuslink::Lane lane = horuslink::Lane::Realtime;
+  horuslink::Delivery delivery = horuslink::Delivery::ReliableFifo;
+};
 
-  if (token.empty()) {
-    return false;
-  }
-  if (token == "strict") {
-    out = OutboundMessagePolicy::Strict;
-    return true;
-  }
-  if (token == "replaceable") {
-    out = OutboundMessagePolicy::Replaceable;
-    return true;
-  }
-  if (token == "bulk_strict") {
-    out = OutboundMessagePolicy::BulkStrict;
-    return true;
-  }
-  if (token == "bulk_replaceable") {
-    out = OutboundMessagePolicy::BulkReplaceable;
-    return true;
-  }
-  return false;
-}
-
-horuslink::Lane horuslink_lane_from_policy(OutboundMessagePolicy policy)
+HorusLinkRoute classify_horuslink_route(
+  const std::string & topic,
+  const std::string & message_type)
 {
-  return policy == OutboundMessagePolicy::BulkStrict ||
-         policy == OutboundMessagePolicy::BulkReplaceable ?
-         horuslink::Lane::Bulk :
-         horuslink::Lane::Realtime;
-}
+  const std::string normalized_type = normalize_message_type_for_policy(message_type);
 
-horuslink::Delivery horuslink_delivery_from_policy(OutboundMessagePolicy policy)
-{
-  return policy == OutboundMessagePolicy::Replaceable ||
-         policy == OutboundMessagePolicy::BulkReplaceable ?
-         horuslink::Delivery::ReplaceLatest :
-         horuslink::Delivery::ReliableFifo;
+  static const std::unordered_set<std::string> kBulkReplaceableTypes = {
+    "sensor_msgs/pointcloud2",
+    "nav_msgs/occupancygrid"
+  };
+  static const std::unordered_set<std::string> kBulkStrictTypes = {
+    "visualization_msgs/marker",
+    "visualization_msgs/markerarray"
+  };
+
+  if ((topic.find("chunk") != std::string::npos &&
+    topic.find("manifest") == std::string::npos) ||
+    (topic.find("gaussian_splat") != std::string::npos &&
+    topic.find("manifest") == std::string::npos))
+  {
+    return {horuslink::Lane::Bulk, horuslink::Delivery::ReliableFifo};
+  }
+
+  if (kBulkReplaceableTypes.find(normalized_type) != kBulkReplaceableTypes.end()) {
+    return {horuslink::Lane::Bulk, horuslink::Delivery::ReplaceLatest};
+  }
+  if (kBulkStrictTypes.find(normalized_type) != kBulkStrictTypes.end()) {
+    return {horuslink::Lane::Bulk, horuslink::Delivery::ReliableFifo};
+  }
+
+  if (topic.rfind("/horus/", 0) == 0) {
+    return {horuslink::Lane::Realtime, horuslink::Delivery::ReliableFifo};
+  }
+
+  static const std::unordered_set<std::string> kReplaceableTypes = {
+    "sensor_msgs/image",
+    "sensor_msgs/compressedimage",
+    "sensor_msgs/laserscan"
+  };
+  if (kReplaceableTypes.find(normalized_type) != kReplaceableTypes.end()) {
+    return {horuslink::Lane::Realtime, horuslink::Delivery::ReplaceLatest};
+  }
+
+  return {};
 }
 
 }  // namespace
@@ -202,18 +198,11 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
         return;
       }
 
-      if (send_callback_ && target_fd != -1) {
-        std::lock_guard<std::mutex> lock(send_mutex_);
-        // First send __response command with srv_id
-        nlohmann::json response_cmd;
-        response_cmd["srv_id"] = srv_id;
-        std::string json_str = response_cmd.dump();
-        std::vector<uint8_t> cmd_data(json_str.begin(), json_str.end());
-        send_callback_(target_fd, "__response", cmd_data, OutboundMessagePolicy::Strict);
-
-        // Then send the serialized response payload
-        send_callback_(target_fd, "__response_payload", response, OutboundMessagePolicy::Strict);
-      }
+      stats_.routing_errors++;
+      RCLCPP_WARN(
+        get_logger(),
+        "Dropping ROS service response id=%u because no HorusLink response channel is registered",
+        srv_id);
     }
   );
 
@@ -229,81 +218,6 @@ MessageRouter::~MessageRouter()
 #endif
 }
 
-bool MessageRouter::route_message(int client_fd, const ProtocolMessage & message)
-{
-  stats_.messages_routed++;
-
-  // Ignore keepalive messages
-  if (message.is_keepalive()) {
-    return true;
-  }
-
-  // Handle system commands
-  if (message.is_system_command()) {
-    return handle_system_command(client_fd, message);
-  }
-
-  const PendingServiceState pending_state = consume_pending_service_state(client_fd);
-
-  // If a service request was announced, treat this payload as the request body
-  if (pending_state.pending_request_id != 0) {
-    uint32_t srv_id = pending_state.pending_request_id;
-    bool ok = service_manager_->call_ros_service_async(srv_id, message.destination,
-        message.payload);
-    if (!ok) {
-      stats_.routing_errors++;
-      return false;
-    }
-    return true;
-  }
-
-  // If a service response was announced, treat this payload as Unity's response
-  if (pending_state.pending_response_id != 0) {
-    uint32_t srv_id = pending_state.pending_response_id;
-    service_manager_->handle_unity_service_response(srv_id, message.payload);
-    return true;
-  }
-
-  // Regular message - publish to ROS
-  if (control_lease_manager_ && control_lease_manager_->is_internal_topic(message.destination)) {
-    bool handled = control_lease_manager_->handle_internal_message(client_fd, message.destination,
-        message.payload);
-    if (!handled) {
-      stats_.routing_errors++;
-    }
-    return handled;
-  }
-
-  std::string denied_reason;
-  std::string denied_robot_name;
-  if (control_lease_manager_ &&
-    !control_lease_manager_->authorize_command_publish(
-        client_fd, message.destination, &denied_reason, &denied_robot_name))
-  {
-    stats_.routing_errors++;
-    RCLCPP_WARN_THROTTLE(
-      get_logger(),
-      *get_clock(),
-      1000,
-      "Denied Unity publish from client %d on protected topic '%s' (robot='%s', reason='%s')",
-      client_fd,
-      message.destination.c_str(),
-      denied_robot_name.c_str(),
-      denied_reason.c_str());
-    return false;
-  }
-
-  bool success = topic_manager_->publish_message(message.destination, message.payload);
-
-  if (success) {
-    stats_.messages_published++;
-  } else {
-    stats_.routing_errors++;
-  }
-
-  return success;
-}
-
 std::vector<horuslink::TopicEntry> MessageRouter::get_horuslink_topic_table()
 {
   auto topic_names_and_types = get_topic_names_and_types();
@@ -312,13 +226,13 @@ std::vector<horuslink::TopicEntry> MessageRouter::get_horuslink_topic_table()
 
   for (const auto & [topic, types] : topic_names_and_types) {
     const std::string type_name = types.empty() ? "unknown" : types.front();
-    const OutboundMessagePolicy policy = classify_subscription_policy(topic, type_name);
+    const auto route = classify_horuslink_route(topic, type_name);
     entries.push_back(horuslink::TopicEntry{
         0,
         topic,
         type_name,
-        horuslink_lane_from_policy(policy),
-        horuslink_delivery_from_policy(policy)
+        route.lane,
+        route.delivery
       });
   }
 
@@ -352,9 +266,7 @@ bool MessageRouter::register_horuslink_subscriber(
       const std::vector<uint8_t> & data)
     {
       if (send_callback_) {
-        // HorusLink routes by the negotiated channel descriptor in the two-lane
-        // connection manager; this legacy policy argument is ignored in that path.
-        send_callback_(client_fd, topic, data, OutboundMessagePolicy::Strict);
+        send_callback_(client_fd, topic, data);
       }
     });
 
@@ -525,7 +437,7 @@ bool MessageRouter::unregister_horuslink_ros_service(
 }
 
 bool MessageRouter::route_horuslink_data_frame(
-  int,
+  int client_fd,
   const horuslink::ChannelDescriptor & channel,
   const std::vector<uint8_t> & payload)
 {
@@ -533,6 +445,39 @@ bool MessageRouter::route_horuslink_data_frame(
 
   if (channel.topic.empty()) {
     stats_.routing_errors++;
+    return false;
+  }
+
+  if (control_lease_manager_ && control_lease_manager_->is_internal_topic(channel.topic)) {
+    const bool handled = control_lease_manager_->handle_internal_message(
+      client_fd,
+      channel.topic,
+      payload);
+    if (!handled) {
+      stats_.routing_errors++;
+    }
+    return handled;
+  }
+
+  std::string denied_reason;
+  std::string denied_robot_name;
+  if (control_lease_manager_ &&
+    !control_lease_manager_->authorize_command_publish(
+      client_fd,
+      channel.topic,
+      &denied_reason,
+      &denied_robot_name))
+  {
+    stats_.routing_errors++;
+    RCLCPP_WARN_THROTTLE(
+      get_logger(),
+      *get_clock(),
+      1000,
+      "Denied HorusLink publish from connection %d on protected topic '%s' (robot='%s', reason='%s')",
+      client_fd,
+      channel.topic.c_str(),
+      denied_robot_name.c_str(),
+      denied_reason.c_str());
     return false;
   }
 
@@ -581,583 +526,10 @@ bool MessageRouter::route_horuslink_service_request(
   return true;
 }
 
-bool MessageRouter::handle_system_command(int client_fd, const ProtocolMessage & message)
-{
-  stats_.system_commands_processed++;
-
-  std::string command = message.destination;
-  std::string params_json(message.payload.begin(), message.payload.end());
-
-  RCLCPP_DEBUG(get_logger(), "System command: %s", command.c_str());
-
-  try {
-    if (command == "__subscribe") {
-      handle_subscribe_command(client_fd, params_json);
-    } else if (command == "__remove_subscriber") {
-      handle_remove_subscriber_command(client_fd, params_json);
-    } else if (command == "__publish") {
-      handle_publish_command(client_fd, params_json);
-    } else if (command == "__remove_publisher") {
-      handle_remove_publisher_command(client_fd, params_json);
-    } else if (command == "__topic_list") {
-      handle_topic_list_command(client_fd);
-    } else if (command == "__handshake") {
-      handle_handshake_command(client_fd);
-    } else if (command == "__ros_service") {
-      handle_ros_service_command(client_fd, params_json);
-    } else if (command == "__remove_ros_service") {
-      handle_remove_ros_service_command(client_fd, params_json);
-    } else if (command == "__unity_service") {
-      handle_unity_service_command(client_fd, params_json);
-    } else if (command == "__remove_unity_service") {
-      handle_remove_unity_service_command(client_fd, params_json);
-    } else if (command == "__request") {
-      handle_request_command(client_fd, params_json);
-    } else if (command == "__response") {
-      handle_response_command(client_fd, params_json);
-    } else {
-      RCLCPP_WARN(get_logger(), "Unknown system command: %s", command.c_str());
-      send_error_to_client(client_fd, "Unknown system command: " + command);
-      return false;
-    }
-
-    return true;
-  } catch (const std::exception & e) {
-    RCLCPP_ERROR(get_logger(), "Error handling system command %s: %s",
-                 command.c_str(), e.what());
-    send_error_to_client(client_fd, std::string("Error: ") + e.what());
-    stats_.routing_errors++;
-    return false;
-  }
-}
-
-void MessageRouter::handle_subscribe_command(int client_fd, const std::string & params)
-{
-  // Parse JSON parameters
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse subscribe parameters");
-    return;
-  }
-
-  std::string topic = param_map["topic"];
-  std::string message_name = param_map["message_name"];
-
-  if (topic.empty() || message_name.empty()) {
-    send_error_to_client(client_fd, "Missing required parameters: topic, message_name");
-    return;
-  }
-
-  // OPTIONAL declarative lane/QoS override. If Unity forwarded a valid "policy" key (declared by
-  // the SDK's transport_lane), honor it verbatim; otherwise fall back to the heuristic classifier
-  // (UNCHANGED default behavior, so an absent/unknown key is fully backward-compatible).
-  OutboundMessagePolicy policy = classify_subscription_policy(topic, message_name);
-  bool policy_declared = false;
-  const auto policy_it = param_map.find("policy");
-  if (policy_it != param_map.end()) {
-    OutboundMessagePolicy declared_policy = policy;
-    if (parse_outbound_policy_token(policy_it->second, declared_policy)) {
-      policy = declared_policy;
-      policy_declared = true;
-    } else if (!policy_it->second.empty()) {
-      RCLCPP_WARN(
-        get_logger(),
-        "Ignoring unrecognized subscribe policy '%s' for topic '%s'; using classified lane",
-        policy_it->second.c_str(),
-        topic.c_str());
-    }
-  }
-
-  // Register subscriber to forward ROS messages to Unity
-  bool success = topic_manager_->register_subscriber(
-    topic,
-    message_name,
-    client_fd,
-    [this, client_fd, policy](
-      const std::string & topic,
-      const std::vector<uint8_t> & data)
-    {
-      // Forward to Unity client
-      if (send_callback_) {
-        send_callback_(client_fd, topic, data, policy);
-      }
-    }
-  );
-
-  if (success) {
-    track_client_subscriber(client_fd, topic);
-    RCLCPP_INFO(get_logger(), "Registered Unity subscriber: %s [%s]%s",
-                topic.c_str(), message_name.c_str(),
-                policy_declared ? " (declared lane)" : "");
-    send_log_to_client(client_fd, "info",
-                      "RegisterSubscriber(" + topic + ", " + message_name + ") OK");
-  } else {
-    send_error_to_client(client_fd, "Failed to register subscriber: " + topic);
-  }
-}
-
-void MessageRouter::handle_publish_command(int client_fd, const std::string & params)
-{
-  // Parse JSON parameters
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse publish parameters");
-    return;
-  }
-
-  std::string topic = param_map["topic"];
-  std::string message_name = param_map["message_name"];
-
-  if (topic.empty() || message_name.empty()) {
-    send_error_to_client(client_fd, "Missing required parameters: topic, message_name");
-    return;
-  }
-
-  // Register publisher so Unity can publish to ROS
-  bool success = topic_manager_->register_publisher(topic, message_name, client_fd);
-
-  if (success) {
-    track_client_publisher(client_fd, topic);
-    RCLCPP_INFO(get_logger(), "Registered Unity publisher: %s [%s]",
-                topic.c_str(), message_name.c_str());
-    send_log_to_client(client_fd, "info",
-                      "RegisterPublisher(" + topic + ", " + message_name + ") OK");
-  } else {
-    send_error_to_client(client_fd, "Failed to register publisher: " + topic);
-  }
-}
-
-void MessageRouter::handle_remove_subscriber_command(int client_fd, const std::string & params)
-{
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse remove subscriber parameters");
-    return;
-  }
-
-  std::string topic = param_map["topic"];
-  if (topic.empty()) {
-    send_error_to_client(client_fd, "Missing required parameter: topic");
-    return;
-  }
-
-  bool success = topic_manager_->unregister_subscriber(topic, client_fd);
-  untrack_client_subscriber(client_fd, topic);
-  if (success) {
-    send_log_to_client(client_fd, "info", "RemoveSubscriber(" + topic + ") OK");
-  } else {
-    send_log_to_client(client_fd, "warning",
-        "RemoveSubscriber(" + topic + ") ignored (not registered)");
-  }
-}
-
-void MessageRouter::handle_remove_publisher_command(int client_fd, const std::string & params)
-{
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse remove publisher parameters");
-    return;
-  }
-
-  std::string topic = param_map["topic"];
-  if (topic.empty()) {
-    send_error_to_client(client_fd, "Missing required parameter: topic");
-    return;
-  }
-
-  bool success = topic_manager_->unregister_publisher(topic, client_fd);
-  untrack_client_publisher(client_fd, topic);
-  if (success) {
-    send_log_to_client(client_fd, "info", "RemovePublisher(" + topic + ") OK");
-  } else {
-    send_log_to_client(client_fd, "warning",
-        "RemovePublisher(" + topic + ") ignored (not registered)");
-  }
-}
-
-void MessageRouter::handle_remove_ros_service_command(int client_fd, const std::string & params)
-{
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse remove ROS service parameters");
-    return;
-  }
-
-  std::string service_name = param_map["topic"];
-  if (service_name.empty()) {
-    send_error_to_client(client_fd, "Missing required parameter: topic");
-    return;
-  }
-
-  bool success = service_manager_->unregister_ros_service(service_name);
-  untrack_client_ros_service(client_fd, service_name);
-  if (success) {
-    send_log_to_client(client_fd, "info", "RemoveRosService(" + service_name + ") OK");
-  } else {
-    send_log_to_client(client_fd, "warning",
-        "RemoveRosService(" + service_name + ") ignored (not registered)");
-  }
-}
-
-void MessageRouter::handle_remove_unity_service_command(int client_fd, const std::string & params)
-{
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse remove Unity service parameters");
-    return;
-  }
-
-  std::string service_name = param_map["topic"];
-  if (service_name.empty()) {
-    send_error_to_client(client_fd, "Missing required parameter: topic");
-    return;
-  }
-
-  bool success = service_manager_->unregister_unity_service(service_name);
-  untrack_client_unity_service(client_fd, service_name);
-  if (success) {
-    send_log_to_client(client_fd, "info", "RemoveUnityService(" + service_name + ") OK");
-  } else {
-    send_log_to_client(client_fd, "warning",
-        "RemoveUnityService(" + service_name + ") ignored (not registered)");
-  }
-}
-
-void MessageRouter::handle_ros_service_command(int client_fd, const std::string & params)
-{
-  // Parse JSON parameters
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse ROS service parameters");
-    return;
-  }
-
-  std::string service_name = param_map["topic"];
-  std::string service_type = param_map["message_name"];
-
-  if (service_name.empty() || service_type.empty()) {
-    send_error_to_client(client_fd, "Missing required parameters: topic, message_name");
-    return;
-  }
-
-  // Register ROS service client (Unity will call this ROS service)
-  bool success = service_manager_->register_ros_service(service_name, service_type);
-
-  if (success) {
-    track_client_ros_service(client_fd, service_name);
-    RCLCPP_INFO(get_logger(), "Registered ROS service client: %s [%s]",
-                service_name.c_str(), service_type.c_str());
-    send_log_to_client(client_fd, "info",
-                      "RegisterRosService(" + service_name + ", " + service_type + ") OK");
-  } else {
-    send_error_to_client(client_fd, "Failed to register ROS service: " + service_name);
-  }
-}
-
-
-void MessageRouter::handle_unity_service_command(int client_fd, const std::string & params)
-{
-  // Parse JSON parameters
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse Unity service parameters");
-    return;
-  }
-
-  std::string service_name = param_map["topic"];
-  std::string service_type = param_map["message_name"];
-
-  if (service_name.empty() || service_type.empty()) {
-    send_error_to_client(client_fd, "Missing required parameters: topic, message_name");
-    return;
-  }
-
-  // Register Unity service server (ROS can call this service, Unity responds)
-  auto request_callback = [this, client_fd](
-    uint32_t srv_id,
-    const std::string & service_name,
-    const std::vector<uint8_t> & request)
-    {
-    // Send request to Unity client
-      if (send_callback_) {
-        std::lock_guard<std::mutex> lock(send_mutex_);
-      // Send __request command with srv_id first
-        nlohmann::json req_cmd;
-        req_cmd["srv_id"] = srv_id;
-        std::string json_str = req_cmd.dump();
-        std::vector<uint8_t> cmd_data(json_str.begin(), json_str.end());
-        send_callback_(client_fd, "__request", cmd_data, OutboundMessagePolicy::Strict);
-
-      // Then send the actual request data
-        send_callback_(client_fd, service_name, request, OutboundMessagePolicy::Strict);
-      }
-    };
-
-  bool success = service_manager_->register_unity_service(
-    service_name, service_type, request_callback);
-
-  if (success) {
-    track_client_unity_service(client_fd, service_name);
-    RCLCPP_INFO(get_logger(), "Registered Unity service server: %s [%s]",
-                service_name.c_str(), service_type.c_str());
-    send_log_to_client(client_fd, "info",
-                      "RegisterUnityService(" + service_name + ", " + service_type + ") OK");
-  } else {
-    send_error_to_client(client_fd, "Failed to register Unity service: " + service_name);
-  }
-}
-
-void MessageRouter::handle_request_command(int client_fd, const std::string & params)
-{
-  // Parse srv_id from JSON
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse request parameters");
-    return;
-  }
-
-  uint32_t srv_id = std::stoul(param_map["srv_id"]);
-
-  {
-    std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
-    pending_service_state_[client_fd].pending_request_id = srv_id;
-  }
-
-  // Remember which client should receive the response
-  {
-    std::lock_guard<std::mutex> lock(service_response_mutex_);
-    service_response_client_[srv_id] = client_fd;
-  }
-
-  RCLCPP_DEBUG(get_logger(), "Request command received [ID: %u]", srv_id);
-}
-
-void MessageRouter::handle_response_command(int client_fd, const std::string & params)
-{
-  // Parse srv_id from JSON
-  std::unordered_map<std::string, std::string> param_map;
-  if (!parse_json_params(params, param_map)) {
-    send_error_to_client(client_fd, "Failed to parse response parameters");
-    return;
-  }
-
-  uint32_t srv_id = std::stoul(param_map["srv_id"]);
-
-  {
-    std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
-    pending_service_state_[client_fd].pending_response_id = srv_id;
-  }
-
-  RCLCPP_DEBUG(get_logger(), "Response command received [ID: %u]", srv_id);
-}
-
-
-void MessageRouter::handle_topic_list_command(int client_fd)
-{
-  // Get all ROS topics
-  auto topic_names_and_types = get_topic_names_and_types();
-
-  // Build response
-  nlohmann::json response;
-  response["topics"] = nlohmann::json::array();
-  response["types"] = nlohmann::json::array();
-
-  for (const auto & [topic, types] : topic_names_and_types) {
-    response["topics"].push_back(topic);
-    if (!types.empty()) {
-      // PATCH: Denormalize type name for Unity (remove /msg/ or /srv/)
-      // Unity expects "std_msgs/String", ROS 2 gives "std_msgs/msg/String"
-      std::string type = types[0];
-      std::string denormalized = type;
-
-      size_t msg_pos = type.find("/msg/");
-      if (msg_pos != std::string::npos) {
-        denormalized = type.substr(0, msg_pos) + "/" + type.substr(msg_pos + 5);
-      } else {
-        size_t srv_pos = type.find("/srv/");
-        if (srv_pos != std::string::npos) {
-          denormalized = type.substr(0, srv_pos) + "/" + type.substr(srv_pos + 5);
-        }
-      }
-
-      response["types"].push_back(denormalized);
-    } else {
-      response["types"].push_back("unknown");
-    }
-  }
-
-  std::string json_str = response.dump();
-
-  // Send as system command response
-  if (send_callback_) {
-    std::vector<uint8_t> data(json_str.begin(), json_str.end());
-    send_callback_(client_fd, "__topic_list", data, OutboundMessagePolicy::Strict);
-  }
-
-  RCLCPP_DEBUG(get_logger(), "Sent topic list with %zu topics",
-               topic_names_and_types.size());
-}
-
-void MessageRouter::handle_handshake_command(int client_fd)
-{
-  send_handshake(client_fd);
-}
-
-void MessageRouter::send_handshake(int client_fd)
-{
-  if (!send_callback_) {
-    return;
-  }
-
-  nlohmann::json handshake;
-  handshake["version"] = "v0.7.0";
-
-  // FIX: Flatten metadata to string for Unity compatibility
-  nlohmann::json metadata;
-  metadata["protocol"] = "ROS2";
-  metadata["bridge"] = "HORUS";
-  handshake["metadata"] = metadata.dump();
-
-  std::string json_str = handshake.dump();
-  std::vector<uint8_t> data(json_str.begin(), json_str.end());
-  send_callback_(client_fd, "__handshake", data, OutboundMessagePolicy::Strict);
-  RCLCPP_INFO(get_logger(), "Sent handshake to client %d", client_fd);
-}
-
-void MessageRouter::send_error_to_client(int client_fd, const std::string & error_message)
-{
-  send_log_to_client(client_fd, "error", error_message);
-}
-
-void MessageRouter::send_log_to_client(
-  int client_fd, const std::string & level,
-  const std::string & message)
-{
-  if (!send_callback_) {
-    return;
-  }
-
-  nlohmann::json log_msg;
-  log_msg["text"] = message;
-
-  std::string json_str = log_msg.dump();
-  std::string command = "__" + level;
-
-  std::vector<uint8_t> data(json_str.begin(), json_str.end());
-  send_callback_(client_fd, command, data, OutboundMessagePolicy::Strict);
-}
-
 void MessageRouter::set_log_protocol_messages(bool enabled)
 {
   log_protocol_messages_ = enabled;
   topic_manager_->set_protocol_logging_enabled(enabled);
-}
-
-MessageRouter::PendingServiceState MessageRouter::consume_pending_service_state(int client_fd)
-{
-  std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
-  auto it = pending_service_state_.find(client_fd);
-  if (it == pending_service_state_.end()) {
-    return {};
-  }
-
-  PendingServiceState pending_state = it->second;
-  it->second.pending_request_id = 0;
-  it->second.pending_response_id = 0;
-  if (it->second.pending_request_id == 0 && it->second.pending_response_id == 0) {
-    pending_service_state_.erase(it);
-  }
-  return pending_state;
-}
-
-OutboundMessagePolicy MessageRouter::classify_subscription_policy(
-  const std::string & topic,
-  const std::string & message_type)
-{
-  const std::string normalized_type = normalize_message_type_for_policy(message_type);
-
-  // 3D-map payloads route to the Bulk lane so they always yield to Realtime streams (TF / camera /
-  // LaserScan / control) at message boundaries and are shed under back-pressure instead of
-  // head-of-line-blocking them. Replaceable = keep newest full-resolution frame (whole-map types);
-  // Strict = preserve chunk order (chunked map types).
-  static const std::unordered_set<std::string> kBulkReplaceableTypes = {
-    "sensor_msgs/pointcloud2",
-    "nav_msgs/occupancygrid"
-  };
-  static const std::unordered_set<std::string> kBulkStrictTypes = {
-    "visualization_msgs/marker",
-    "visualization_msgs/markerarray"
-  };
-
-  // Chunk streams (gaussian-splat, point-cloud, and any future chunked map transport): an ordered
-  // flood of begin/item/end chunk frames -> Bulk lane, strict order, so they yield to Realtime
-  // streams at every frame boundary. The tiny manifest stays on the Realtime control path so it is
-  // delivered promptly.
-  if (topic.find("chunk") != std::string::npos &&
-    topic.find("manifest") == std::string::npos)
-  {
-    return OutboundMessagePolicy::BulkStrict;
-  }
-  if (topic.find("gaussian_splat") != std::string::npos &&
-    topic.find("manifest") == std::string::npos)
-  {
-    return OutboundMessagePolicy::BulkStrict;
-  }
-
-  // Classify by message type BEFORE the /horus/ prefix rule, so a mesh/octomap map published on a
-  // /horus/* topic is not force-promoted onto the Realtime Strict path (the old behavior, which
-  // let map chunks starve TF/camera/scan).
-  if (kBulkReplaceableTypes.find(normalized_type) != kBulkReplaceableTypes.end()) {
-    return OutboundMessagePolicy::BulkReplaceable;
-  }
-  if (kBulkStrictTypes.find(normalized_type) != kBulkStrictTypes.end()) {
-    return OutboundMessagePolicy::BulkStrict;
-  }
-
-  // Realtime control-plane and system topics: small, strictly ordered, never coalesced.
-  if (topic.rfind("/horus/", 0) == 0 || topic.rfind("__", 0) == 0) {
-    return OutboundMessagePolicy::Strict;
-  }
-
-  // Realtime sensor streams that are safe to coalesce to the newest frame (camera / LaserScan).
-  static const std::unordered_set<std::string> kReplaceableTypes = {
-    "sensor_msgs/image",
-    "sensor_msgs/compressedimage",
-    "sensor_msgs/laserscan"
-  };
-  if (kReplaceableTypes.find(normalized_type) != kReplaceableTypes.end()) {
-    return OutboundMessagePolicy::Replaceable;
-  }
-
-  return OutboundMessagePolicy::Strict;
-}
-
-bool MessageRouter::parse_json_params(
-  const std::string & json_str,
-  std::unordered_map<std::string, std::string> & params)
-{
-  try {
-    // Remove trailing null character if present
-    std::string cleaned_json = json_str;
-    if (!cleaned_json.empty() && cleaned_json.back() == '\0') {
-      cleaned_json.pop_back();
-    }
-
-    auto json_obj = nlohmann::json::parse(cleaned_json);
-
-    for (auto & [key, value] : json_obj.items()) {
-      if (value.is_string()) {
-        params[key] = value.get<std::string>();
-      } else {
-        params[key] = value.dump();
-      }
-    }
-
-    return true;
-  } catch (const std::exception & e) {
-    RCLCPP_ERROR(get_logger(), "Failed to parse JSON: %s", e.what());
-    return false;
-  }
 }
 
 void MessageRouter::track_client_subscriber(int client_fd, const std::string & topic)
@@ -1290,11 +662,6 @@ void MessageRouter::on_client_disconnected(int client_fd)
         ++it;
       }
     }
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(pending_service_state_mutex_);
-    pending_service_state_.erase(client_fd);
   }
 
 #ifdef ENABLE_WEBRTC
@@ -1738,7 +1105,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> &
       if (!raw) {
         continue;
       }
-      if (convert_to_rgb(*raw, rgb_data, session->warned_unsupported_encoding)) {
+      if (convert_to_rgb(*raw, rgb_data, session->waned_unsupported_encoding)) {
         session->manager->push_frame(rgb_data, static_cast<int>(raw->width),
             static_cast<int>(raw->height), "RGB");
         pushed_frame = true;
@@ -1751,7 +1118,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> &
       int width = 0;
       int height = 0;
       if (decompress_to_rgb(*compressed, rgb_data, width, height,
-          session->warned_unsupported_encoding))
+          session->waned_unsupported_encoding))
       {
         session->manager->push_frame(rgb_data, width, height, "RGB");
         pushed_frame = true;
@@ -1858,7 +1225,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> &
 bool MessageRouter::convert_to_rgb(
   const sensor_msgs::msg::Image & msg,
   std::vector<uint8_t> & output,
-  bool & warned_flag)
+  bool & waned_flag)
 {
   const auto width = static_cast<size_t>(msg.width);
   const auto height = static_cast<size_t>(msg.height);
@@ -1920,10 +1287,10 @@ bool MessageRouter::convert_to_rgb(
     return true;
   }
 
-  if (!warned_flag) {
+  if (!waned_flag) {
     RCLCPP_WARN(get_logger(), "Unsupported image encoding for WebRTC stream: %s",
         msg.encoding.c_str());
-    warned_flag = true;
+    waned_flag = true;
   }
   return false;
 }
@@ -1933,16 +1300,16 @@ bool MessageRouter::decompress_to_rgb(
   std::vector<uint8_t> & output,
   int & width,
   int & height,
-  bool & warned_flag)
+  bool & waned_flag)
 {
   try {
     cv::Mat encoded(1, static_cast<int>(msg.data.size()), CV_8UC1,
       const_cast<uint8_t *>(msg.data.data()));
     cv::Mat decoded = cv::imdecode(encoded, cv::IMREAD_COLOR);
     if (decoded.empty()) {
-      if (!warned_flag) {
+      if (!waned_flag) {
         RCLCPP_WARN(get_logger(), "Failed to decode compressed image for WebRTC session");
-        warned_flag = true;
+        waned_flag = true;
       }
       return false;
     }
@@ -1954,9 +1321,9 @@ bool MessageRouter::decompress_to_rgb(
     output.assign(rgb.data, rgb.data + (rgb.total() * rgb.elemSize()));
     return true;
   } catch (const cv::Exception & e) {
-    if (!warned_flag) {
+    if (!waned_flag) {
       RCLCPP_ERROR(get_logger(), "OpenCV decode exception in WebRTC session: %s", e.what());
-      warned_flag = true;
+      waned_flag = true;
     }
     return false;
   }
