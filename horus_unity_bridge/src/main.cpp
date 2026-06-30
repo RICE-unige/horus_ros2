@@ -55,11 +55,27 @@ int main(int argc, char ** argv)
     std::cout << "\n========================================" << std::endl;
     std::cout << "  HORUS Unity Bridge" << std::endl;
     std::cout << "========================================" << std::endl;
-    std::cout << "Bridge is running on "
-              << node.bind_address()
-              << ":"
-              << node.port()
-              << std::endl;
+    std::cout << "Transport: " << node.transport_protocol_name() << std::endl;
+    if (node.transport_protocol() ==
+      horus_unity_bridge::UnityBridgeNode::TransportProtocol::HorusLink)
+    {
+      std::cout << "Realtime lane: "
+                << node.bind_address()
+                << ":"
+                << node.port()
+                << std::endl;
+      std::cout << "Bulk lane:     "
+                << node.bind_address()
+                << ":"
+                << node.horuslink_bulk_port()
+                << std::endl;
+    } else {
+      std::cout << "Bridge is running on "
+                << node.bind_address()
+                << ":"
+                << node.port()
+                << std::endl;
+    }
     std::cout << "Press Ctrl+C to stop" << std::endl;
     std::cout << "========================================\n" << std::endl;
 
