@@ -61,6 +61,10 @@ public:
         int connection_id,
         const ChannelDescriptor & channel,
         std::string & error)>;
+  using PublisherCallback = std::function<bool(
+        int connection_id,
+        const ChannelDescriptor & channel,
+        std::string & error)>;
   using ConnectionCallback = std::function<void(int connection_id, const std::string & ip)>;
 
   explicit HorusLinkConnectionManager(Config config);
@@ -92,6 +96,10 @@ public:
   void set_subscribe_callback(SubscribeCallback callback)
   {
     subscribe_callback_ = std::move(callback);
+  }
+  void set_publisher_callback(PublisherCallback callback)
+  {
+    publisher_callback_ = std::move(callback);
   }
   void set_connection_callback(ConnectionCallback callback)
   {
@@ -152,9 +160,13 @@ private:
   bool handle_subscribe_request(
     const std::shared_ptr<Connection> & connection,
     const SubscribeRequest & request);
+  bool handle_publisher_request(
+    const std::shared_ptr<Connection> & connection,
+    const PublisherRequest & request);
   bool send_frame(const std::shared_ptr<Connection> & connection, Lane lane, const Frame & frame);
   bool drain_lane(const std::shared_ptr<Connection> & connection, Lane lane);
   void disconnect_connection(int connection_id);
+  void prune_disconnected_connections();
   std::shared_ptr<Connection> find_connection(int connection_id) const;
   void configure_socket(int socket_fd) const;
 
@@ -176,6 +188,7 @@ private:
   int next_connection_id_ = 1;
   FrameCallback frame_callback_;
   SubscribeCallback subscribe_callback_;
+  PublisherCallback publisher_callback_;
   ConnectionCallback connection_callback_;
   ConnectionCallback disconnection_callback_;
 };

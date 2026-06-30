@@ -331,6 +331,39 @@ bool MessageRouter::register_horuslink_subscriber(
   return success;
 }
 
+bool MessageRouter::register_horuslink_publisher(
+  int client_fd,
+  const horuslink::ChannelDescriptor & channel)
+{
+  if (channel.topic.empty() || channel.type_name.empty()) {
+    return false;
+  }
+
+  const bool success = topic_manager_->register_publisher(
+    channel.topic,
+    channel.type_name,
+    client_fd);
+
+  if (success) {
+    track_client_publisher(client_fd, channel.topic);
+    RCLCPP_INFO(
+      get_logger(),
+      "Registered HorusLink publisher: channel=%u topic=%s [%s]",
+      channel.channel_id,
+      channel.topic.c_str(),
+      channel.type_name.c_str());
+  } else {
+    RCLCPP_WARN(
+      get_logger(),
+      "Failed to register HorusLink publisher: channel=%u topic=%s [%s]",
+      channel.channel_id,
+      channel.topic.c_str(),
+      channel.type_name.c_str());
+  }
+
+  return success;
+}
+
 bool MessageRouter::handle_system_command(int client_fd, const ProtocolMessage & message)
 {
   stats_.system_commands_processed++;

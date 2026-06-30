@@ -253,6 +253,14 @@ void UnityBridgeNode::setup_horuslink_callbacks()
       return handle_horuslink_subscribe(connection_id, channel, error);
     });
 
+  horuslink_connection_manager_->set_publisher_callback(
+    [this](
+      int connection_id,
+      const horuslink::ChannelDescriptor & channel,
+      std::string & error) {
+      return handle_horuslink_publisher(connection_id, channel, error);
+    });
+
   router_->set_send_callback(
     [this](int connection_id,
     const std::string & topic,
@@ -421,6 +429,19 @@ bool UnityBridgeNode::handle_horuslink_subscribe(
 {
   if (!router_->register_horuslink_subscriber(connection_id, channel)) {
     error = "failed to register ROS subscriber";
+    return false;
+  }
+
+  return true;
+}
+
+bool UnityBridgeNode::handle_horuslink_publisher(
+  int connection_id,
+  const horuslink::ChannelDescriptor & channel,
+  std::string & error)
+{
+  if (!router_->register_horuslink_publisher(connection_id, channel)) {
+    error = "failed to register ROS publisher";
     return false;
   }
 

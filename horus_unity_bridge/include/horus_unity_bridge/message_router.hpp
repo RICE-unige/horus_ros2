@@ -107,6 +107,13 @@ public:
     const horuslink::ChannelDescriptor & channel);
 
   /**
+   * @brief Register a HorusLink publisher after channel negotiation.
+   */
+  bool register_horuslink_publisher(
+    int client_fd,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
    * @brief Handle system commands from Unity
    */
   bool handle_system_command(int client_fd, const ProtocolMessage & message);

@@ -232,6 +232,15 @@ bool SubscribeRequest::operator==(const SubscribeRequest & other) const
          delivery == other.delivery;
 }
 
+bool PublisherRequest::operator==(const PublisherRequest & other) const
+{
+  return channel_id == other.channel_id &&
+         topic == other.topic &&
+         type_name == other.type_name &&
+         lane == other.lane &&
+         delivery == other.delivery;
+}
+
 bool SubscribeAck::operator==(const SubscribeAck & other) const
 {
   return channel_id == other.channel_id &&
@@ -301,6 +310,44 @@ std::optional<SubscribeRequest> decode_subscribe_request(const uint8_t * data, s
   }
 
   SubscribeRequest request;
+  uint8_t lane = 0;
+  uint8_t delivery = 0;
+  if (!get_u16(*records, control_tlv::kChannelId, request.channel_id) ||
+    !get_string(*records, control_tlv::kTopic, request.topic) ||
+    !get_string(*records, control_tlv::kTypeName, request.type_name) ||
+    !get_byte(*records, control_tlv::kLane, lane) ||
+    !get_byte(*records, control_tlv::kDelivery, delivery))
+  {
+    return std::nullopt;
+  }
+
+  request.lane = static_cast<Lane>(lane);
+  request.delivery = static_cast<Delivery>(delivery);
+  return request;
+}
+
+std::vector<uint8_t> encode_publisher_request(const PublisherRequest & request)
+{
+  validate_topic_fields(request.topic, request.type_name);
+  return encode_tlvs({
+      byte_record(control_tlv::kKind, static_cast<uint8_t>(ControlMessageKind::PublisherRequest)),
+      u16_record(control_tlv::kProtocolVersion, control_tlv::kProtocolVersionValue),
+      u16_record(control_tlv::kChannelId, request.channel_id),
+      string_record(control_tlv::kTopic, request.topic),
+      string_record(control_tlv::kTypeName, request.type_name),
+      byte_record(control_tlv::kLane, static_cast<uint8_t>(request.lane)),
+      byte_record(control_tlv::kDelivery, static_cast<uint8_t>(request.delivery))
+    });
+}
+
+std::optional<PublisherRequest> decode_publisher_request(const uint8_t * data, size_t size)
+{
+  auto records = decode_records(data, size, ControlMessageKind::PublisherRequest);
+  if (!records.has_value()) {
+    return std::nullopt;
+  }
+
+  PublisherRequest request;
   uint8_t lane = 0;
   uint8_t delivery = 0;
   if (!get_u16(*records, control_tlv::kChannelId, request.channel_id) ||

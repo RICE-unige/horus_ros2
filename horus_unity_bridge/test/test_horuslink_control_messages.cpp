@@ -52,6 +52,24 @@ TEST(HorusLinkControlMessagesTest, SubscribeRequestEncodesStableGoldenVector)
   EXPECT_EQ(*decoded, request);
 }
 
+TEST(HorusLinkControlMessagesTest, PublisherRequestEncodesStableGoldenVector)
+{
+  const PublisherRequest request{
+    12,
+    "/cmd_vel",
+    "geometry_msgs/msg/Twist",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+  const auto encoded = encode_publisher_request(request);
+  const auto expected = load_horuslink_golden_vector("publisher_request");
+  EXPECT_EQ(encoded, expected);
+
+  auto decoded = decode_publisher_request(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, request);
+}
+
 TEST(HorusLinkControlMessagesTest, SubscribeAckRoundTripsAcceptedAndRejectedMessages)
 {
   const SubscribeAck accepted{9, SubscribeStatus::Accepted, ""};

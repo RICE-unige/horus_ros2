@@ -75,22 +75,34 @@ std::vector<Frame> Session::handle_control_frame(const Frame & frame)
   }
 
   auto subscribe_request = decode_subscribe_request(frame.payload.data(), frame.payload.size());
-  if (!subscribe_request.has_value()) {
+  auto publisher_request = decode_publisher_request(frame.payload.data(), frame.payload.size());
+  if (!subscribe_request.has_value() && !publisher_request.has_value()) {
     return {};
   }
 
+  const uint16_t channel_id = subscribe_request.has_value() ?
+    subscribe_request->channel_id : publisher_request->channel_id;
+  const std::string & topic = subscribe_request.has_value() ?
+    subscribe_request->topic : publisher_request->topic;
+  const std::string & type_name = subscribe_request.has_value() ?
+    subscribe_request->type_name : publisher_request->type_name;
+  const Lane lane = subscribe_request.has_value() ?
+    subscribe_request->lane : publisher_request->lane;
+  const Delivery delivery = subscribe_request.has_value() ?
+    subscribe_request->delivery : publisher_request->delivery;
+
   const bool accepted = channel_table_.begin_subscribe(
-    subscribe_request->channel_id,
-    subscribe_request->topic,
-    subscribe_request->type_name,
-    subscribe_request->lane,
-    subscribe_request->delivery);
+    channel_id,
+    topic,
+    type_name,
+    lane,
+    delivery);
   if (accepted) {
-    channel_table_.confirm_subscribe_ack(subscribe_request->channel_id);
+    channel_table_.confirm_subscribe_ack(channel_id);
   }
 
   const SubscribeAck ack{
-    subscribe_request->channel_id,
+    channel_id,
     accepted ? SubscribeStatus::Accepted : SubscribeStatus::Rejected,
     accepted ? "" : "channel or topic already registered"
   };

@@ -197,7 +197,13 @@ void HorusLinkConnectionManager::broadcast_to_topic(
 size_t HorusLinkConnectionManager::connection_count() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
-  return connections_.size();
+  size_t count = 0;
+  for (const auto & entry : connections_) {
+    if (entry.second && entry.second->connected.load()) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 uint16_t HorusLinkConnectionManager::realtime_port() const
@@ -342,6 +348,8 @@ void HorusLinkConnectionManager::start_connection(
   AcceptedSocket realtime_socket,
   AcceptedSocket bulk_socket)
 {
+  prune_disconnected_connections();
+
   int connection_id = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -422,6 +430,11 @@ void HorusLinkConnectionManager::handle_received_frame(
     auto subscribe_request = decode_subscribe_request(frame.payload.data(), frame.payload.size());
     if (subscribe_request.has_value()) {
       handle_subscribe_request(connection, *subscribe_request);
+      return;
+    }
+    auto publisher_request = decode_publisher_request(frame.payload.data(), frame.payload.size());
+    if (publisher_request.has_value()) {
+      handle_publisher_request(connection, *publisher_request);
       return;
     }
   }
@@ -508,6 +521,57 @@ bool HorusLinkConnectionManager::handle_subscribe_request(
   return ack.status == SubscribeStatus::Accepted;
 }
 
+bool HorusLinkConnectionManager::handle_publisher_request(
+  const std::shared_ptr<Connection> & connection,
+  const PublisherRequest & request)
+{
+  SubscribeAck ack;
+  ack.channel_id = request.channel_id;
+  ack.status = SubscribeStatus::Rejected;
+  ack.error = "channel or topic already registered";
+
+  std::optional<ChannelDescriptor> channel;
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    const bool reserved = connection->session.channel_table().begin_subscribe(
+      request.channel_id,
+      request.topic,
+      request.type_name,
+      request.lane,
+      request.delivery);
+    if (reserved) {
+      channel = connection->session.channel_table().get(request.channel_id);
+    }
+  }
+
+  if (channel.has_value()) {
+    std::string callback_error;
+    bool accepted = true;
+    if (publisher_callback_) {
+      accepted = publisher_callback_(connection->id, *channel, callback_error);
+    }
+
+    if (accepted) {
+      std::lock_guard<std::mutex> lock(connection->mutex);
+      connection->session.channel_table().confirm_subscribe_ack(request.channel_id);
+      ack.status = SubscribeStatus::Accepted;
+      ack.error.clear();
+    } else {
+      std::lock_guard<std::mutex> lock(connection->mutex);
+      connection->session.channel_table().remove(request.channel_id);
+      ack.error = callback_error.empty() ? "publisher rejected by bridge" : callback_error;
+    }
+  }
+
+  Frame ack_frame;
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    ack_frame = connection->session.make_subscribe_ack_frame(ack);
+  }
+  send_frame(connection, Lane::Realtime, ack_frame);
+  return ack.status == SubscribeStatus::Accepted;
+}
+
 bool HorusLinkConnectionManager::send_frame(
   const std::shared_ptr<Connection> & connection,
   Lane lane,
@@ -558,7 +622,6 @@ void HorusLinkConnectionManager::disconnect_connection(int connection_id)
       return;
     }
     connection = it->second;
-    connections_.erase(it);
   }
 
   if (!connection->connected.exchange(false)) {
@@ -570,6 +633,37 @@ void HorusLinkConnectionManager::disconnect_connection(int connection_id)
 
   if (disconnection_callback_) {
     disconnection_callback_(connection_id, connection->ip);
+  }
+}
+
+void HorusLinkConnectionManager::prune_disconnected_connections()
+{
+  std::vector<std::shared_ptr<Connection>> disconnected;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = connections_.begin();
+    while (it != connections_.end()) {
+      if (it->second && !it->second->connected.load()) {
+        disconnected.push_back(it->second);
+        it = connections_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  const auto current_thread = std::this_thread::get_id();
+  for (auto & connection : disconnected) {
+    if (connection->realtime_thread.joinable() &&
+      connection->realtime_thread.get_id() != current_thread)
+    {
+      connection->realtime_thread.join();
+    }
+    if (connection->bulk_thread.joinable() &&
+      connection->bulk_thread.get_id() != current_thread)
+    {
+      connection->bulk_thread.join();
+    }
   }
 }
 

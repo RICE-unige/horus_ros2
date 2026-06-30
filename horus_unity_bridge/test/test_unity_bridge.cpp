@@ -29,8 +29,10 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <array>
+#include <chrono>
 #include <poll.h>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
 
 namespace horus_unity_bridge
@@ -162,6 +164,22 @@ horuslink::Frame make_horuslink_control_frame(std::vector<uint8_t> payload, uint
   horuslink::Frame frame;
   frame.header.channel_id = 0;
   frame.header.msg_type = horuslink::MessageType::Control;
+  frame.header.seq = seq;
+  frame.header.length = static_cast<uint32_t>(payload.size());
+  frame.payload = std::move(payload);
+  return frame;
+}
+
+horuslink::Frame make_horuslink_data_frame(
+  uint16_t channel_id,
+  std::vector<uint8_t> payload,
+  uint32_t seq = 1,
+  uint8_t flags = horuslink::FrameFlags::RawOpaque)
+{
+  horuslink::Frame frame;
+  frame.header.channel_id = channel_id;
+  frame.header.msg_type = horuslink::MessageType::Data;
+  frame.header.flags = flags;
   frame.header.seq = seq;
   frame.header.length = static_cast<uint32_t>(payload.size());
   frame.payload = std::move(payload);
@@ -616,6 +634,84 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportForwardsRosTopicToNegotiatedBulkLane
   EXPECT_EQ(received_frame.header.seq, 1u);
   EXPECT_EQ(received_frame.payload, expected_payload);
 
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesDataFramesToRosTopic)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+
+  const std::string topic = "/horuslink_unity_publish_string";
+  const uint16_t channel_id = 37;
+  const horuslink::PublisherRequest request{
+    channel_id,
+    topic,
+    "std_msgs/msg/String",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_publisher_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("horuslink_loopback_subscriber");
+  std::string received_text;
+  auto subscriber = subscriber_node->create_subscription<std_msgs::msg::String>(
+    topic,
+    10,
+    [&received_text](const std_msgs::msg::String::SharedPtr msg) {
+      received_text = msg->data;
+    });
+
+  for (int attempt = 0; attempt < 50 && subscriber_node->count_publishers(topic) == 0; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
+
+  const std::string text = "unity-to-ros";
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_data_frame(channel_id, serialize_string_message(text)));
+
+  for (int attempt = 0; attempt < 50 && received_text.empty(); ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  EXPECT_EQ(received_text, text);
+
+  (void)subscriber;
+  (void)bulk;
   node.stop();
 }
 

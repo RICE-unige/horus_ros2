@@ -134,6 +134,32 @@ TEST(HorusLinkSessionTest, SubscribeRequestActivatesChannelAndReturnsAck)
   EXPECT_EQ(channel->lane, Lane::Bulk);
 }
 
+TEST(HorusLinkSessionTest, PublisherRequestActivatesChannelAndReturnsAck)
+{
+  Session session;
+  const PublisherRequest request{
+    15,
+    "/cmd_vel",
+    "geometry_msgs/msg/Twist",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+
+  auto responses = session.handle_frame(make_control_frame(encode_publisher_request(request)));
+
+  ASSERT_EQ(responses.size(), 1u);
+  EXPECT_EQ(responses[0].header.msg_type, MessageType::Control);
+  auto ack = decode_subscribe_ack(responses[0].payload.data(), responses[0].payload.size());
+  ASSERT_TRUE(ack.has_value());
+  EXPECT_EQ(ack->channel_id, 15);
+  EXPECT_EQ(ack->status, SubscribeStatus::Accepted);
+
+  auto channel = session.channel_table().get(15);
+  ASSERT_TRUE(channel.has_value());
+  EXPECT_EQ(channel->state, ChannelState::Active);
+  EXPECT_EQ(channel->lane, Lane::Realtime);
+}
+
 TEST(HorusLinkSessionTest, DuplicateSubscribeRequestReturnsRejectedAck)
 {
   Session session;
