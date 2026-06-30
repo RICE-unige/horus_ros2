@@ -176,6 +176,7 @@ set(BRIDGE_CORE_SOURCES
   src/unity_bridge_node.cpp
   src/horuslink_channel_table.cpp
   src/horuslink_control_messages.cpp
+  src/horuslink_light_codecs.cpp
   src/horuslink_protocol.cpp
   src/horuslink_session.cpp
   src/protocol_handler.cpp
@@ -277,6 +278,7 @@ if(BUILD_TESTING)
   ament_add_gtest(horus_unity_bridge_tests
     test/test_horuslink_channel_table.cpp
     test/test_horuslink_control_messages.cpp
+    test/test_horuslink_light_codecs.cpp
     test/test_horuslink_protocol.cpp
     test/test_horuslink_session.cpp
     test/test_unity_bridge.cpp
