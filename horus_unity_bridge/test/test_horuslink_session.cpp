@@ -159,6 +159,26 @@ TEST(HorusLinkSessionTest, DuplicateSubscribeRequestReturnsRejectedAck)
   EXPECT_FALSE(second_ack->error.empty());
 }
 
+TEST(HorusLinkSessionTest, MakeTopicTableFrameEncodesControlResponse)
+{
+  Session session;
+  const std::vector<TopicEntry> entries{
+    TopicEntry{1, "/tf", "tf2_msgs/msg/TFMessage", Lane::Realtime, Delivery::ReliableFifo},
+    TopicEntry{2, "/camera", "sensor_msgs/msg/Image", Lane::Bulk, Delivery::ReplaceLatest}
+  };
+
+  Frame frame = session.make_topic_table_frame(entries);
+
+  EXPECT_EQ(frame.header.channel_id, 0);
+  EXPECT_EQ(frame.header.msg_type, MessageType::Control);
+  EXPECT_EQ(frame.header.seq, 1u);
+  EXPECT_EQ(frame.header.corr_id, 0u);
+  EXPECT_EQ(frame.header.length, frame.payload.size());
+  auto decoded = decode_topic_table(frame.payload.data(), frame.payload.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, entries);
+}
+
 TEST(HorusLinkSessionTest, DataFrameIsAcceptedOnlyAfterSubscriptionAckOnNegotiatedLane)
 {
   Session session;

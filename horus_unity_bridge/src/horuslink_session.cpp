@@ -57,6 +57,11 @@ std::vector<Frame> Session::handle_frame(const Frame & frame, Lane lane)
   return {};
 }
 
+Frame Session::make_topic_table_frame(const std::vector<TopicEntry> & entries)
+{
+  return make_control_response(encode_topic_table(entries));
+}
+
 std::vector<Frame> Session::handle_control_frame(const Frame & frame)
 {
   if (auto hello = decode_hello(frame.payload.data(), frame.payload.size())) {
