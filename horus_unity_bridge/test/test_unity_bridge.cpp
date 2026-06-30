@@ -16,19 +16,170 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/connection_manager.hpp"
+#include "horus_unity_bridge/horuslink_control_messages.hpp"
+#include "horus_unity_bridge/horuslink_protocol.hpp"
 #include "horus_unity_bridge/message_router.hpp"
 #include "horus_unity_bridge/unity_bridge_node.hpp"
 
 #include <gtest/gtest.h>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/serialization.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <array>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 namespace horus_unity_bridge
 {
+
+namespace
+{
+
+class SocketHandle
+{
+public:
+  explicit SocketHandle(int fd = -1)
+  : fd_(fd)
+  {
+  }
+
+  ~SocketHandle()
+  {
+    reset();
+  }
+
+  SocketHandle(const SocketHandle &) = delete;
+  SocketHandle & operator=(const SocketHandle &) = delete;
+
+  SocketHandle(SocketHandle && other) noexcept
+  : fd_(other.fd_)
+  {
+    other.fd_ = -1;
+  }
+
+  SocketHandle & operator=(SocketHandle && other) noexcept
+  {
+    if (this != &other) {
+      reset();
+      fd_ = other.fd_;
+      other.fd_ = -1;
+    }
+    return *this;
+  }
+
+  int get() const {return fd_;}
+
+  void reset()
+  {
+    if (fd_ >= 0) {
+      close(fd_);
+      fd_ = -1;
+    }
+  }
+
+private:
+  int fd_ = -1;
+};
+
+SocketHandle connect_to_port(uint16_t port)
+{
+  SocketHandle socket_handle(socket(AF_INET, SOCK_STREAM, 0));
+  EXPECT_GE(socket_handle.get(), 0);
+
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_port = htons(port);
+  inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
+  EXPECT_EQ(
+    connect(socket_handle.get(), reinterpret_cast<sockaddr *>(&address), sizeof(address)),
+    0);
+  return socket_handle;
+}
+
+bool recv_exact_with_timeout(int fd, uint8_t * data, size_t size, int timeout_ms)
+{
+  size_t offset = 0;
+  while (offset < size) {
+    pollfd poll_fd{};
+    poll_fd.fd = fd;
+    poll_fd.events = POLLIN;
+    if (poll(&poll_fd, 1, timeout_ms) <= 0) {
+      return false;
+    }
+    const ssize_t received = recv(fd, data + offset, size - offset, 0);
+    if (received <= 0) {
+      return false;
+    }
+    offset += static_cast<size_t>(received);
+  }
+
+  return true;
+}
+
+bool recv_horuslink_frame(int fd, horuslink::Frame & frame, int timeout_ms = 2000)
+{
+  std::array<uint8_t, horuslink::FrameHeader::kSize> header_bytes{};
+  if (!recv_exact_with_timeout(fd, header_bytes.data(), header_bytes.size(), timeout_ms)) {
+    return false;
+  }
+
+  horuslink::FrameHeader header;
+  if (!horuslink::decode_header(header_bytes.data(), header_bytes.size(), header)) {
+    return false;
+  }
+
+  std::vector<uint8_t> payload(header.length);
+  if (header.length > 0 &&
+    !recv_exact_with_timeout(fd, payload.data(), payload.size(), timeout_ms))
+  {
+    return false;
+  }
+
+  frame = horuslink::Frame{header, std::move(payload)};
+  return true;
+}
+
+void send_horuslink_frame(int fd, horuslink::Frame frame)
+{
+  const auto bytes = horuslink::serialize_frame(
+    frame.header,
+    frame.payload.data(),
+    frame.payload.size());
+  size_t offset = 0;
+  while (offset < bytes.size()) {
+    const ssize_t sent = send(fd, bytes.data() + offset, bytes.size() - offset, MSG_NOSIGNAL);
+    ASSERT_GT(sent, 0);
+    offset += static_cast<size_t>(sent);
+  }
+}
+
+horuslink::Frame make_horuslink_control_frame(std::vector<uint8_t> payload, uint32_t seq = 1)
+{
+  horuslink::Frame frame;
+  frame.header.channel_id = 0;
+  frame.header.msg_type = horuslink::MessageType::Control;
+  frame.header.seq = seq;
+  frame.header.length = static_cast<uint32_t>(payload.size());
+  frame.payload = std::move(payload);
+  return frame;
+}
+
+std::vector<uint8_t> serialize_string_message(const std::string & value)
+{
+  std_msgs::msg::String msg;
+  msg.data = value;
+  rclcpp::SerializedMessage serialized;
+  rclcpp::Serialization<std_msgs::msg::String> serializer;
+  serializer.serialize_message(&msg, &serialized);
+  const auto & rcl_msg = serialized.get_rcl_serialized_message();
+  return std::vector<uint8_t>(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
+}
+
+}  // namespace
 
 class MessageRouterTestPeer
 {
@@ -393,6 +544,78 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeCanStartHorusLinkTransport)
   EXPECT_FALSE(node.has_service_timer());
   ASSERT_TRUE(node.start());
   EXPECT_TRUE(node.has_service_timer());
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportForwardsRosTopicToNegotiatedBulkLane)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+
+  const std::string topic = "/horuslink_loopback_string";
+  const uint16_t channel_id = 31;
+  const horuslink::SubscribeRequest request{
+    channel_id,
+    topic,
+    "std_msgs/msg/String",
+    horuslink::Lane::Bulk,
+    horuslink::Delivery::ReplaceLatest
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_subscribe_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  auto publisher_node = std::make_shared<rclcpp::Node>("horuslink_loopback_publisher");
+  auto publisher = publisher_node->create_publisher<std_msgs::msg::String>(topic, 10);
+  const std::string text = "horuslink-loopback";
+  std_msgs::msg::String msg;
+  msg.data = text;
+  const auto expected_payload = serialize_string_message(text);
+
+  horuslink::Frame received_frame;
+  bool received = false;
+  for (int attempt = 0; attempt < 20 && !received; ++attempt) {
+    publisher->publish(msg);
+    received = recv_horuslink_frame(bulk.get(), received_frame, 100);
+  }
+
+  ASSERT_TRUE(received);
+  EXPECT_EQ(received_frame.header.channel_id, channel_id);
+  EXPECT_EQ(received_frame.header.msg_type, horuslink::MessageType::Data);
+  EXPECT_EQ(
+    received_frame.header.flags,
+    horuslink::FrameFlags::RawOpaque | horuslink::FrameFlags::ReplaceLatest);
+  EXPECT_EQ(received_frame.header.seq, 1u);
+  EXPECT_EQ(received_frame.payload, expected_payload);
+
   node.stop();
 }
 

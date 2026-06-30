@@ -600,6 +600,7 @@ void HorusLinkConnectionManager::configure_socket(int socket_fd) const
 void HorusLinkConnectionManager::close_fd(int & fd)
 {
   if (fd >= 0) {
+    shutdown(fd, SHUT_RDWR);
     close(fd);
     fd = -1;
   }
