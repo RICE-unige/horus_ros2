@@ -92,6 +92,7 @@ TEST(HorusLinkControlMessagesTest, ChannelCloseRequestRoundTrips)
 {
   const ChannelCloseRequest request{23};
   const auto encoded = encode_channel_close_request(request);
+  EXPECT_EQ(encoded, load_horuslink_golden_vector("channel_close_request"));
 
   auto decoded = decode_channel_close_request(encoded.data(), encoded.size());
   ASSERT_TRUE(decoded.has_value());
