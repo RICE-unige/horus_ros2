@@ -36,6 +36,7 @@ public:
   Frame make_hello_frame(const HelloMessage & message);
   Frame make_topic_table_frame(const std::vector<TopicEntry> & entries);
   Frame make_subscribe_ack_frame(const SubscribeAck & ack);
+  Frame make_keepalive_frame();
 
   const ChannelTable & channel_table() const {return channel_table_;}
   ChannelTable & channel_table() {return channel_table_;}

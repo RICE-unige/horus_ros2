@@ -251,6 +251,23 @@ TEST(HorusLinkSessionTest, MakeTopicTableFrameEncodesControlResponse)
   EXPECT_EQ(*decoded, entries);
 }
 
+TEST(HorusLinkSessionTest, MakeKeepaliveFrameUsesControlChannelWithoutPayload)
+{
+  Session session;
+
+  Frame first = session.make_keepalive_frame();
+  Frame second = session.make_keepalive_frame();
+
+  EXPECT_EQ(first.header.channel_id, 0);
+  EXPECT_EQ(first.header.msg_type, MessageType::Keepalive);
+  EXPECT_EQ(first.header.flags, 0);
+  EXPECT_EQ(first.header.seq, 1u);
+  EXPECT_EQ(first.header.corr_id, 0u);
+  EXPECT_EQ(first.header.length, 0u);
+  EXPECT_TRUE(first.payload.empty());
+  EXPECT_EQ(second.header.seq, 2u);
+}
+
 TEST(HorusLinkSessionTest, DataFrameIsAcceptedOnlyAfterSubscriptionAckOnNegotiatedLane)
 {
   Session session;

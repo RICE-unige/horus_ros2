@@ -72,6 +72,18 @@ Frame Session::make_subscribe_ack_frame(const SubscribeAck & ack)
   return make_control_response(encode_subscribe_ack(ack));
 }
 
+Frame Session::make_keepalive_frame()
+{
+  Frame frame;
+  frame.header.channel_id = 0;
+  frame.header.msg_type = MessageType::Keepalive;
+  frame.header.flags = 0;
+  frame.header.seq = next_sequence();
+  frame.header.corr_id = 0;
+  frame.header.length = 0;
+  return frame;
+}
+
 std::vector<Frame> Session::handle_control_frame(const Frame & frame)
 {
   if (auto hello = decode_hello(frame.payload.data(), frame.payload.size())) {
