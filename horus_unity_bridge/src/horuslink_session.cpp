@@ -76,20 +76,40 @@ std::vector<Frame> Session::handle_control_frame(const Frame & frame)
 
   auto subscribe_request = decode_subscribe_request(frame.payload.data(), frame.payload.size());
   auto publisher_request = decode_publisher_request(frame.payload.data(), frame.payload.size());
-  if (!subscribe_request.has_value() && !publisher_request.has_value()) {
+  auto service_client_request = decode_service_client_request(
+    frame.payload.data(),
+    frame.payload.size());
+  if (!subscribe_request.has_value() &&
+    !publisher_request.has_value() &&
+    !service_client_request.has_value())
+  {
     return {};
   }
 
-  const uint16_t channel_id = subscribe_request.has_value() ?
-    subscribe_request->channel_id : publisher_request->channel_id;
-  const std::string & topic = subscribe_request.has_value() ?
-    subscribe_request->topic : publisher_request->topic;
-  const std::string & type_name = subscribe_request.has_value() ?
-    subscribe_request->type_name : publisher_request->type_name;
-  const Lane lane = subscribe_request.has_value() ?
-    subscribe_request->lane : publisher_request->lane;
-  const Delivery delivery = subscribe_request.has_value() ?
-    subscribe_request->delivery : publisher_request->delivery;
+  uint16_t channel_id = 0;
+  std::string topic;
+  std::string type_name;
+  Lane lane = Lane::Realtime;
+  Delivery delivery = Delivery::ReliableFifo;
+  if (subscribe_request.has_value()) {
+    channel_id = subscribe_request->channel_id;
+    topic = subscribe_request->topic;
+    type_name = subscribe_request->type_name;
+    lane = subscribe_request->lane;
+    delivery = subscribe_request->delivery;
+  } else if (publisher_request.has_value()) {
+    channel_id = publisher_request->channel_id;
+    topic = publisher_request->topic;
+    type_name = publisher_request->type_name;
+    lane = publisher_request->lane;
+    delivery = publisher_request->delivery;
+  } else {
+    channel_id = service_client_request->channel_id;
+    topic = service_client_request->service_name;
+    type_name = service_client_request->service_type;
+    lane = service_client_request->lane;
+    delivery = service_client_request->delivery;
+  }
 
   const bool accepted = channel_table_.begin_subscribe(
     channel_id,

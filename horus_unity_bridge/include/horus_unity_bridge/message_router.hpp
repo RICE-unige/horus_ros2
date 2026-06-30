@@ -73,6 +73,11 @@ public:
         const std::string &,
         const std::vector<uint8_t> &,
         OutboundMessagePolicy)>;
+  using HorusLinkServiceResponseCallback = std::function<bool(
+        int client_fd,
+        const std::string & service_name,
+        uint32_t corr_id,
+        const std::vector<uint8_t> & response)>;
 
   explicit MessageRouter(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   ~MessageRouter();
@@ -88,6 +93,11 @@ public:
   void set_broadcast_callback(BroadcastCallback callback)
   {
     broadcast_callback_ = std::move(callback);
+  }
+
+  void set_horuslink_service_response_callback(HorusLinkServiceResponseCallback callback)
+  {
+    horuslink_service_response_callback_ = std::move(callback);
   }
 
   /**
@@ -112,6 +122,22 @@ public:
   bool register_horuslink_publisher(
     int client_fd,
     const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Register a HorusLink ROS service client after channel negotiation.
+   */
+  bool register_horuslink_ros_service(
+    int client_fd,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Route a HorusLink service request frame to a ROS service.
+   */
+  bool route_horuslink_service_request(
+    int client_fd,
+    const horuslink::ChannelDescriptor & channel,
+    uint32_t corr_id,
+    const std::vector<uint8_t> & request);
 
   /**
    * @brief Handle system commands from Unity
@@ -234,6 +260,7 @@ private:
   // Callbacks
   SendCallback send_callback_;
   BroadcastCallback broadcast_callback_;
+  HorusLinkServiceResponseCallback horuslink_service_response_callback_;
 
   // Statistics
   Statistics stats_;
@@ -262,6 +289,7 @@ private:
   mutable std::mutex pending_service_state_mutex_;
   // Map service request IDs to client FDs for routing responses
   std::unordered_map<uint32_t, int> service_response_client_;
+  std::unordered_map<uint32_t, std::string> service_response_topic_;
   std::mutex service_response_mutex_;
   std::mutex send_mutex_; // Protects socket writes for atomicity
   bool log_protocol_messages_ = true;

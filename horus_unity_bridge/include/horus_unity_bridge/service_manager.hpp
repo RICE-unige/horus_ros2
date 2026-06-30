@@ -200,6 +200,19 @@ private:
     : client(c) {}
   };
 
+  struct RosServiceClientBase
+  {
+    virtual ~RosServiceClientBase() = default;
+
+    virtual bool call(
+      uint32_t srv_id,
+      const std::vector<uint8_t> & request,
+      RosServiceResponseCallback response_callback) = 0;
+  };
+
+  template<typename ServiceT>
+  struct TypedRosServiceClient;
+
   // Base class for Unity service servers
   struct UnityServiceServerBase
   {
@@ -223,6 +236,7 @@ private:
 
   std::unordered_map<std::string,
     std::shared_ptr<GenericServiceClientWrapper>> ros_service_clients_;
+  std::unordered_map<std::string, std::shared_ptr<RosServiceClientBase>> typed_ros_service_clients_;
   std::unordered_map<uint32_t, std::string> pending_service_names_;  // srv_id -> service_name
   std::mutex ros_clients_mutex_;
 

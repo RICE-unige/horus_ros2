@@ -22,6 +22,84 @@
 namespace horus_unity_bridge
 {
 
+template<typename ServiceT>
+struct ServiceManager::TypedRosServiceClient final : public ServiceManager::RosServiceClientBase
+{
+  TypedRosServiceClient(rclcpp::Node * node, const std::string & service_name)
+  : node(node),
+    service_name(service_name),
+    client(node->create_client<ServiceT>(service_name))
+  {
+  }
+
+  bool call(
+    uint32_t srv_id,
+    const std::vector<uint8_t> & request,
+    RosServiceResponseCallback response_callback) override
+  {
+    if (!client->service_is_ready()) {
+      return false;
+    }
+
+    try {
+      std::vector<uint8_t> normalized_request;
+      const std::vector<uint8_t> * payload = &request;
+      if (!detail::has_cdr_header(request)) {
+        normalized_request = detail::add_cdr_header(request);
+        payload = &normalized_request;
+      }
+
+      rclcpp::SerializedMessage serialized_request;
+      detail::fill_serialized_message(*payload, serialized_request);
+
+      auto typed_request = std::make_shared<typename ServiceT::Request>();
+      rclcpp::Serialization<typename ServiceT::Request> request_serializer;
+      request_serializer.deserialize_message(&serialized_request, typed_request.get());
+
+      client->async_send_request(
+        typed_request,
+        [this, srv_id, response_callback](
+          typename rclcpp::Client<ServiceT>::SharedFuture future) {
+          try {
+            const auto typed_response = future.get();
+            rclcpp::SerializedMessage serialized_response;
+            rclcpp::Serialization<typename ServiceT::Response> response_serializer;
+            response_serializer.serialize_message(typed_response.get(), &serialized_response);
+
+            const auto & rcl_msg = serialized_response.get_rcl_serialized_message();
+            std::vector<uint8_t> response(
+              rcl_msg.buffer,
+              rcl_msg.buffer + rcl_msg.buffer_length);
+            if (response_callback) {
+              response_callback(srv_id, response);
+            }
+          } catch (const std::exception & e) {
+            RCLCPP_ERROR(
+              node->get_logger(),
+              "Typed ROS service response failed for %s [ID: %u]: %s",
+              service_name.c_str(),
+              srv_id,
+              e.what());
+          }
+        });
+
+      return true;
+    } catch (const std::exception & e) {
+      RCLCPP_ERROR(
+        node->get_logger(),
+        "Typed ROS service call failed for %s [ID: %u]: %s",
+        service_name.c_str(),
+        srv_id,
+        e.what());
+      return false;
+    }
+  }
+
+  rclcpp::Node * node;
+  std::string service_name;
+  typename rclcpp::Client<ServiceT>::SharedPtr client;
+};
+
 ServiceManager::ServiceManager(rclcpp::Node * node)
 : node_(node)
 {
@@ -34,6 +112,9 @@ bool ServiceManager::register_ros_service(
 {
   std::lock_guard<std::mutex> lock(ros_clients_mutex_);
 
+  if (typed_ros_service_clients_.find(service_name) != typed_ros_service_clients_.end()) {
+    return true;
+  }
   if (ros_service_clients_.find(service_name) != ros_service_clients_.end()) {
     // Already registered, assume same type
     return true;
@@ -42,6 +123,43 @@ bool ServiceManager::register_ros_service(
   std::string normalized_type = normalize_service_type(service_type);
 
   try {
+    if (normalized_type.find("AddTwoInts") != std::string::npos) {
+      typed_ros_service_clients_[service_name] =
+        std::make_shared<TypedRosServiceClient<example_interfaces::srv::AddTwoInts>>(
+        node_,
+        service_name);
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "Registered typed ROS service client: %s [%s]",
+        service_name.c_str(),
+        normalized_type.c_str());
+      return true;
+    }
+    if (normalized_type.find("Trigger") != std::string::npos) {
+      typed_ros_service_clients_[service_name] =
+        std::make_shared<TypedRosServiceClient<std_srvs::srv::Trigger>>(
+        node_,
+        service_name);
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "Registered typed ROS service client: %s [%s]",
+        service_name.c_str(),
+        normalized_type.c_str());
+      return true;
+    }
+    if (normalized_type.find("SetBool") != std::string::npos) {
+      typed_ros_service_clients_[service_name] =
+        std::make_shared<TypedRosServiceClient<std_srvs::srv::SetBool>>(
+        node_,
+        service_name);
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "Registered typed ROS service client: %s [%s]",
+        service_name.c_str(),
+        normalized_type.c_str());
+      return true;
+    }
+
     // Create generic client
     auto client = node_->create_generic_client(service_name, normalized_type,
         rclcpp::ServicesQoS());
@@ -65,16 +183,43 @@ bool ServiceManager::call_ros_service_async(
   const std::string & service_name,
   const std::vector<uint8_t> & request)
 {
+  std::shared_ptr<RosServiceClientBase> typed_client;
   std::shared_ptr<GenericServiceClientWrapper> wrapper;
   {
     std::lock_guard<std::mutex> lock(ros_clients_mutex_);
-    auto it = ros_service_clients_.find(service_name);
-    if (it == ros_service_clients_.end()) {
+    auto typed_it = typed_ros_service_clients_.find(service_name);
+    if (typed_it != typed_ros_service_clients_.end()) {
+      typed_client = typed_it->second;
+    } else {
+      auto it = ros_service_clients_.find(service_name);
+      if (it != ros_service_clients_.end()) {
+        wrapper = it->second;
+      }
+    }
+
+    if (!typed_client && !wrapper) {
       RCLCPP_ERROR(node_->get_logger(), "Service not registered: %s", service_name.c_str());
       stats_.errors++;
       return false;
     }
-    wrapper = it->second;
+  }
+
+  if (typed_client) {
+    const bool started = typed_client->call(
+      srv_id,
+      request,
+      [this](uint32_t response_srv_id, const std::vector<uint8_t> & response) {
+        if (ros_response_callback_) {
+          ros_response_callback_(response_srv_id, response);
+        }
+        stats_.responses_sent++;
+      });
+    if (started) {
+      stats_.ros_services_called++;
+    } else {
+      stats_.errors++;
+    }
+    return started;
   }
 
   if (!wrapper->client->service_is_ready()) {
@@ -237,6 +382,16 @@ bool ServiceManager::register_unity_service(
 bool ServiceManager::unregister_ros_service(const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(ros_clients_mutex_);
+  auto typed_it = typed_ros_service_clients_.find(service_name);
+  if (typed_it != typed_ros_service_clients_.end()) {
+    typed_ros_service_clients_.erase(typed_it);
+    RCLCPP_INFO(
+      node_->get_logger(),
+      "Unregistered typed ROS service client: %s",
+      service_name.c_str());
+    return true;
+  }
+
   auto it = ros_service_clients_.find(service_name);
   if (it == ros_service_clients_.end()) {
     return false;

@@ -70,6 +70,24 @@ TEST(HorusLinkControlMessagesTest, PublisherRequestEncodesStableGoldenVector)
   EXPECT_EQ(*decoded, request);
 }
 
+TEST(HorusLinkControlMessagesTest, ServiceClientRequestEncodesStableGoldenVector)
+{
+  const ServiceClientRequest request{
+    44,
+    "/horuslink_add_two_ints",
+    "example_interfaces/srv/AddTwoInts",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+  const auto encoded = encode_service_client_request(request);
+  const auto expected = load_horuslink_golden_vector("service_client_request");
+  EXPECT_EQ(encoded, expected);
+
+  auto decoded = decode_service_client_request(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, request);
+}
+
 TEST(HorusLinkControlMessagesTest, SubscribeAckRoundTripsAcceptedAndRejectedMessages)
 {
   const SubscribeAck accepted{9, SubscribeStatus::Accepted, ""};

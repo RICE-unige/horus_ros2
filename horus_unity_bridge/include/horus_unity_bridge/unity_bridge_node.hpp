@@ -131,6 +131,10 @@ private:
     int connection_id,
     const horuslink::ChannelDescriptor & channel,
     std::string & error);
+  bool handle_horuslink_ros_service(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel,
+    std::string & error);
   void handle_horuslink_frame(
     int connection_id,
     horuslink::Lane lane,

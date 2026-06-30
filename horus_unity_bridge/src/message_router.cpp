@@ -179,6 +179,7 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
     [this](uint32_t srv_id, const std::vector<uint8_t> & response) {
       // Send service response back to the requesting Unity client
       int target_fd = -1;
+      std::string service_name;
       {
         std::lock_guard<std::mutex> lock(service_response_mutex_);
         auto it = service_response_client_.find(srv_id);
@@ -186,7 +187,18 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
           target_fd = it->second;
           service_response_client_.erase(it);
         }
+        auto service_it = service_response_topic_.find(srv_id);
+        if (service_it != service_response_topic_.end()) {
+          service_name = service_it->second;
+          service_response_topic_.erase(service_it);
+        }
       }
+
+      if (!service_name.empty() && horuslink_service_response_callback_ && target_fd != -1) {
+        horuslink_service_response_callback_(target_fd, service_name, srv_id, response);
+        return;
+      }
+
       if (send_callback_ && target_fd != -1) {
         std::lock_guard<std::mutex> lock(send_mutex_);
         // First send __response command with srv_id
@@ -362,6 +374,72 @@ bool MessageRouter::register_horuslink_publisher(
   }
 
   return success;
+}
+
+bool MessageRouter::register_horuslink_ros_service(
+  int client_fd,
+  const horuslink::ChannelDescriptor & channel)
+{
+  if (channel.topic.empty() || channel.type_name.empty()) {
+    return false;
+  }
+
+  const bool success = service_manager_->register_ros_service(
+    channel.topic,
+    channel.type_name);
+
+  if (success) {
+    track_client_ros_service(client_fd, channel.topic);
+    RCLCPP_INFO(
+      get_logger(),
+      "Registered HorusLink ROS service: channel=%u service=%s [%s]",
+      channel.channel_id,
+      channel.topic.c_str(),
+      channel.type_name.c_str());
+  } else {
+    RCLCPP_WARN(
+      get_logger(),
+      "Failed to register HorusLink ROS service: channel=%u service=%s [%s]",
+      channel.channel_id,
+      channel.topic.c_str(),
+      channel.type_name.c_str());
+  }
+
+  return success;
+}
+
+bool MessageRouter::route_horuslink_service_request(
+  int client_fd,
+  const horuslink::ChannelDescriptor & channel,
+  uint32_t corr_id,
+  const std::vector<uint8_t> & request)
+{
+  stats_.messages_routed++;
+
+  if (channel.topic.empty() || corr_id == 0) {
+    stats_.routing_errors++;
+    return false;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(service_response_mutex_);
+    service_response_client_[corr_id] = client_fd;
+    service_response_topic_[corr_id] = channel.topic;
+  }
+
+  const bool success = service_manager_->call_ros_service_async(
+    corr_id,
+    channel.topic,
+    request);
+  if (!success) {
+    std::lock_guard<std::mutex> lock(service_response_mutex_);
+    service_response_client_.erase(corr_id);
+    service_response_topic_.erase(corr_id);
+    stats_.routing_errors++;
+    return false;
+  }
+
+  return true;
 }
 
 bool MessageRouter::handle_system_command(int client_fd, const ProtocolMessage & message)
@@ -1067,6 +1145,7 @@ void MessageRouter::on_client_disconnected(int client_fd)
     std::lock_guard<std::mutex> lock(service_response_mutex_);
     for (auto it = service_response_client_.begin(); it != service_response_client_.end(); ) {
       if (it->second == client_fd) {
+        service_response_topic_.erase(it->first);
         it = service_response_client_.erase(it);
       } else {
         ++it;

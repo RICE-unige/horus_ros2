@@ -261,6 +261,14 @@ void UnityBridgeNode::setup_horuslink_callbacks()
       return handle_horuslink_publisher(connection_id, channel, error);
     });
 
+  horuslink_connection_manager_->set_service_client_callback(
+    [this](
+      int connection_id,
+      const horuslink::ChannelDescriptor & channel,
+      std::string & error) {
+      return handle_horuslink_ros_service(connection_id, channel, error);
+    });
+
   router_->set_send_callback(
     [this](int connection_id,
     const std::string & topic,
@@ -274,6 +282,19 @@ void UnityBridgeNode::setup_horuslink_callbacks()
     const std::vector<uint8_t> & payload,
     OutboundMessagePolicy) {
       horuslink_connection_manager_->broadcast_to_topic(topic, payload);
+    });
+
+  router_->set_horuslink_service_response_callback(
+    [this](
+      int connection_id,
+      const std::string & service_name,
+      uint32_t corr_id,
+      const std::vector<uint8_t> & response) {
+      return horuslink_connection_manager_->send_service_response(
+        connection_id,
+        service_name,
+        corr_id,
+        response);
     });
 
   horuslink_connection_manager_->set_connection_callback(
@@ -448,12 +469,38 @@ bool UnityBridgeNode::handle_horuslink_publisher(
   return true;
 }
 
+bool UnityBridgeNode::handle_horuslink_ros_service(
+  int connection_id,
+  const horuslink::ChannelDescriptor & channel,
+  std::string & error)
+{
+  if (!router_->register_horuslink_ros_service(connection_id, channel)) {
+    error = "failed to register ROS service";
+    return false;
+  }
+
+  return true;
+}
+
 void UnityBridgeNode::handle_horuslink_frame(
   int connection_id,
   horuslink::Lane,
   const horuslink::ChannelDescriptor & channel,
   const horuslink::Frame & frame)
 {
+  if (frame.header.msg_type == horuslink::MessageType::ServiceRequest) {
+    router_->route_horuslink_service_request(
+      connection_id,
+      channel,
+      frame.header.corr_id,
+      frame.payload);
+    return;
+  }
+
+  if (frame.header.msg_type != horuslink::MessageType::Data) {
+    return;
+  }
+
   ProtocolMessage message;
   message.destination = channel.topic;
   message.payload = frame.payload;

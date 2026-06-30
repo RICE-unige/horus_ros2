@@ -160,6 +160,35 @@ TEST(HorusLinkSessionTest, PublisherRequestActivatesChannelAndReturnsAck)
   EXPECT_EQ(channel->lane, Lane::Realtime);
 }
 
+TEST(HorusLinkSessionTest, ServiceClientRequestActivatesChannelAndReturnsAck)
+{
+  Session session;
+  const ServiceClientRequest request{
+    18,
+    "/add_two_ints",
+    "example_interfaces/srv/AddTwoInts",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+
+  auto responses = session.handle_frame(
+    make_control_frame(encode_service_client_request(request)));
+
+  ASSERT_EQ(responses.size(), 1u);
+  EXPECT_EQ(responses[0].header.msg_type, MessageType::Control);
+  auto ack = decode_subscribe_ack(responses[0].payload.data(), responses[0].payload.size());
+  ASSERT_TRUE(ack.has_value());
+  EXPECT_EQ(ack->channel_id, 18);
+  EXPECT_EQ(ack->status, SubscribeStatus::Accepted);
+
+  auto channel = session.channel_table().get(18);
+  ASSERT_TRUE(channel.has_value());
+  EXPECT_EQ(channel->state, ChannelState::Active);
+  EXPECT_EQ(channel->topic, "/add_two_ints");
+  EXPECT_EQ(channel->type_name, "example_interfaces/srv/AddTwoInts");
+  EXPECT_EQ(channel->lane, Lane::Realtime);
+}
+
 TEST(HorusLinkSessionTest, DuplicateSubscribeRequestReturnsRejectedAck)
 {
   Session session;

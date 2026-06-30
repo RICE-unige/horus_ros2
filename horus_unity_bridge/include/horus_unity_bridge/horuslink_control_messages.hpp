@@ -34,7 +34,8 @@ enum class ControlMessageKind : uint8_t
   SubscribeRequest = 2,
   SubscribeAck = 3,
   TopicTable = 4,
-  PublisherRequest = 5
+  PublisherRequest = 5,
+  ServiceClientRequest = 6
 };
 
 enum class EndpointRole : uint8_t
@@ -78,6 +79,17 @@ struct PublisherRequest
   Delivery delivery = Delivery::ReliableFifo;
 
   bool operator==(const PublisherRequest & other) const;
+};
+
+struct ServiceClientRequest
+{
+  uint16_t channel_id = 0;
+  std::string service_name;
+  std::string service_type;
+  Lane lane = Lane::Realtime;
+  Delivery delivery = Delivery::ReliableFifo;
+
+  bool operator==(const ServiceClientRequest & other) const;
 };
 
 struct SubscribeAck
@@ -126,6 +138,11 @@ std::optional<SubscribeRequest> decode_subscribe_request(const uint8_t * data, s
 
 std::vector<uint8_t> encode_publisher_request(const PublisherRequest & request);
 std::optional<PublisherRequest> decode_publisher_request(const uint8_t * data, size_t size);
+
+std::vector<uint8_t> encode_service_client_request(const ServiceClientRequest & request);
+std::optional<ServiceClientRequest> decode_service_client_request(
+  const uint8_t * data,
+  size_t size);
 
 std::vector<uint8_t> encode_subscribe_ack(const SubscribeAck & ack);
 std::optional<SubscribeAck> decode_subscribe_ack(const uint8_t * data, size_t size);

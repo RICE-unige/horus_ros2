@@ -22,6 +22,7 @@
 #include "horus_unity_bridge/unity_bridge_node.hpp"
 
 #include <gtest/gtest.h>
+#include <example_interfaces/srv/add_two_ints.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -30,7 +31,9 @@
 #include <arpa/inet.h>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <poll.h>
+#include <stdexcept>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -186,6 +189,23 @@ horuslink::Frame make_horuslink_data_frame(
   return frame;
 }
 
+horuslink::Frame make_horuslink_service_request_frame(
+  uint16_t channel_id,
+  uint32_t corr_id,
+  std::vector<uint8_t> payload,
+  uint32_t seq = 1)
+{
+  horuslink::Frame frame;
+  frame.header.channel_id = channel_id;
+  frame.header.msg_type = horuslink::MessageType::ServiceRequest;
+  frame.header.flags = horuslink::FrameFlags::RawOpaque;
+  frame.header.seq = seq;
+  frame.header.corr_id = corr_id;
+  frame.header.length = static_cast<uint32_t>(payload.size());
+  frame.payload = std::move(payload);
+  return frame;
+}
+
 std::vector<uint8_t> serialize_string_message(const std::string & value)
 {
   std_msgs::msg::String msg;
@@ -195,6 +215,37 @@ std::vector<uint8_t> serialize_string_message(const std::string & value)
   serializer.serialize_message(&msg, &serialized);
   const auto & rcl_msg = serialized.get_rcl_serialized_message();
   return std::vector<uint8_t>(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
+}
+
+std::vector<uint8_t> serialize_add_two_ints_request(int64_t a, int64_t b)
+{
+  example_interfaces::srv::AddTwoInts::Request request;
+  request.a = a;
+  request.b = b;
+  rclcpp::SerializedMessage serialized;
+  rclcpp::Serialization<example_interfaces::srv::AddTwoInts::Request> serializer;
+  serializer.serialize_message(&request, &serialized);
+  const auto & rcl_msg = serialized.get_rcl_serialized_message();
+  return std::vector<uint8_t>(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
+}
+
+example_interfaces::srv::AddTwoInts::Response deserialize_add_two_ints_response(
+  const std::vector<uint8_t> & payload)
+{
+  if (payload.empty()) {
+    throw std::runtime_error("empty AddTwoInts response payload");
+  }
+
+  rclcpp::SerializedMessage serialized;
+  serialized.reserve(payload.size());
+  auto & rcl_msg = serialized.get_rcl_serialized_message();
+  std::memcpy(rcl_msg.buffer, payload.data(), payload.size());
+  rcl_msg.buffer_length = payload.size();
+
+  example_interfaces::srv::AddTwoInts::Response response;
+  rclcpp::Serialization<example_interfaces::srv::AddTwoInts::Response> serializer;
+  serializer.deserialize_message(&serialized, &response);
+  return response;
 }
 
 }  // namespace
@@ -713,6 +764,121 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesDataFramesToRosTopic)
   (void)subscriber;
   (void)bulk;
   node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportCallsRosServiceWithCorrelationId)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  const std::string service_name = "/horuslink_add_two_ints";
+  auto service_node = std::make_shared<rclcpp::Node>("horuslink_add_two_ints_server");
+  auto service = service_node->create_service<example_interfaces::srv::AddTwoInts>(
+    service_name,
+    [](const std::shared_ptr<example_interfaces::srv::AddTwoInts::Request> request,
+    std::shared_ptr<example_interfaces::srv::AddTwoInts::Response> response) {
+      response->sum = request->a + request->b;
+    });
+
+  rclcpp::executors::SingleThreadedExecutor service_executor;
+  service_executor.add_node(service_node);
+  std::thread service_thread([&service_executor]() {
+      service_executor.spin();
+    });
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  bool node_started = node.start();
+  EXPECT_TRUE(node_started);
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+
+  const uint16_t channel_id = 44;
+  const uint32_t corr_id = 1234;
+  const horuslink::ServiceClientRequest request{
+    channel_id,
+    service_name,
+    "example_interfaces/srv/AddTwoInts",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_service_client_request(request)));
+
+  bool ack_ok = false;
+  horuslink::Frame ack_frame;
+  if (recv_horuslink_frame(realtime.get(), ack_frame)) {
+    const auto ack = horuslink::decode_subscribe_ack(
+      ack_frame.payload.data(),
+      ack_frame.payload.size());
+    ack_ok = ack.has_value() &&
+      ack->status == horuslink::SubscribeStatus::Accepted &&
+      ack->channel_id == channel_id;
+  }
+  EXPECT_TRUE(ack_ok);
+
+  bool service_client_ready = false;
+  for (int attempt = 0; attempt < 100 && !service_client_ready; ++attempt) {
+    service_client_ready = service_node->count_clients(service_name) > 0;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  EXPECT_TRUE(service_client_ready);
+
+  bool response_ok = false;
+  int64_t response_sum = 0;
+  uint32_t response_corr_id = 0;
+  uint16_t response_channel_id = 0;
+  horuslink::MessageType response_type = horuslink::MessageType::Data;
+  if (ack_ok && service_client_ready && node_started) {
+    send_horuslink_frame(
+      realtime.get(),
+      make_horuslink_service_request_frame(
+        channel_id,
+        corr_id,
+        serialize_add_two_ints_request(5, 7)));
+
+    horuslink::Frame response_frame;
+    if (recv_horuslink_frame(realtime.get(), response_frame, 3000)) {
+      response_corr_id = response_frame.header.corr_id;
+      response_channel_id = response_frame.header.channel_id;
+      response_type = response_frame.header.msg_type;
+      try {
+        const auto response = deserialize_add_two_ints_response(response_frame.payload);
+        response_sum = response.sum;
+        response_ok = true;
+      } catch (const std::exception &) {
+        response_ok = false;
+      }
+    }
+  }
+
+  service_executor.cancel();
+  if (service_thread.joinable()) {
+    service_thread.join();
+  }
+  node.stop();
+
+  EXPECT_TRUE(response_ok);
+  EXPECT_EQ(response_channel_id, channel_id);
+  EXPECT_EQ(response_type, horuslink::MessageType::ServiceResponse);
+  EXPECT_EQ(response_corr_id, corr_id);
+  EXPECT_EQ(response_sum, 12);
+
+  (void)service;
+  (void)bulk;
 }
 
 }  // namespace horus_unity_bridge

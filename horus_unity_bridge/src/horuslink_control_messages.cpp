@@ -241,6 +241,15 @@ bool PublisherRequest::operator==(const PublisherRequest & other) const
          delivery == other.delivery;
 }
 
+bool ServiceClientRequest::operator==(const ServiceClientRequest & other) const
+{
+  return channel_id == other.channel_id &&
+         service_name == other.service_name &&
+         service_type == other.service_type &&
+         lane == other.lane &&
+         delivery == other.delivery;
+}
+
 bool SubscribeAck::operator==(const SubscribeAck & other) const
 {
   return channel_id == other.channel_id &&
@@ -353,6 +362,48 @@ std::optional<PublisherRequest> decode_publisher_request(const uint8_t * data, s
   if (!get_u16(*records, control_tlv::kChannelId, request.channel_id) ||
     !get_string(*records, control_tlv::kTopic, request.topic) ||
     !get_string(*records, control_tlv::kTypeName, request.type_name) ||
+    !get_byte(*records, control_tlv::kLane, lane) ||
+    !get_byte(*records, control_tlv::kDelivery, delivery))
+  {
+    return std::nullopt;
+  }
+
+  request.lane = static_cast<Lane>(lane);
+  request.delivery = static_cast<Delivery>(delivery);
+  return request;
+}
+
+std::vector<uint8_t> encode_service_client_request(const ServiceClientRequest & request)
+{
+  validate_topic_fields(request.service_name, request.service_type);
+  return encode_tlvs({
+      byte_record(
+        control_tlv::kKind,
+        static_cast<uint8_t>(ControlMessageKind::ServiceClientRequest)),
+      u16_record(control_tlv::kProtocolVersion, control_tlv::kProtocolVersionValue),
+      u16_record(control_tlv::kChannelId, request.channel_id),
+      string_record(control_tlv::kTopic, request.service_name),
+      string_record(control_tlv::kTypeName, request.service_type),
+      byte_record(control_tlv::kLane, static_cast<uint8_t>(request.lane)),
+      byte_record(control_tlv::kDelivery, static_cast<uint8_t>(request.delivery))
+    });
+}
+
+std::optional<ServiceClientRequest> decode_service_client_request(
+  const uint8_t * data,
+  size_t size)
+{
+  auto records = decode_records(data, size, ControlMessageKind::ServiceClientRequest);
+  if (!records.has_value()) {
+    return std::nullopt;
+  }
+
+  ServiceClientRequest request;
+  uint8_t lane = 0;
+  uint8_t delivery = 0;
+  if (!get_u16(*records, control_tlv::kChannelId, request.channel_id) ||
+    !get_string(*records, control_tlv::kTopic, request.service_name) ||
+    !get_string(*records, control_tlv::kTypeName, request.service_type) ||
     !get_byte(*records, control_tlv::kLane, lane) ||
     !get_byte(*records, control_tlv::kDelivery, delivery))
   {
