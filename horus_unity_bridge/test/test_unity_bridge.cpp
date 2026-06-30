@@ -29,6 +29,7 @@
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
+#include <sensor_msgs/msg/joy.hpp>
 #include <std_msgs/msg/string.hpp>
 
 #include <algorithm>
@@ -1061,6 +1062,98 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPoseStampedFramesToRos
   EXPECT_DOUBLE_EQ(received_pose.pose.orientation.y, pose.pose.orientation.y);
   EXPECT_DOUBLE_EQ(received_pose.pose.orientation.z, pose.pose.orientation.z);
   EXPECT_DOUBLE_EQ(received_pose.pose.orientation.w, pose.pose.orientation.w);
+
+  (void)subscriber;
+  (void)bulk;
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightJoyFramesToRosTopic)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+  expect_bridge_hello(realtime.get());
+
+  const std::string topic = "/horuslink_unity_publish_joy";
+  const uint16_t channel_id = 40;
+  const horuslink::PublisherRequest request{
+    channel_id,
+    topic,
+    "sensor_msgs/msg/Joy",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_publisher_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("horuslink_joy_subscriber");
+  sensor_msgs::msg::Joy received_joy;
+  bool received = false;
+  auto subscriber = subscriber_node->create_subscription<sensor_msgs::msg::Joy>(
+    topic,
+    10,
+    [&received_joy, &received](const sensor_msgs::msg::Joy::SharedPtr msg) {
+      received_joy = *msg;
+      received = true;
+    });
+
+  for (int attempt = 0; attempt < 50 && subscriber_node->count_publishers(topic) == 0; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
+
+  const horuslink::Joy joy{
+    {1.0F, -0.5F, 0.25F, 0.0F},
+    {1, 0, -1, 1}
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_data_frame(channel_id, horuslink::encode_joy(joy)));
+
+  for (int attempt = 0; attempt < 50 && !received; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  ASSERT_TRUE(received);
+  ASSERT_EQ(received_joy.axes.size(), joy.axes.size());
+  ASSERT_EQ(received_joy.buttons.size(), joy.buttons.size());
+  for (size_t i = 0; i < joy.axes.size(); ++i) {
+    EXPECT_FLOAT_EQ(received_joy.axes[i], joy.axes[i]);
+  }
+  for (size_t i = 0; i < joy.buttons.size(); ++i) {
+    EXPECT_EQ(received_joy.buttons[i], joy.buttons[i]);
+  }
 
   (void)subscriber;
   (void)bulk;

@@ -22,6 +22,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/serialization.hpp>
+#include <sensor_msgs/msg/joy.hpp>
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
 #include <dlfcn.h>
 #include <algorithm>
@@ -416,6 +417,24 @@ bool TopicManager::publish_horuslink_message(
     pose_msg.pose.orientation.z = decoded->pose.orientation.z;
     pose_msg.pose.orientation.w = decoded->pose.orientation.w;
     return publish_message(topic, serialize_ros_message(pose_msg));
+  }
+
+  if (message_type == "sensor_msgs/msg/Joy") {
+    const auto decoded = horuslink::decode_joy(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink Joy payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    sensor_msgs::msg::Joy joy_msg;
+    joy_msg.axes = decoded->axes;
+    joy_msg.buttons = decoded->buttons;
+    return publish_message(topic, serialize_ros_message(joy_msg));
   }
 
   const auto serialized_msg = detail::add_cdr_header(payload);
