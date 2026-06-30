@@ -176,6 +176,24 @@ bool HorusLinkConnectionManager::send_to_topic(
   return send_to_topic(connection_id, topic, payload.data(), payload.size());
 }
 
+void HorusLinkConnectionManager::broadcast_to_topic(
+  const std::string & topic,
+  const std::vector<uint8_t> & payload)
+{
+  std::vector<int> connection_ids;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_ids.reserve(connections_.size());
+    for (const auto & entry : connections_) {
+      connection_ids.push_back(entry.first);
+    }
+  }
+
+  for (const int connection_id : connection_ids) {
+    send_to_topic(connection_id, topic, payload);
+  }
+}
+
 size_t HorusLinkConnectionManager::connection_count() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -400,6 +418,14 @@ void HorusLinkConnectionManager::handle_received_frame(
   Lane lane,
   const Frame & frame)
 {
+  if (frame.header.msg_type == MessageType::Control) {
+    auto subscribe_request = decode_subscribe_request(frame.payload.data(), frame.payload.size());
+    if (subscribe_request.has_value()) {
+      handle_subscribe_request(connection, *subscribe_request);
+      return;
+    }
+  }
+
   std::vector<std::pair<ChannelDescriptor, Frame>> accepted;
   std::vector<Frame> responses;
   {
@@ -429,6 +455,57 @@ void HorusLinkConnectionManager::handle_received_frame(
       frame_callback_(connection->id, lane, accepted_frame.first, accepted_frame.second);
     }
   }
+}
+
+bool HorusLinkConnectionManager::handle_subscribe_request(
+  const std::shared_ptr<Connection> & connection,
+  const SubscribeRequest & request)
+{
+  SubscribeAck ack;
+  ack.channel_id = request.channel_id;
+  ack.status = SubscribeStatus::Rejected;
+  ack.error = "channel or topic already registered";
+
+  std::optional<ChannelDescriptor> channel;
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    const bool reserved = connection->session.channel_table().begin_subscribe(
+      request.channel_id,
+      request.topic,
+      request.type_name,
+      request.lane,
+      request.delivery);
+    if (reserved) {
+      channel = connection->session.channel_table().get(request.channel_id);
+    }
+  }
+
+  if (channel.has_value()) {
+    std::string callback_error;
+    bool accepted = true;
+    if (subscribe_callback_) {
+      accepted = subscribe_callback_(connection->id, *channel, callback_error);
+    }
+
+    if (accepted) {
+      std::lock_guard<std::mutex> lock(connection->mutex);
+      connection->session.channel_table().confirm_subscribe_ack(request.channel_id);
+      ack.status = SubscribeStatus::Accepted;
+      ack.error.clear();
+    } else {
+      std::lock_guard<std::mutex> lock(connection->mutex);
+      connection->session.channel_table().remove(request.channel_id);
+      ack.error = callback_error.empty() ? "subscription rejected by bridge" : callback_error;
+    }
+  }
+
+  Frame ack_frame;
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    ack_frame = connection->session.make_subscribe_ack_frame(ack);
+  }
+  send_frame(connection, Lane::Realtime, ack_frame);
+  return ack.status == SubscribeStatus::Accepted;
 }
 
 bool HorusLinkConnectionManager::send_frame(

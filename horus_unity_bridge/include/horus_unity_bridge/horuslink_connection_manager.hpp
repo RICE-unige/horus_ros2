@@ -57,6 +57,10 @@ public:
         Lane lane,
         const ChannelDescriptor & channel,
         const Frame & frame)>;
+  using SubscribeCallback = std::function<bool(
+        int connection_id,
+        const ChannelDescriptor & channel,
+        std::string & error)>;
   using ConnectionCallback = std::function<void(int connection_id, const std::string & ip)>;
 
   explicit HorusLinkConnectionManager(Config config);
@@ -79,9 +83,15 @@ public:
     const std::string & topic,
     const std::vector<uint8_t> & payload);
 
+  void broadcast_to_topic(const std::string & topic, const std::vector<uint8_t> & payload);
+
   void set_frame_callback(FrameCallback callback)
   {
     frame_callback_ = std::move(callback);
+  }
+  void set_subscribe_callback(SubscribeCallback callback)
+  {
+    subscribe_callback_ = std::move(callback);
   }
   void set_connection_callback(ConnectionCallback callback)
   {
@@ -139,6 +149,9 @@ private:
     const std::shared_ptr<Connection> & connection,
     Lane lane,
     const Frame & frame);
+  bool handle_subscribe_request(
+    const std::shared_ptr<Connection> & connection,
+    const SubscribeRequest & request);
   bool send_frame(const std::shared_ptr<Connection> & connection, Lane lane, const Frame & frame);
   bool drain_lane(const std::shared_ptr<Connection> & connection, Lane lane);
   void disconnect_connection(int connection_id);
@@ -162,6 +175,7 @@ private:
   std::unordered_map<int, std::shared_ptr<Connection>> connections_;
   int next_connection_id_ = 1;
   FrameCallback frame_callback_;
+  SubscribeCallback subscribe_callback_;
   ConnectionCallback connection_callback_;
   ConnectionCallback disconnection_callback_;
 };

@@ -62,6 +62,11 @@ Frame Session::make_topic_table_frame(const std::vector<TopicEntry> & entries)
   return make_control_response(encode_topic_table(entries));
 }
 
+Frame Session::make_subscribe_ack_frame(const SubscribeAck & ack)
+{
+  return make_control_response(encode_subscribe_ack(ack));
+}
+
 std::vector<Frame> Session::handle_control_frame(const Frame & frame)
 {
   if (auto hello = decode_hello(frame.payload.data(), frame.payload.size())) {
@@ -89,7 +94,7 @@ std::vector<Frame> Session::handle_control_frame(const Frame & frame)
     accepted ? SubscribeStatus::Accepted : SubscribeStatus::Rejected,
     accepted ? "" : "channel or topic already registered"
   };
-  return {make_control_response(encode_subscribe_ack(ack))};
+  return {make_subscribe_ack_frame(ack)};
 }
 
 Frame Session::make_control_response(std::vector<uint8_t> payload)

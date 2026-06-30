@@ -19,10 +19,26 @@
 #include <algorithm>
 #include <iostream>
 #include <chrono>
+#include <cctype>
 #include <sstream>
 
 namespace horus_unity_bridge
 {
+
+namespace
+{
+
+std::string normalize_transport_protocol(std::string value)
+{
+  std::transform(
+    value.begin(),
+    value.end(),
+    value.begin(),
+    [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+  return value;
+}
+
+}  // namespace
 
 UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions & options)
 : node_options_(options),
@@ -40,7 +56,12 @@ UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions & options)
   load_parameters();
 
   // Create connection manager
-  connection_manager_ = std::make_unique<ConnectionManager>(conn_config_);
+  if (transport_protocol_ == TransportProtocol::HorusLink) {
+    horuslink_connection_manager_ =
+      std::make_unique<horuslink::HorusLinkConnectionManager>(horuslink_config_);
+  } else {
+    connection_manager_ = std::make_unique<ConnectionManager>(conn_config_);
+  }
 
   // Setup callbacks
   setup_callbacks();
@@ -64,7 +85,10 @@ UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions & options)
     RCLCPP_WARN(router_->get_logger(), "%s", warning_stream.str().c_str());
   }
 
-  RCLCPP_INFO(router_->get_logger(), "Unity Bridge Node initialized");
+  RCLCPP_INFO(
+    router_->get_logger(),
+    "Unity Bridge Node initialized (transport=%s)",
+    transport_protocol_name_.c_str());
 }
 
 UnityBridgeNode::~UnityBridgeNode()
@@ -84,6 +108,33 @@ void UnityBridgeNode::load_parameters()
   conn_config_.tcp_nodelay = router_->declare_parameter<bool>("tcp_nodelay", true);
   conn_config_.connection_timeout_ms = router_->declare_parameter<int>("connection_timeout_ms",
       5000);
+
+  transport_protocol_name_ = normalize_transport_protocol(
+    router_->declare_parameter<std::string>("transport_protocol", "legacy"));
+  const bool legacy_transport_requested = transport_protocol_name_ == "legacy" ||
+    transport_protocol_name_ == "connector" ||
+    transport_protocol_name_ == "ros_tcp_connector";
+  if (transport_protocol_name_ == "horuslink") {
+    transport_protocol_ = TransportProtocol::HorusLink;
+  } else if (legacy_transport_requested) {
+    transport_protocol_name_ = "legacy";
+    transport_protocol_ = TransportProtocol::LegacyConnector;
+  } else {
+    RCLCPP_WARN(
+      router_->get_logger(),
+      "Unknown transport_protocol '%s'; falling back to legacy connector mode",
+      transport_protocol_name_.c_str());
+    transport_protocol_name_ = "legacy";
+    transport_protocol_ = TransportProtocol::LegacyConnector;
+  }
+
+  horuslink_config_.bind_address = conn_config_.bind_address;
+  horuslink_config_.realtime_port = conn_config_.port;
+  horuslink_config_.bulk_port = static_cast<uint16_t>(
+    router_->declare_parameter<int>("horuslink_bulk_port", 10001));
+  horuslink_config_.max_connections = conn_config_.max_connections;
+  horuslink_config_.socket_buffer_size = conn_config_.socket_buffer_size;
+  horuslink_config_.tcp_nodelay = conn_config_.tcp_nodelay;
 
   const auto configured_worker_threads = router_->declare_parameter<int>("worker_threads", 4);
   worker_threads_ = std::max<int>(1, static_cast<int>(configured_worker_threads));
@@ -135,6 +186,15 @@ void UnityBridgeNode::load_parameters()
 
 void UnityBridgeNode::setup_callbacks()
 {
+  if (transport_protocol_ == TransportProtocol::HorusLink) {
+    setup_horuslink_callbacks();
+  } else {
+    setup_legacy_callbacks();
+  }
+}
+
+void UnityBridgeNode::setup_legacy_callbacks()
+{
   // Message from Unity -> Router
   connection_manager_->set_message_callback(
     [this](int fd, const ProtocolMessage & msg) {
@@ -174,14 +234,61 @@ void UnityBridgeNode::setup_callbacks()
   );
 }
 
+void UnityBridgeNode::setup_horuslink_callbacks()
+{
+  horuslink_connection_manager_->set_frame_callback(
+    [this](
+      int connection_id,
+      horuslink::Lane lane,
+      const horuslink::ChannelDescriptor & channel,
+      const horuslink::Frame & frame) {
+      handle_horuslink_frame(connection_id, lane, channel, frame);
+    });
+
+  horuslink_connection_manager_->set_subscribe_callback(
+    [this](
+      int connection_id,
+      const horuslink::ChannelDescriptor & channel,
+      std::string & error) {
+      return handle_horuslink_subscribe(connection_id, channel, error);
+    });
+
+  router_->set_send_callback(
+    [this](int connection_id,
+    const std::string & topic,
+    const std::vector<uint8_t> & payload,
+    OutboundMessagePolicy) {
+      return horuslink_connection_manager_->send_to_topic(connection_id, topic, payload);
+    });
+
+  router_->set_broadcast_callback(
+    [this](const std::string & topic,
+    const std::vector<uint8_t> & payload,
+    OutboundMessagePolicy) {
+      horuslink_connection_manager_->broadcast_to_topic(topic, payload);
+    });
+
+  horuslink_connection_manager_->set_connection_callback(
+    [this](int connection_id, const std::string & ip) {
+      handle_horuslink_client_connected(connection_id, ip);
+    });
+
+  horuslink_connection_manager_->set_disconnection_callback(
+    [this](int connection_id, const std::string & ip) {
+      handle_horuslink_client_disconnected(connection_id, ip);
+    });
+}
+
 bool UnityBridgeNode::start()
 {
   if (running_.load()) {
     return true;
   }
 
-  // Start connection manager
-  if (!connection_manager_->start()) {
+  const bool connection_started = transport_protocol_ == TransportProtocol::HorusLink ?
+    horuslink_connection_manager_->start() :
+    connection_manager_->start();
+  if (!connection_started) {
     RCLCPP_ERROR(router_->get_logger(), "Failed to start connection manager");
     return false;
   }
@@ -230,8 +337,12 @@ void UnityBridgeNode::stop()
     service_timer_->cancel();
   }
 
-  // Stop connection manager
-  connection_manager_->stop();
+  if (horuslink_connection_manager_) {
+    horuslink_connection_manager_->stop();
+  }
+  if (connection_manager_) {
+    connection_manager_->stop();
+  }
 
   // Stop ROS executor
   if (executor_) {
@@ -278,6 +389,56 @@ void UnityBridgeNode::handle_client_disconnected(
   }
 }
 
+void UnityBridgeNode::handle_horuslink_client_connected(
+  int connection_id,
+  const std::string & ip)
+{
+  RCLCPP_INFO(
+    router_->get_logger(),
+    "HorusLink client connected: %s (connection=%d)",
+    ip.c_str(),
+    connection_id);
+}
+
+void UnityBridgeNode::handle_horuslink_client_disconnected(
+  int connection_id,
+  const std::string & ip)
+{
+  RCLCPP_INFO(
+    router_->get_logger(),
+    "HorusLink client disconnected: %s (connection=%d)",
+    ip.c_str(),
+    connection_id);
+  if (router_) {
+    router_->on_client_disconnected(connection_id);
+  }
+}
+
+bool UnityBridgeNode::handle_horuslink_subscribe(
+  int connection_id,
+  const horuslink::ChannelDescriptor & channel,
+  std::string & error)
+{
+  if (!router_->register_horuslink_subscriber(connection_id, channel)) {
+    error = "failed to register ROS subscriber";
+    return false;
+  }
+
+  return true;
+}
+
+void UnityBridgeNode::handle_horuslink_frame(
+  int connection_id,
+  horuslink::Lane,
+  const horuslink::ChannelDescriptor & channel,
+  const horuslink::Frame & frame)
+{
+  ProtocolMessage message;
+  message.destination = channel.topic;
+  message.payload = frame.payload;
+  handle_message_from_unity(connection_id, message);
+}
+
 void UnityBridgeNode::stats_timer_callback()
 {
   print_statistics();
@@ -285,6 +446,28 @@ void UnityBridgeNode::stats_timer_callback()
 
 void UnityBridgeNode::print_statistics() const
 {
+  if (transport_protocol_ == TransportProtocol::HorusLink) {
+    RCLCPP_INFO(router_->get_logger(), "=== Unity Bridge Statistics ===");
+    RCLCPP_INFO(
+      router_->get_logger(),
+      "Transport: HorusLink, Connections: %lu active",
+      horuslink_connection_manager_ ? horuslink_connection_manager_->connection_count() : 0u);
+    auto router_stats = router_->get_statistics();
+    auto topic_stats = router_->get_topic_manager().get_statistics();
+    RCLCPP_INFO(
+      router_->get_logger(),
+      "Topics: %lu publishers, %lu subscribers",
+      topic_stats.active_publishers,
+      topic_stats.active_subscribers);
+    RCLCPP_INFO(
+      router_->get_logger(),
+      "Router: %lu routed, %lu published, %lu commands",
+      router_stats.messages_routed,
+      router_stats.messages_published,
+      router_stats.system_commands_processed);
+    return;
+  }
+
   auto conn_stats = connection_manager_->get_statistics();
   auto router_stats = router_->get_statistics();
   auto topic_stats = router_->get_topic_manager().get_statistics();

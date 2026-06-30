@@ -276,6 +276,43 @@ TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
   EXPECT_EQ(observed_frames[0].payload, std::vector<uint8_t>({0x10, 0x20, 0x30}));
 }
 
+TEST(HorusLinkConnectionManagerTest, RejectsSubscribeWhenBridgeCallbackFails)
+{
+  HorusLinkConnectionManager manager(make_config());
+  std::atomic<int> connected_id{0};
+  manager.set_connection_callback(
+    [&connected_id](int connection_id, const std::string &) {
+      connected_id = connection_id;
+    });
+  manager.set_subscribe_callback(
+    [](int, const ChannelDescriptor &, std::string & error) {
+      error = "no ROS subscriber";
+      return false;
+    });
+  ASSERT_TRUE(manager.start());
+
+  auto realtime = connect_to(manager.realtime_port());
+  auto bulk = connect_to(manager.bulk_port());
+  ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
+
+  const SubscribeRequest request{
+    11,
+    "/missing",
+    "std_msgs/msg/String",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+  send_frame(realtime.get(), make_control_frame(encode_subscribe_request(request)));
+
+  Frame ack_frame = recv_frame(realtime.get());
+  ASSERT_EQ(ack_frame.header.msg_type, MessageType::Control);
+  auto ack = decode_subscribe_ack(ack_frame.payload.data(), ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  EXPECT_EQ(ack->channel_id, 11u);
+  EXPECT_EQ(ack->status, SubscribeStatus::Rejected);
+  EXPECT_EQ(ack->error, "no ROS subscriber");
+}
+
 TEST(HorusLinkConnectionManagerTest, SendsOutboundPayloadOnNegotiatedBulkLane)
 {
   HorusLinkConnectionManager manager(make_config());

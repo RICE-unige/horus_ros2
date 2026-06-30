@@ -19,6 +19,7 @@
 
 #include "connection_manager.hpp"
 #include "protocol_handler.hpp"
+#include "horus_unity_bridge/horuslink_channel_table.hpp"
 #include "topic_manager.hpp"
 #include "service_manager.hpp"
 #include "control_lease_manager.hpp"
@@ -97,6 +98,13 @@ public:
    * @return true if message was handled successfully
    */
   bool route_message(int client_fd, const ProtocolMessage & message);
+
+  /**
+   * @brief Register a HorusLink topic subscription after channel negotiation.
+   */
+  bool register_horuslink_subscriber(
+    int client_fd,
+    const horuslink::ChannelDescriptor & channel);
 
   /**
    * @brief Handle system commands from Unity

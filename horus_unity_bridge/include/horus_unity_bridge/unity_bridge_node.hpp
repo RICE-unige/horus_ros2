@@ -18,6 +18,7 @@
 #pragma once
 
 #include "connection_manager.hpp"
+#include "horus_unity_bridge/horuslink_connection_manager.hpp"
 #include "message_router.hpp"
 
 #include <rclcpp/rclcpp.hpp>
@@ -44,6 +45,12 @@ namespace horus_unity_bridge
 class UnityBridgeNode
 {
 public:
+  enum class TransportProtocol
+  {
+    LegacyConnector,
+    HorusLink
+  };
+
   explicit UnityBridgeNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   ~UnityBridgeNode();
 
@@ -68,7 +75,10 @@ public:
   bool is_running() const {return running_.load();}
   const ConnectionManager::Config & connection_config() const {return conn_config_;}
   uint16_t port() const {return conn_config_.port;}
+  uint16_t horuslink_bulk_port() const {return horuslink_config_.bulk_port;}
   const std::string & bind_address() const {return conn_config_.bind_address;}
+  TransportProtocol transport_protocol() const {return transport_protocol_;}
+  const std::string & transport_protocol_name() const {return transport_protocol_name_;}
   int worker_threads() const {return worker_threads_;}
   bool log_protocol_messages() const {return log_protocol_messages_;}
   bool has_service_timer() const {return static_cast<bool>(service_timer_);}
@@ -86,10 +96,14 @@ private:
   // Core components
   std::shared_ptr<MessageRouter> router_;
   std::unique_ptr<ConnectionManager> connection_manager_;
+  std::unique_ptr<horuslink::HorusLinkConnectionManager> horuslink_connection_manager_;
   std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor_;
 
   // Configuration
   ConnectionManager::Config conn_config_;
+  horuslink::HorusLinkConnectionManager::Config horuslink_config_;
+  TransportProtocol transport_protocol_ = TransportProtocol::LegacyConnector;
+  std::string transport_protocol_name_ = "legacy";
   int worker_threads_ = 4;
   bool log_protocol_messages_ = true;
   std::vector<std::string> reserved_parameter_warnings_;
@@ -102,9 +116,22 @@ private:
   // Private methods
   void load_parameters();
   void setup_callbacks();
+  void setup_legacy_callbacks();
+  void setup_horuslink_callbacks();
   void handle_message_from_unity(int client_fd, const ProtocolMessage & message);
   void handle_client_connected(int client_fd, const std::string & ip, uint16_t port);
   void handle_client_disconnected(int client_fd, const std::string & ip, uint16_t port);
+  void handle_horuslink_client_connected(int connection_id, const std::string & ip);
+  void handle_horuslink_client_disconnected(int connection_id, const std::string & ip);
+  bool handle_horuslink_subscribe(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel,
+    std::string & error);
+  void handle_horuslink_frame(
+    int connection_id,
+    horuslink::Lane lane,
+    const horuslink::ChannelDescriptor & channel,
+    const horuslink::Frame & frame);
 
   // Statistics timer
   rclcpp::TimerBase::SharedPtr stats_timer_;

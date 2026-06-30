@@ -34,6 +34,7 @@ public:
   std::vector<Frame> handle_frame(const Frame & frame);
   std::vector<Frame> handle_frame(const Frame & frame, Lane lane);
   Frame make_topic_table_frame(const std::vector<TopicEntry> & entries);
+  Frame make_subscribe_ack_frame(const SubscribeAck & ack);
 
   const ChannelTable & channel_table() const {return channel_table_;}
   ChannelTable & channel_table() {return channel_table_;}

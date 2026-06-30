@@ -98,6 +98,20 @@ bool parse_outbound_policy_token(const std::string & raw_token, OutboundMessageP
   return false;
 }
 
+OutboundMessagePolicy policy_from_horuslink_channel(
+  const horuslink::ChannelDescriptor & channel)
+{
+  if (channel.lane == horuslink::Lane::Bulk) {
+    return channel.delivery == horuslink::Delivery::ReplaceLatest ?
+           OutboundMessagePolicy::BulkReplaceable :
+           OutboundMessagePolicy::BulkStrict;
+  }
+
+  return channel.delivery == horuslink::Delivery::ReplaceLatest ?
+         OutboundMessagePolicy::Replaceable :
+         OutboundMessagePolicy::Strict;
+}
+
 }  // namespace
 
 MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
@@ -270,6 +284,48 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage & message
     stats_.messages_published++;
   } else {
     stats_.routing_errors++;
+  }
+
+  return success;
+}
+
+bool MessageRouter::register_horuslink_subscriber(
+  int client_fd,
+  const horuslink::ChannelDescriptor & channel)
+{
+  if (channel.topic.empty() || channel.type_name.empty()) {
+    return false;
+  }
+
+  const OutboundMessagePolicy policy = policy_from_horuslink_channel(channel);
+  const bool success = topic_manager_->register_subscriber(
+    channel.topic,
+    channel.type_name,
+    client_fd,
+    [this, client_fd, policy](
+      const std::string & topic,
+      const std::vector<uint8_t> & data)
+    {
+      if (send_callback_) {
+        send_callback_(client_fd, topic, data, policy);
+      }
+    });
+
+  if (success) {
+    track_client_subscriber(client_fd, channel.topic);
+    RCLCPP_INFO(
+      get_logger(),
+      "Registered HorusLink subscriber: channel=%u topic=%s [%s]",
+      channel.channel_id,
+      channel.topic.c_str(),
+      channel.type_name.c_str());
+  } else {
+    RCLCPP_WARN(
+      get_logger(),
+      "Failed to register HorusLink subscriber: channel=%u topic=%s [%s]",
+      channel.channel_id,
+      channel.topic.c_str(),
+      channel.type_name.c_str());
   }
 
   return success;
