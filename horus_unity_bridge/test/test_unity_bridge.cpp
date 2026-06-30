@@ -199,6 +199,33 @@ horuslink::Frame make_horuslink_control_frame(std::vector<uint8_t> payload, uint
   return frame;
 }
 
+void send_horuslink_client_hellos(
+  int realtime_fd,
+  int bulk_fd,
+  uint64_t session_id = 0x5060708090A0B0C0ull)
+{
+  send_horuslink_frame(
+    realtime_fd,
+    make_horuslink_control_frame(
+      horuslink::encode_hello(horuslink::HelloMessage{
+        horuslink::EndpointRole::UnityClient,
+        512u * 1024u * 1024u,
+        1000,
+        horuslink::Lane::Realtime,
+        session_id}),
+      1));
+  send_horuslink_frame(
+    bulk_fd,
+    make_horuslink_control_frame(
+      horuslink::encode_hello(horuslink::HelloMessage{
+        horuslink::EndpointRole::UnityClient,
+        512u * 1024u * 1024u,
+        1000,
+        horuslink::Lane::Bulk,
+        session_id}),
+      1));
+}
+
 horuslink::Frame make_horuslink_data_frame(
   uint16_t channel_id,
   std::vector<uint8_t> payload,
@@ -550,6 +577,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportAdvertisesConfiguredHello)
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
   expect_bridge_hello(realtime.get(), 4096u, 250u);
 
   (void)bulk;
@@ -578,6 +606,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportForwardsRosTopicToNegotiatedBulkLane
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
   expect_bridge_hello(realtime.get());
 
   const std::string topic = "/horuslink_loopback_string";
@@ -652,6 +681,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesDataFramesToRosTopic)
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
   expect_bridge_hello(realtime.get());
 
   const std::string topic = "/horuslink_unity_publish_string";
@@ -733,6 +763,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightTwistFramesToRosTopic)
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
   expect_bridge_hello(realtime.get());
 
   const std::string topic = "/horuslink_unity_publish_twist";
@@ -823,6 +854,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPoseStampedFramesToRos
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
   expect_bridge_hello(realtime.get());
 
   const std::string topic = "/horuslink_unity_publish_pose_stamped";
@@ -922,6 +954,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightJoyFramesToRosTopic)
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
   expect_bridge_hello(realtime.get());
 
   const std::string topic = "/horuslink_unity_publish_joy";
@@ -1014,6 +1047,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPathFramesToRosTopic)
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
   expect_bridge_hello(realtime.get());
 
   const std::string topic = "/horuslink_unity_publish_path";
@@ -1153,6 +1187,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportCallsRosServiceWithCorrelationId)
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
   expect_bridge_hello(realtime.get());
 
   const uint16_t channel_id = 44;

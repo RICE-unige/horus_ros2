@@ -40,6 +40,18 @@ uint32_t read_u32(const uint8_t * data)
          (static_cast<uint32_t>(data[3]) << 24);
 }
 
+uint64_t read_u64(const uint8_t * data)
+{
+  return static_cast<uint64_t>(data[0]) |
+         (static_cast<uint64_t>(data[1]) << 8) |
+         (static_cast<uint64_t>(data[2]) << 16) |
+         (static_cast<uint64_t>(data[3]) << 24) |
+         (static_cast<uint64_t>(data[4]) << 32) |
+         (static_cast<uint64_t>(data[5]) << 40) |
+         (static_cast<uint64_t>(data[6]) << 48) |
+         (static_cast<uint64_t>(data[7]) << 56);
+}
+
 void write_u16(std::vector<uint8_t> & data, uint16_t value)
 {
   data.push_back(static_cast<uint8_t>(value & 0xFFu));
@@ -52,6 +64,18 @@ void write_u32(std::vector<uint8_t> & data, uint32_t value)
   data.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
   data.push_back(static_cast<uint8_t>((value >> 16) & 0xFFu));
   data.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
+}
+
+void write_u64(std::vector<uint8_t> & data, uint64_t value)
+{
+  data.push_back(static_cast<uint8_t>(value & 0xFFu));
+  data.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
+  data.push_back(static_cast<uint8_t>((value >> 16) & 0xFFu));
+  data.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
+  data.push_back(static_cast<uint8_t>((value >> 32) & 0xFFu));
+  data.push_back(static_cast<uint8_t>((value >> 40) & 0xFFu));
+  data.push_back(static_cast<uint8_t>((value >> 48) & 0xFFu));
+  data.push_back(static_cast<uint8_t>((value >> 56) & 0xFFu));
 }
 
 TlvRecord byte_record(uint16_t type, uint8_t value)
@@ -70,6 +94,13 @@ TlvRecord u32_record(uint16_t type, uint32_t value)
 {
   std::vector<uint8_t> bytes;
   write_u32(bytes, value);
+  return TlvRecord{type, bytes};
+}
+
+TlvRecord u64_record(uint16_t type, uint64_t value)
+{
+  std::vector<uint8_t> bytes;
+  write_u64(bytes, value);
   return TlvRecord{type, bytes};
 }
 
@@ -119,6 +150,17 @@ bool get_u32(const std::vector<TlvRecord> & records, uint16_t type, uint32_t & o
   }
 
   out = read_u32(record->value.data());
+  return true;
+}
+
+bool get_u64(const std::vector<TlvRecord> & records, uint16_t type, uint64_t & out)
+{
+  const TlvRecord * record = find_record(records, type);
+  if (record == nullptr || record->value.size() != 8) {
+    return false;
+  }
+
+  out = read_u64(record->value.data());
   return true;
 }
 
@@ -220,7 +262,9 @@ bool HelloMessage::operator==(const HelloMessage & other) const
 {
   return role == other.role &&
          max_payload_bytes == other.max_payload_bytes &&
-         keepalive_ms == other.keepalive_ms;
+         keepalive_ms == other.keepalive_ms &&
+         lane == other.lane &&
+         session_id == other.session_id;
 }
 
 bool SubscribeRequest::operator==(const SubscribeRequest & other) const
@@ -278,7 +322,9 @@ std::vector<uint8_t> encode_hello(const HelloMessage & message)
       u16_record(control_tlv::kProtocolVersion, control_tlv::kProtocolVersionValue),
       byte_record(control_tlv::kRole, static_cast<uint8_t>(message.role)),
       u32_record(control_tlv::kMaxPayload, message.max_payload_bytes),
-      u32_record(control_tlv::kKeepalive, message.keepalive_ms)
+      u32_record(control_tlv::kKeepalive, message.keepalive_ms),
+      byte_record(control_tlv::kLane, static_cast<uint8_t>(message.lane)),
+      u64_record(control_tlv::kSessionId, message.session_id)
     });
 }
 
@@ -299,7 +345,17 @@ std::optional<HelloMessage> decode_hello(const uint8_t * data, size_t size)
     return std::nullopt;
   }
 
-  return HelloMessage{static_cast<EndpointRole>(role), max_payload_bytes, keepalive_ms};
+  uint8_t lane = static_cast<uint8_t>(Lane::Realtime);
+  uint64_t session_id = 0;
+  (void)get_byte(*records, control_tlv::kLane, lane);
+  (void)get_u64(*records, control_tlv::kSessionId, session_id);
+
+  return HelloMessage{
+    static_cast<EndpointRole>(role),
+    max_payload_bytes,
+    keepalive_ms,
+    static_cast<Lane>(lane),
+    session_id};
 }
 
 std::vector<uint8_t> encode_subscribe_request(const SubscribeRequest & request)

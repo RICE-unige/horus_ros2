@@ -206,6 +206,30 @@ Frame make_control_frame(std::vector<uint8_t> payload, uint32_t seq = 1)
   return frame;
 }
 
+void send_client_hellos(int realtime_fd, int bulk_fd, uint64_t session_id = 0x1020304050607080ull)
+{
+  send_frame(
+    realtime_fd,
+    make_control_frame(
+      encode_hello(HelloMessage{
+        EndpointRole::UnityClient,
+        512u * 1024u * 1024u,
+        1000,
+        Lane::Realtime,
+        session_id}),
+      1));
+  send_frame(
+    bulk_fd,
+    make_control_frame(
+      encode_hello(HelloMessage{
+        EndpointRole::UnityClient,
+        512u * 1024u * 1024u,
+        1000,
+        Lane::Bulk,
+        session_id}),
+      1));
+}
+
 Frame make_data_frame(uint16_t channel_id, std::vector<uint8_t> payload, uint32_t seq = 1)
 {
   Frame frame;
@@ -244,6 +268,7 @@ TEST(HorusLinkConnectionManagerTest, AcceptsDualLaneSessionAndAcksSubscribe)
 
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
+  send_client_hellos(realtime.get(), bulk.get());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   EXPECT_EQ(manager.connection_count(), 1u);
   expect_bridge_hello(realtime.get(), config);
@@ -272,6 +297,16 @@ TEST(HorusLinkConnectionManagerTest, StopClosesUnpairedPendingLaneSockets)
   ASSERT_TRUE(manager.start());
 
   auto realtime = connect_to(manager.realtime_port());
+  send_frame(
+    realtime.get(),
+    make_control_frame(
+      encode_hello(HelloMessage{
+      EndpointRole::UnityClient,
+      512u * 1024u * 1024u,
+      1000,
+      Lane::Realtime,
+      0x8877665544332211ull}),
+      1));
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   manager.stop();
@@ -303,6 +338,7 @@ TEST(HorusLinkConnectionManagerTest, RepliesToTopicTableRequestOnRealtimeLane)
 
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
+  send_client_hellos(realtime.get(), bulk.get());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   expect_bridge_hello(realtime.get(), config);
 
@@ -366,6 +402,7 @@ TEST(HorusLinkConnectionManagerTest, ChannelCloseDispatchesKindAndRemovesChannel
 
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
+  send_client_hellos(realtime.get(), bulk.get());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   expect_bridge_hello(realtime.get(), config);
 
@@ -440,6 +477,7 @@ TEST(HorusLinkConnectionManagerTest, SendsRealtimeKeepaliveAfterHandshake)
 
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
+  send_client_hellos(realtime.get(), bulk.get());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   expect_bridge_hello(realtime.get(), config);
 
@@ -478,6 +516,7 @@ TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
 
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
+  send_client_hellos(realtime.get(), bulk.get());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   expect_bridge_hello(realtime.get(), config);
 
@@ -524,6 +563,7 @@ TEST(HorusLinkConnectionManagerTest, RejectsSubscribeWhenBridgeCallbackFails)
 
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
+  send_client_hellos(realtime.get(), bulk.get());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   expect_bridge_hello(realtime.get(), config);
 
@@ -558,6 +598,7 @@ TEST(HorusLinkConnectionManagerTest, SendsOutboundPayloadOnNegotiatedBulkLane)
 
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
+  send_client_hellos(realtime.get(), bulk.get());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   expect_bridge_hello(realtime.get(), config);
 
@@ -606,6 +647,7 @@ TEST(HorusLinkConnectionManagerTest, RealtimeSendIsNotBlockedBySaturatedBulkLane
       &client_receive_buffer,
       sizeof(client_receive_buffer)),
     0);
+  send_client_hellos(realtime.get(), bulk.get());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   expect_bridge_hello(realtime.get(), config);
 

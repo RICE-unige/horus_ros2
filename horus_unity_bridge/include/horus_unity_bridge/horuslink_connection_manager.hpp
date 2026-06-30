@@ -154,6 +154,8 @@ private:
   {
     int fd = -1;
     std::string ip;
+    uint64_t session_id = 0;
+    HelloMessage hello;
   };
 
   struct Connection
@@ -188,9 +190,14 @@ private:
 
   bool setup_server_socket(uint16_t requested_port, int & out_fd, uint16_t & out_port);
   void accept_loop();
-  void accept_ready_sockets(int listen_fd, std::vector<AcceptedSocket> & out_sockets);
+  void accept_ready_sockets(
+    int listen_fd,
+    Lane expected_lane,
+    std::vector<AcceptedSocket> & out_sockets);
   void pair_pending_sockets();
   void start_connection(AcceptedSocket realtime_socket, AcceptedSocket bulk_socket);
+  bool read_initial_hello(int fd, Lane expected_lane, HelloMessage & out_hello) const;
+  bool read_exact_with_timeout(int fd, uint8_t * data, size_t size, int timeout_ms) const;
   void read_loop(std::shared_ptr<Connection> connection, Lane lane);
   void keepalive_loop(std::shared_ptr<Connection> connection);
   void handle_received_frame(

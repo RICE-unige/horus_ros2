@@ -24,6 +24,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -335,10 +336,10 @@ void HorusLinkConnectionManager::accept_loop()
     }
 
     if ((fds[0].revents & POLLIN) != 0) {
-      accept_ready_sockets(realtime_server_fd_, pending_realtime_);
+      accept_ready_sockets(realtime_server_fd_, Lane::Realtime, pending_realtime_);
     }
     if ((fds[1].revents & POLLIN) != 0) {
-      accept_ready_sockets(bulk_server_fd_, pending_bulk_);
+      accept_ready_sockets(bulk_server_fd_, Lane::Bulk, pending_bulk_);
     }
     pair_pending_sockets();
   }
@@ -346,6 +347,7 @@ void HorusLinkConnectionManager::accept_loop()
 
 void HorusLinkConnectionManager::accept_ready_sockets(
   int listen_fd,
+  Lane expected_lane,
   std::vector<AcceptedSocket> & out_sockets)
 {
   while (running_.load()) {
@@ -362,7 +364,13 @@ void HorusLinkConnectionManager::accept_ready_sockets(
     configure_socket(fd);
     char ip[INET_ADDRSTRLEN]{};
     inet_ntop(AF_INET, &client_address.sin_addr, ip, sizeof(ip));
-    out_sockets.push_back(AcceptedSocket{fd, ip});
+    HelloMessage hello;
+    if (!read_initial_hello(fd, expected_lane, hello)) {
+      close_fd(fd);
+      continue;
+    }
+
+    out_sockets.push_back(AcceptedSocket{fd, ip, hello.session_id, hello});
   }
 }
 
@@ -373,17 +381,114 @@ void HorusLinkConnectionManager::pair_pending_sockets()
     AcceptedSocket bulk_socket;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (pending_realtime_.empty() || pending_bulk_.empty()) {
+      bool found_pair = false;
+      size_t realtime_index = 0;
+      size_t bulk_index = 0;
+      for (size_t rt = 0; rt < pending_realtime_.size() && !found_pair; ++rt) {
+        for (size_t bulk = 0; bulk < pending_bulk_.size(); ++bulk) {
+          if (pending_realtime_[rt].session_id != 0 &&
+            pending_realtime_[rt].session_id == pending_bulk_[bulk].session_id)
+          {
+            realtime_index = rt;
+            bulk_index = bulk;
+            found_pair = true;
+            break;
+          }
+        }
+      }
+
+      if (!found_pair) {
         return;
       }
-      realtime_socket = pending_realtime_.front();
-      bulk_socket = pending_bulk_.front();
-      pending_realtime_.erase(pending_realtime_.begin());
-      pending_bulk_.erase(pending_bulk_.begin());
+
+      realtime_socket = pending_realtime_[realtime_index];
+      bulk_socket = pending_bulk_[bulk_index];
+      pending_realtime_.erase(
+        pending_realtime_.begin() + static_cast<std::ptrdiff_t>(realtime_index));
+      pending_bulk_.erase(
+        pending_bulk_.begin() + static_cast<std::ptrdiff_t>(bulk_index));
     }
 
     start_connection(realtime_socket, bulk_socket);
   }
+}
+
+bool HorusLinkConnectionManager::read_initial_hello(
+  int fd,
+  Lane expected_lane,
+  HelloMessage & out_hello) const
+{
+  std::array<uint8_t, FrameHeader::kSize> header_bytes{};
+  if (!read_exact_with_timeout(fd, header_bytes.data(), header_bytes.size(), 2000)) {
+    return false;
+  }
+
+  FrameHeader header;
+  if (!decode_header(header_bytes.data(), header_bytes.size(), header) ||
+    header.channel_id != 0 ||
+    header.msg_type != MessageType::Control ||
+    header.length > config_.max_payload_size)
+  {
+    return false;
+  }
+
+  std::vector<uint8_t> payload(header.length);
+  if (header.length > 0 &&
+    !read_exact_with_timeout(fd, payload.data(), payload.size(), 2000))
+  {
+    return false;
+  }
+
+  auto hello = decode_hello(payload.data(), payload.size());
+  if (!hello.has_value() ||
+    hello->role != EndpointRole::UnityClient ||
+    hello->lane != expected_lane ||
+    hello->session_id == 0)
+  {
+    return false;
+  }
+
+  out_hello = *hello;
+  return true;
+}
+
+bool HorusLinkConnectionManager::read_exact_with_timeout(
+  int fd,
+  uint8_t * data,
+  size_t size,
+  int timeout_ms) const
+{
+  size_t offset = 0;
+  while (offset < size && running_.load()) {
+    pollfd poll_fd{};
+    poll_fd.fd = fd;
+    poll_fd.events = POLLIN;
+    const int ready = poll(&poll_fd, 1, timeout_ms);
+    if (ready < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (ready == 0 || (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+      return false;
+    }
+
+    const ssize_t received = recv(fd, data + offset, size - offset, 0);
+    if (received < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+    if (received == 0) {
+      return false;
+    }
+
+    offset += static_cast<size_t>(received);
+  }
+
+  return offset == size;
 }
 
 void HorusLinkConnectionManager::start_connection(
