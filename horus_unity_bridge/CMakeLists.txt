@@ -177,6 +177,7 @@ set(BRIDGE_CORE_SOURCES
   src/horuslink_channel_table.cpp
   src/horuslink_control_messages.cpp
   src/horuslink_protocol.cpp
+  src/horuslink_session.cpp
   src/protocol_handler.cpp
   src/bridge_metrics.cpp
   src/connection_manager.cpp
@@ -277,6 +278,7 @@ if(BUILD_TESTING)
     test/test_horuslink_channel_table.cpp
     test/test_horuslink_control_messages.cpp
     test/test_horuslink_protocol.cpp
+    test/test_horuslink_session.cpp
     test/test_unity_bridge.cpp
   )
   if(TARGET horus_unity_bridge_tests)

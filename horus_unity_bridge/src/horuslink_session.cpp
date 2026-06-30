@@ -1,0 +1,85 @@
+// Copyright 2026 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// SPDX-FileCopyrightText: 2026 RICE Lab, University of Genoa
+// SPDX-License-Identifier: Apache-2.0
+
+#include "horus_unity_bridge/horuslink_session.hpp"
+
+namespace horus_unity_bridge::horuslink
+{
+
+std::vector<Frame> Session::handle_frame(const Frame & frame)
+{
+  if (frame.header.msg_type == MessageType::Control) {
+    return handle_control_frame(frame);
+  }
+
+  return {};
+}
+
+std::vector<Frame> Session::handle_control_frame(const Frame & frame)
+{
+  if (auto hello = decode_hello(frame.payload.data(), frame.payload.size())) {
+    peer_hello_ = *hello;
+    return {};
+  }
+
+  auto subscribe_request = decode_subscribe_request(frame.payload.data(), frame.payload.size());
+  if (!subscribe_request.has_value()) {
+    return {};
+  }
+
+  const bool accepted = channel_table_.begin_subscribe(
+    subscribe_request->channel_id,
+    subscribe_request->topic,
+    subscribe_request->type_name,
+    subscribe_request->lane,
+    subscribe_request->delivery);
+  if (accepted) {
+    channel_table_.confirm_subscribe_ack(subscribe_request->channel_id);
+  }
+
+  const SubscribeAck ack{
+    subscribe_request->channel_id,
+    accepted ? SubscribeStatus::Accepted : SubscribeStatus::Rejected,
+    accepted ? "" : "channel or topic already registered"
+  };
+  return {make_control_response(encode_subscribe_ack(ack))};
+}
+
+Frame Session::make_control_response(std::vector<uint8_t> payload)
+{
+  Frame frame;
+  frame.header.channel_id = 0;
+  frame.header.msg_type = MessageType::Control;
+  frame.header.flags = 0;
+  frame.header.seq = next_sequence();
+  frame.header.corr_id = 0;
+  frame.header.length = static_cast<uint32_t>(payload.size());
+  frame.payload = std::move(payload);
+  return frame;
+}
+
+uint32_t Session::next_sequence()
+{
+  ++control_seq_;
+  if (control_seq_ == 0) {
+    ++control_seq_;
+  }
+
+  return control_seq_;
+}
+
+}  // namespace horus_unity_bridge::horuslink
