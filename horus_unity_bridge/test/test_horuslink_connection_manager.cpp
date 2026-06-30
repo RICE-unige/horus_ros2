@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
@@ -130,6 +131,29 @@ bool recv_exact(int fd, uint8_t * data, size_t size)
   }
 
   return true;
+}
+
+bool wait_for_peer_close(int fd, int timeout_ms = 2000)
+{
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (std::chrono::steady_clock::now() < deadline) {
+    pollfd poll_fd{};
+    poll_fd.fd = fd;
+    poll_fd.events = POLLIN | POLLHUP | POLLERR;
+    const int ready = poll(&poll_fd, 1, 50);
+    if (ready < 0 && errno == EINTR) {
+      continue;
+    }
+    if (ready <= 0) {
+      continue;
+    }
+
+    uint8_t byte = 0;
+    const ssize_t received = recv(fd, &byte, sizeof(byte), MSG_PEEK);
+    return received == 0 || (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
+  }
+
+  return false;
 }
 
 Frame recv_frame(int fd)
@@ -239,6 +263,20 @@ TEST(HorusLinkConnectionManagerTest, AcceptsDualLaneSessionAndAcksSubscribe)
   ASSERT_TRUE(ack.has_value());
   EXPECT_EQ(ack->channel_id, 7u);
   EXPECT_EQ(ack->status, SubscribeStatus::Accepted);
+}
+
+TEST(HorusLinkConnectionManagerTest, StopClosesUnpairedPendingLaneSockets)
+{
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
+  ASSERT_TRUE(manager.start());
+
+  auto realtime = connect_to(manager.realtime_port());
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+  manager.stop();
+
+  EXPECT_TRUE(wait_for_peer_close(realtime.get()));
 }
 
 TEST(HorusLinkConnectionManagerTest, ChannelCloseDispatchesKindAndRemovesChannel)

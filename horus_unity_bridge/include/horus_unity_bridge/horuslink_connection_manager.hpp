@@ -209,6 +209,7 @@ private:
   void prune_disconnected_connections();
   std::shared_ptr<Connection> find_connection(int connection_id) const;
   void configure_socket(int socket_fd) const;
+  static void close_pending_sockets(std::vector<AcceptedSocket> & sockets);
 
   static void close_fd(int & fd);
   static bool set_nonblocking(int fd);

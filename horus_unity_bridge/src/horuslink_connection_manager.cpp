@@ -135,8 +135,8 @@ void HorusLinkConnectionManager::stop()
       connections.push_back(entry.second);
     }
     connections_.clear();
-    pending_realtime_.clear();
-    pending_bulk_.clear();
+    close_pending_sockets(pending_realtime_);
+    close_pending_sockets(pending_bulk_);
   }
 
   for (auto & connection : connections) {
@@ -891,6 +891,15 @@ void HorusLinkConnectionManager::configure_socket(int socket_fd) const
   int buffer_size = static_cast<int>(config_.socket_buffer_size);
   setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
   setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
+}
+
+void HorusLinkConnectionManager::close_pending_sockets(std::vector<AcceptedSocket> & sockets)
+{
+  for (auto & socket : sockets) {
+    close_fd(socket.fd);
+  }
+
+  sockets.clear();
 }
 
 void HorusLinkConnectionManager::close_fd(int & fd)
