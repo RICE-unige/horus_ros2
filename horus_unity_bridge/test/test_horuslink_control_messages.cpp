@@ -1,0 +1,108 @@
+// Copyright 2026 RICE Lab, University of Genoa
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// SPDX-FileCopyrightText: 2026 RICE Lab, University of Genoa
+// SPDX-License-Identifier: Apache-2.0
+
+#include "horus_unity_bridge/horuslink_control_messages.hpp"
+
+#include <gtest/gtest.h>
+
+namespace horus_unity_bridge::horuslink
+{
+
+TEST(HorusLinkControlMessagesTest, HelloEncodesStableGoldenVector)
+{
+  const auto encoded = encode_hello(HelloMessage{EndpointRole::UnityClient, 0x01020304, 1000});
+  const std::vector<uint8_t> expected{
+    0x01, 0x00, 0x01, 0x00, 0x01,
+    0x02, 0x00, 0x02, 0x00, 0x01, 0x00,
+    0x03, 0x00, 0x01, 0x00, 0x01,
+    0x09, 0x00, 0x04, 0x00, 0x04, 0x03, 0x02, 0x01,
+    0x0A, 0x00, 0x04, 0x00, 0xE8, 0x03, 0x00, 0x00
+  };
+  EXPECT_EQ(encoded, expected);
+
+  auto decoded = decode_hello(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, (HelloMessage{EndpointRole::UnityClient, 0x01020304, 1000}));
+}
+
+TEST(HorusLinkControlMessagesTest, SubscribeRequestEncodesStableGoldenVector)
+{
+  const SubscribeRequest request{
+    7,
+    "/tf",
+    "tf2_msgs/msg/TFMessage",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+  const auto encoded = encode_subscribe_request(request);
+  const std::vector<uint8_t> expected{
+    0x01, 0x00, 0x01, 0x00, 0x02,
+    0x02, 0x00, 0x02, 0x00, 0x01, 0x00,
+    0x04, 0x00, 0x02, 0x00, 0x07, 0x00,
+    0x05, 0x00, 0x03, 0x00, 0x2F, 0x74, 0x66,
+    0x06, 0x00, 0x16, 0x00,
+    0x74, 0x66, 0x32, 0x5F, 0x6D, 0x73, 0x67, 0x73,
+    0x2F, 0x6D, 0x73, 0x67, 0x2F, 0x54, 0x46, 0x4D,
+    0x65, 0x73, 0x73, 0x61, 0x67, 0x65,
+    0x07, 0x00, 0x01, 0x00, 0x01,
+    0x08, 0x00, 0x01, 0x00, 0x01
+  };
+  EXPECT_EQ(encoded, expected);
+
+  auto decoded = decode_subscribe_request(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, request);
+}
+
+TEST(HorusLinkControlMessagesTest, SubscribeAckRoundTripsAcceptedAndRejectedMessages)
+{
+  const SubscribeAck accepted{9, SubscribeStatus::Accepted, ""};
+  const auto accepted_bytes = encode_subscribe_ack(accepted);
+  auto accepted_decoded = decode_subscribe_ack(accepted_bytes.data(), accepted_bytes.size());
+  ASSERT_TRUE(accepted_decoded.has_value());
+  EXPECT_EQ(*accepted_decoded, accepted);
+
+  const SubscribeAck rejected{9, SubscribeStatus::Rejected, "unknown topic"};
+  const auto rejected_bytes = encode_subscribe_ack(rejected);
+  auto rejected_decoded = decode_subscribe_ack(rejected_bytes.data(), rejected_bytes.size());
+  ASSERT_TRUE(rejected_decoded.has_value());
+  EXPECT_EQ(*rejected_decoded, rejected);
+}
+
+TEST(HorusLinkControlMessagesTest, TopicTableRoundTripsRepeatedEntries)
+{
+  const std::vector<TopicEntry> entries{
+    TopicEntry{1, "/tf", "tf2_msgs/msg/TFMessage", Lane::Realtime, Delivery::ReliableFifo},
+    TopicEntry{2, "/camera", "sensor_msgs/msg/Image", Lane::Bulk, Delivery::ReplaceLatest}
+  };
+
+  const auto encoded = encode_topic_table(entries);
+  auto decoded = decode_topic_table(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, entries);
+}
+
+TEST(HorusLinkControlMessagesTest, WrongKindOrVersionIsRejected)
+{
+  auto encoded = encode_hello(HelloMessage{EndpointRole::Bridge, 1, 1});
+  EXPECT_FALSE(decode_subscribe_request(encoded.data(), encoded.size()).has_value());
+
+  encoded[9] = 0x02;
+  EXPECT_FALSE(decode_hello(encoded.data(), encoded.size()).has_value());
+}
+
+}  // namespace horus_unity_bridge::horuslink

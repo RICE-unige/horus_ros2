@@ -175,6 +175,7 @@ endif()
 set(BRIDGE_CORE_SOURCES
   src/unity_bridge_node.cpp
   src/horuslink_channel_table.cpp
+  src/horuslink_control_messages.cpp
   src/horuslink_protocol.cpp
   src/protocol_handler.cpp
   src/bridge_metrics.cpp
@@ -274,6 +275,7 @@ if(BUILD_TESTING)
 
   ament_add_gtest(horus_unity_bridge_tests
     test/test_horuslink_channel_table.cpp
+    test/test_horuslink_control_messages.cpp
     test/test_horuslink_protocol.cpp
     test/test_unity_bridge.cpp
   )
