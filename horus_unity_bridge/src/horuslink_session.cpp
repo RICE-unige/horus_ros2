@@ -91,6 +91,13 @@ std::vector<Frame> Session::handle_control_frame(const Frame & frame)
     return {};
   }
 
+  if (auto close_request = decode_channel_close_request(frame.payload.data(),
+      frame.payload.size()))
+  {
+    channel_table_.remove(close_request->channel_id);
+    return {};
+  }
+
   auto subscribe_request = decode_subscribe_request(frame.payload.data(), frame.payload.size());
   auto publisher_request = decode_publisher_request(frame.payload.data(), frame.payload.size());
   auto service_client_request = decode_service_client_request(

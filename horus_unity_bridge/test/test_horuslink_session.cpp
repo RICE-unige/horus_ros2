@@ -231,6 +231,22 @@ TEST(HorusLinkSessionTest, DuplicateSubscribeRequestReturnsRejectedAck)
   EXPECT_FALSE(second_ack->error.empty());
 }
 
+TEST(HorusLinkSessionTest, ChannelCloseRequestRemovesActiveChannel)
+{
+  Session session;
+  register_bulk_channel(session, 12);
+  ASSERT_TRUE(session.channel_table().get(12).has_value());
+
+  auto responses = session.handle_frame(
+    make_control_frame(encode_channel_close_request(ChannelCloseRequest{12}), 2));
+
+  EXPECT_TRUE(responses.empty());
+  EXPECT_FALSE(session.channel_table().get(12).has_value());
+  EXPECT_TRUE(session.handle_frame(
+      make_data_frame(12, {0x10, 0x20}, 3),
+      Lane::Bulk).empty());
+}
+
 TEST(HorusLinkSessionTest, MakeTopicTableFrameEncodesControlResponse)
 {
   Session session;

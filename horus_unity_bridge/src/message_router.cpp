@@ -409,6 +409,87 @@ bool MessageRouter::register_horuslink_ros_service(
   return success;
 }
 
+bool MessageRouter::unregister_horuslink_subscriber(
+  int client_fd,
+  const horuslink::ChannelDescriptor & channel)
+{
+  if (channel.topic.empty()) {
+    return false;
+  }
+
+  const bool success = topic_manager_->unregister_subscriber(channel.topic, client_fd);
+  untrack_client_subscriber(client_fd, channel.topic);
+  if (success) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Unregistered HorusLink subscriber: channel=%u topic=%s",
+      channel.channel_id,
+      channel.topic.c_str());
+  } else {
+    RCLCPP_WARN(
+      get_logger(),
+      "Ignored HorusLink subscriber unregister for missing channel=%u topic=%s",
+      channel.channel_id,
+      channel.topic.c_str());
+  }
+
+  return success;
+}
+
+bool MessageRouter::unregister_horuslink_publisher(
+  int client_fd,
+  const horuslink::ChannelDescriptor & channel)
+{
+  if (channel.topic.empty()) {
+    return false;
+  }
+
+  const bool success = topic_manager_->unregister_publisher(channel.topic, client_fd);
+  untrack_client_publisher(client_fd, channel.topic);
+  if (success) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Unregistered HorusLink publisher: channel=%u topic=%s",
+      channel.channel_id,
+      channel.topic.c_str());
+  } else {
+    RCLCPP_WARN(
+      get_logger(),
+      "Ignored HorusLink publisher unregister for missing channel=%u topic=%s",
+      channel.channel_id,
+      channel.topic.c_str());
+  }
+
+  return success;
+}
+
+bool MessageRouter::unregister_horuslink_ros_service(
+  int client_fd,
+  const horuslink::ChannelDescriptor & channel)
+{
+  if (channel.topic.empty()) {
+    return false;
+  }
+
+  const bool success = service_manager_->unregister_ros_service(channel.topic);
+  untrack_client_ros_service(client_fd, channel.topic);
+  if (success) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Unregistered HorusLink ROS service: channel=%u service=%s",
+      channel.channel_id,
+      channel.topic.c_str());
+  } else {
+    RCLCPP_WARN(
+      get_logger(),
+      "Ignored HorusLink ROS service unregister for missing channel=%u service=%s",
+      channel.channel_id,
+      channel.topic.c_str());
+  }
+
+  return success;
+}
+
 bool MessageRouter::route_horuslink_data_frame(
   int,
   const horuslink::ChannelDescriptor & channel,

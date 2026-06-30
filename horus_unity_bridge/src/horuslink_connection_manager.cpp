@@ -538,6 +538,12 @@ void HorusLinkConnectionManager::handle_received_frame(
       handle_service_client_request(connection, *service_client_request);
       return;
     }
+    auto channel_close_request = decode_channel_close_request(frame.payload.data(),
+        frame.payload.size());
+    if (channel_close_request.has_value()) {
+      handle_channel_close_request(connection, *channel_close_request);
+      return;
+    }
   }
 
   std::vector<std::pair<ChannelDescriptor, Frame>> accepted;
@@ -604,11 +610,14 @@ bool HorusLinkConnectionManager::handle_subscribe_request(
     if (accepted) {
       std::lock_guard<std::mutex> lock(connection->mutex);
       connection->session.channel_table().confirm_subscribe_ack(request.channel_id);
+      connection->channel_registration_kinds[request.channel_id] =
+        ChannelRegistrationKind::Subscriber;
       ack.status = SubscribeStatus::Accepted;
       ack.error.clear();
     } else {
       std::lock_guard<std::mutex> lock(connection->mutex);
       connection->session.channel_table().remove(request.channel_id);
+      connection->channel_registration_kinds.erase(request.channel_id);
       ack.error = callback_error.empty() ? "subscription rejected by bridge" : callback_error;
     }
   }
@@ -655,11 +664,14 @@ bool HorusLinkConnectionManager::handle_publisher_request(
     if (accepted) {
       std::lock_guard<std::mutex> lock(connection->mutex);
       connection->session.channel_table().confirm_subscribe_ack(request.channel_id);
+      connection->channel_registration_kinds[request.channel_id] =
+        ChannelRegistrationKind::Publisher;
       ack.status = SubscribeStatus::Accepted;
       ack.error.clear();
     } else {
       std::lock_guard<std::mutex> lock(connection->mutex);
       connection->session.channel_table().remove(request.channel_id);
+      connection->channel_registration_kinds.erase(request.channel_id);
       ack.error = callback_error.empty() ? "publisher rejected by bridge" : callback_error;
     }
   }
@@ -706,11 +718,14 @@ bool HorusLinkConnectionManager::handle_service_client_request(
     if (accepted) {
       std::lock_guard<std::mutex> lock(connection->mutex);
       connection->session.channel_table().confirm_subscribe_ack(request.channel_id);
+      connection->channel_registration_kinds[request.channel_id] =
+        ChannelRegistrationKind::ServiceClient;
       ack.status = SubscribeStatus::Accepted;
       ack.error.clear();
     } else {
       std::lock_guard<std::mutex> lock(connection->mutex);
       connection->session.channel_table().remove(request.channel_id);
+      connection->channel_registration_kinds.erase(request.channel_id);
       ack.error = callback_error.empty() ? "service client rejected by bridge" : callback_error;
     }
   }
@@ -722,6 +737,35 @@ bool HorusLinkConnectionManager::handle_service_client_request(
   }
   send_frame(connection, Lane::Realtime, ack_frame);
   return ack.status == SubscribeStatus::Accepted;
+}
+
+bool HorusLinkConnectionManager::handle_channel_close_request(
+  const std::shared_ptr<Connection> & connection,
+  const ChannelCloseRequest & request)
+{
+  std::optional<ChannelDescriptor> channel;
+  std::optional<ChannelRegistrationKind> registration_kind;
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    channel = connection->session.channel_table().get(request.channel_id);
+    if (!channel.has_value()) {
+      return false;
+    }
+
+    auto kind_it = connection->channel_registration_kinds.find(request.channel_id);
+    if (kind_it != connection->channel_registration_kinds.end()) {
+      registration_kind = kind_it->second;
+      connection->channel_registration_kinds.erase(kind_it);
+    }
+
+    connection->session.channel_table().remove(request.channel_id);
+  }
+
+  if (channel_close_callback_ && registration_kind.has_value()) {
+    channel_close_callback_(connection->id, *registration_kind, *channel);
+  }
+
+  return true;
 }
 
 bool HorusLinkConnectionManager::send_frame(

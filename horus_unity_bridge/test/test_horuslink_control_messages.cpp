@@ -88,6 +88,19 @@ TEST(HorusLinkControlMessagesTest, ServiceClientRequestEncodesStableGoldenVector
   EXPECT_EQ(*decoded, request);
 }
 
+TEST(HorusLinkControlMessagesTest, ChannelCloseRequestRoundTrips)
+{
+  const ChannelCloseRequest request{23};
+  const auto encoded = encode_channel_close_request(request);
+
+  auto decoded = decode_channel_close_request(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, request);
+  EXPECT_FALSE(decode_subscribe_request(encoded.data(), encoded.size()).has_value());
+  EXPECT_FALSE(decode_publisher_request(encoded.data(), encoded.size()).has_value());
+  EXPECT_FALSE(decode_service_client_request(encoded.data(), encoded.size()).has_value());
+}
+
 TEST(HorusLinkControlMessagesTest, SubscribeAckRoundTripsAcceptedAndRejectedMessages)
 {
   const SubscribeAck accepted{9, SubscribeStatus::Accepted, ""};

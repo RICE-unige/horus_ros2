@@ -279,6 +279,14 @@ void UnityBridgeNode::setup_horuslink_callbacks()
       return handle_horuslink_ros_service(connection_id, channel, error);
     });
 
+  horuslink_connection_manager_->set_channel_close_callback(
+    [this](
+      int connection_id,
+      horuslink::ChannelRegistrationKind registration_kind,
+      const horuslink::ChannelDescriptor & channel) {
+      handle_horuslink_channel_close(connection_id, registration_kind, channel);
+    });
+
   router_->set_send_callback(
     [this](int connection_id,
     const std::string & topic,
@@ -490,6 +498,34 @@ bool UnityBridgeNode::handle_horuslink_ros_service(
   }
 
   return true;
+}
+
+void UnityBridgeNode::handle_horuslink_channel_close(
+  int connection_id,
+  horuslink::ChannelRegistrationKind registration_kind,
+  const horuslink::ChannelDescriptor & channel)
+{
+  bool success = false;
+  switch (registration_kind) {
+    case horuslink::ChannelRegistrationKind::Subscriber:
+      success = router_->unregister_horuslink_subscriber(connection_id, channel);
+      break;
+    case horuslink::ChannelRegistrationKind::Publisher:
+      success = router_->unregister_horuslink_publisher(connection_id, channel);
+      break;
+    case horuslink::ChannelRegistrationKind::ServiceClient:
+      success = router_->unregister_horuslink_ros_service(connection_id, channel);
+      break;
+  }
+
+  if (!success) {
+    RCLCPP_WARN(
+      router_->get_logger(),
+      "HorusLink channel close cleanup ignored: connection=%d channel=%u topic=%s",
+      connection_id,
+      channel.channel_id,
+      channel.topic.c_str());
+  }
 }
 
 void UnityBridgeNode::handle_horuslink_frame(

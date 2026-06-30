@@ -35,7 +35,8 @@ enum class ControlMessageKind : uint8_t
   SubscribeAck = 3,
   TopicTable = 4,
   PublisherRequest = 5,
-  ServiceClientRequest = 6
+  ServiceClientRequest = 6,
+  ChannelCloseRequest = 7
 };
 
 enum class EndpointRole : uint8_t
@@ -92,6 +93,13 @@ struct ServiceClientRequest
   bool operator==(const ServiceClientRequest & other) const;
 };
 
+struct ChannelCloseRequest
+{
+  uint16_t channel_id = 0;
+
+  bool operator==(const ChannelCloseRequest & other) const;
+};
+
 struct SubscribeAck
 {
   uint16_t channel_id = 0;
@@ -143,6 +151,9 @@ std::vector<uint8_t> encode_service_client_request(const ServiceClientRequest & 
 std::optional<ServiceClientRequest> decode_service_client_request(
   const uint8_t * data,
   size_t size);
+
+std::vector<uint8_t> encode_channel_close_request(const ChannelCloseRequest & request);
+std::optional<ChannelCloseRequest> decode_channel_close_request(const uint8_t * data, size_t size);
 
 std::vector<uint8_t> encode_subscribe_ack(const SubscribeAck & ack);
 std::optional<SubscribeAck> decode_subscribe_ack(const uint8_t * data, size_t size);

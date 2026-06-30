@@ -250,6 +250,11 @@ bool ServiceClientRequest::operator==(const ServiceClientRequest & other) const
          delivery == other.delivery;
 }
 
+bool ChannelCloseRequest::operator==(const ChannelCloseRequest & other) const
+{
+  return channel_id == other.channel_id;
+}
+
 bool SubscribeAck::operator==(const SubscribeAck & other) const
 {
   return channel_id == other.channel_id &&
@@ -412,6 +417,32 @@ std::optional<ServiceClientRequest> decode_service_client_request(
 
   request.lane = static_cast<Lane>(lane);
   request.delivery = static_cast<Delivery>(delivery);
+  return request;
+}
+
+std::vector<uint8_t> encode_channel_close_request(const ChannelCloseRequest & request)
+{
+  return encode_tlvs({
+      byte_record(
+        control_tlv::kKind,
+        static_cast<uint8_t>(ControlMessageKind::ChannelCloseRequest)),
+      u16_record(control_tlv::kProtocolVersion, control_tlv::kProtocolVersionValue),
+      u16_record(control_tlv::kChannelId, request.channel_id)
+    });
+}
+
+std::optional<ChannelCloseRequest> decode_channel_close_request(const uint8_t * data, size_t size)
+{
+  auto records = decode_records(data, size, ControlMessageKind::ChannelCloseRequest);
+  if (!records.has_value()) {
+    return std::nullopt;
+  }
+
+  ChannelCloseRequest request;
+  if (!get_u16(*records, control_tlv::kChannelId, request.channel_id)) {
+    return std::nullopt;
+  }
+
   return request;
 }
 

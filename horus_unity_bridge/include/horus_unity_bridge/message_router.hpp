@@ -131,6 +131,27 @@ public:
     const horuslink::ChannelDescriptor & channel);
 
   /**
+   * @brief Unregister a HorusLink topic subscription after channel close.
+   */
+  bool unregister_horuslink_subscriber(
+    int client_fd,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Unregister a HorusLink publisher after channel close.
+   */
+  bool unregister_horuslink_publisher(
+    int client_fd,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Unregister a HorusLink ROS service client after channel close.
+   */
+  bool unregister_horuslink_ros_service(
+    int client_fd,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
    * @brief Route a HorusLink data frame to a ROS topic.
    */
   bool route_horuslink_data_frame(

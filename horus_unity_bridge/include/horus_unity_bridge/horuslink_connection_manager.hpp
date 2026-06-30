@@ -36,6 +36,13 @@
 namespace horus_unity_bridge::horuslink
 {
 
+enum class ChannelRegistrationKind
+{
+  Subscriber,
+  Publisher,
+  ServiceClient
+};
+
 class HorusLinkConnectionManager
 {
 public:
@@ -70,6 +77,10 @@ public:
         int connection_id,
         const ChannelDescriptor & channel,
         std::string & error)>;
+  using ChannelCloseCallback = std::function<void(
+        int connection_id,
+        ChannelRegistrationKind registration_kind,
+        const ChannelDescriptor & channel)>;
   using ConnectionCallback = std::function<void(int connection_id, const std::string & ip)>;
 
   explicit HorusLinkConnectionManager(Config config);
@@ -116,6 +127,10 @@ public:
   {
     service_client_callback_ = std::move(callback);
   }
+  void set_channel_close_callback(ChannelCloseCallback callback)
+  {
+    channel_close_callback_ = std::move(callback);
+  }
   void set_connection_callback(ConnectionCallback callback)
   {
     connection_callback_ = std::move(callback);
@@ -156,6 +171,7 @@ private:
     FrameParser bulk_parser;
     Session session;
     OutboundFrameRouter outbound;
+    std::unordered_map<uint16_t, ChannelRegistrationKind> channel_registration_kinds;
     std::atomic<bool> connected{true};
     std::mutex mutex;
     std::mutex send_mutex;
@@ -184,6 +200,9 @@ private:
   bool handle_service_client_request(
     const std::shared_ptr<Connection> & connection,
     const ServiceClientRequest & request);
+  bool handle_channel_close_request(
+    const std::shared_ptr<Connection> & connection,
+    const ChannelCloseRequest & request);
   bool send_frame(const std::shared_ptr<Connection> & connection, Lane lane, const Frame & frame);
   bool drain_lane(const std::shared_ptr<Connection> & connection, Lane lane);
   void disconnect_connection(int connection_id);
@@ -211,6 +230,7 @@ private:
   SubscribeCallback subscribe_callback_;
   PublisherCallback publisher_callback_;
   ServiceClientCallback service_client_callback_;
+  ChannelCloseCallback channel_close_callback_;
   ConnectionCallback connection_callback_;
   ConnectionCallback disconnection_callback_;
 };

@@ -241,6 +241,113 @@ TEST(HorusLinkConnectionManagerTest, AcceptsDualLaneSessionAndAcksSubscribe)
   EXPECT_EQ(ack->status, SubscribeStatus::Accepted);
 }
 
+TEST(HorusLinkConnectionManagerTest, ChannelCloseDispatchesKindAndRemovesChannel)
+{
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
+  std::atomic<int> connected_id{0};
+  std::mutex event_mutex;
+  std::vector<std::pair<ChannelRegistrationKind, std::string>> close_events;
+  std::vector<Frame> delivered_frames;
+
+  manager.set_connection_callback(
+    [&connected_id](int connection_id, const std::string &) {
+      connected_id = connection_id;
+    });
+  manager.set_subscribe_callback(
+    [](int, const ChannelDescriptor &, std::string &) {
+      return true;
+    });
+  manager.set_publisher_callback(
+    [](int, const ChannelDescriptor &, std::string &) {
+      return true;
+    });
+  manager.set_service_client_callback(
+    [](int, const ChannelDescriptor &, std::string &) {
+      return true;
+    });
+  manager.set_channel_close_callback(
+    [&event_mutex, &close_events](
+      int,
+      ChannelRegistrationKind registration_kind,
+      const ChannelDescriptor & channel) {
+      std::lock_guard<std::mutex> lock(event_mutex);
+      close_events.emplace_back(registration_kind, channel.topic);
+    });
+  manager.set_frame_callback(
+    [&event_mutex, &delivered_frames](
+      int,
+      Lane,
+      const ChannelDescriptor &,
+      const Frame & frame) {
+      std::lock_guard<std::mutex> lock(event_mutex);
+      delivered_frames.push_back(frame);
+    });
+
+  ASSERT_TRUE(manager.start());
+
+  auto realtime = connect_to(manager.realtime_port());
+  auto bulk = connect_to(manager.bulk_port());
+  ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
+
+  const SubscribeRequest subscriber{
+    7,
+    "/camera",
+    "sensor_msgs/msg/Image",
+    Lane::Bulk,
+    Delivery::ReplaceLatest
+  };
+  send_frame(realtime.get(), make_control_frame(encode_subscribe_request(subscriber), 1));
+  recv_frame(realtime.get());
+  send_frame(realtime.get(), make_control_frame(encode_channel_close_request({7}), 2));
+
+  const PublisherRequest publisher{
+    8,
+    "/cmd_vel",
+    "geometry_msgs/msg/Twist",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+  send_frame(realtime.get(), make_control_frame(encode_publisher_request(publisher), 3));
+  recv_frame(realtime.get());
+  send_frame(realtime.get(), make_control_frame(encode_channel_close_request({8}), 4));
+
+  const ServiceClientRequest service{
+    9,
+    "/trigger",
+    "std_srvs/srv/Trigger",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+  send_frame(realtime.get(), make_control_frame(encode_service_client_request(service), 5));
+  recv_frame(realtime.get());
+  send_frame(realtime.get(), make_control_frame(encode_channel_close_request({9}), 6));
+
+  ASSERT_TRUE(wait_until([&event_mutex, &close_events]() {
+      std::lock_guard<std::mutex> lock(event_mutex);
+      return close_events.size() == 3;
+    }));
+
+  {
+    std::lock_guard<std::mutex> lock(event_mutex);
+    ASSERT_EQ(close_events.size(), 3u);
+    EXPECT_EQ(close_events[0].first, ChannelRegistrationKind::Subscriber);
+    EXPECT_EQ(close_events[0].second, "/camera");
+    EXPECT_EQ(close_events[1].first, ChannelRegistrationKind::Publisher);
+    EXPECT_EQ(close_events[1].second, "/cmd_vel");
+    EXPECT_EQ(close_events[2].first, ChannelRegistrationKind::ServiceClient);
+    EXPECT_EQ(close_events[2].second, "/trigger");
+  }
+
+  send_frame(bulk.get(), make_data_frame(7, {0x10, 0x20}, 7));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  {
+    std::lock_guard<std::mutex> lock(event_mutex);
+    EXPECT_TRUE(delivered_frames.empty());
+  }
+}
+
 TEST(HorusLinkConnectionManagerTest, SendsRealtimeKeepaliveAfterHandshake)
 {
   auto config = make_config();
