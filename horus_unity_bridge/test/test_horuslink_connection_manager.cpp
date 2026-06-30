@@ -582,4 +582,94 @@ TEST(HorusLinkConnectionManagerTest, SendsOutboundPayloadOnNegotiatedBulkLane)
   EXPECT_EQ(outbound.payload, payload);
 }
 
+TEST(HorusLinkConnectionManagerTest, RealtimeSendIsNotBlockedBySaturatedBulkLane)
+{
+  auto config = make_config();
+  config.keepalive_ms = 0;
+  config.socket_buffer_size = 4096;
+  HorusLinkConnectionManager manager(config);
+  std::atomic<int> connected_id{0};
+  manager.set_connection_callback(
+    [&connected_id](int connection_id, const std::string &) {
+      connected_id = connection_id;
+    });
+  ASSERT_TRUE(manager.start());
+
+  auto realtime = connect_to(manager.realtime_port());
+  auto bulk = connect_to(manager.bulk_port());
+  const int client_receive_buffer = 4096;
+  ASSERT_EQ(
+    setsockopt(
+      bulk.get(),
+      SOL_SOCKET,
+      SO_RCVBUF,
+      &client_receive_buffer,
+      sizeof(client_receive_buffer)),
+    0);
+  ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
+
+  const SubscribeRequest realtime_request{
+    3,
+    "/tf",
+    "tf2_msgs/msg/TFMessage",
+    Lane::Realtime,
+    Delivery::ReliableFifo
+  };
+  send_frame(realtime.get(), make_control_frame(encode_subscribe_request(realtime_request), 1));
+  recv_frame(realtime.get());
+
+  const SubscribeRequest bulk_request{
+    9,
+    "/mesh",
+    "horus_msgs/msg/IndexedMesh",
+    Lane::Bulk,
+    Delivery::ReliableFifo
+  };
+  send_frame(realtime.get(), make_control_frame(encode_subscribe_request(bulk_request), 2));
+  recv_frame(realtime.get());
+
+  const std::vector<uint8_t> bulk_payload(64u * 1024u * 1024u, 0x7E);
+  std::atomic<bool> bulk_send_started{false};
+  std::atomic<bool> bulk_send_returned{false};
+  std::thread bulk_send_thread([&]() {
+      bulk_send_started = true;
+      manager.send_to_topic(connected_id.load(), "/mesh", bulk_payload);
+      bulk_send_returned = true;
+    });
+  ASSERT_TRUE(wait_until([&bulk_send_started]() {return bulk_send_started.load();}));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  ASSERT_FALSE(bulk_send_returned.load())
+    << "bulk send did not saturate; the regression condition was not exercised";
+
+  const std::vector<uint8_t> realtime_payload{0x01, 0x02, 0x03};
+  std::atomic<bool> realtime_send_returned{false};
+  std::atomic<bool> realtime_send_succeeded{false};
+  std::thread realtime_send_thread([&]() {
+      realtime_send_succeeded = manager.send_to_topic(
+        connected_id.load(),
+        "/tf",
+        realtime_payload);
+      realtime_send_returned = true;
+    });
+
+  const Frame realtime_frame = recv_frame(realtime.get());
+  EXPECT_TRUE(wait_until([&realtime_send_returned]() {return realtime_send_returned.load();}));
+  EXPECT_TRUE(realtime_send_succeeded.load());
+  EXPECT_EQ(realtime_frame.header.channel_id, 3u);
+  EXPECT_EQ(realtime_frame.header.msg_type, MessageType::Data);
+  EXPECT_EQ(realtime_frame.header.flags, FrameFlags::RawOpaque);
+  EXPECT_EQ(realtime_frame.payload, realtime_payload);
+
+  manager.stop();
+  bulk.reset();
+  realtime.reset();
+  if (realtime_send_thread.joinable()) {
+    realtime_send_thread.join();
+  }
+  if (bulk_send_thread.joinable()) {
+    bulk_send_thread.join();
+  }
+}
+
 }  // namespace horus_unity_bridge::horuslink

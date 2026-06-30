@@ -799,7 +799,9 @@ bool HorusLinkConnectionManager::send_frame(
 
   const int fd = lane == Lane::Bulk ? connection->bulk_fd : connection->realtime_fd;
   const auto bytes = serialize_frame(frame.header, frame.payload.data(), frame.payload.size());
-  std::lock_guard<std::mutex> send_lock(connection->send_mutex);
+  std::mutex & lane_send_mutex =
+    lane == Lane::Bulk ? connection->bulk_send_mutex : connection->realtime_send_mutex;
+  std::lock_guard<std::mutex> send_lock(lane_send_mutex);
   if (!send_all(fd, bytes.data(), bytes.size())) {
     disconnect_connection(connection->id);
     return false;

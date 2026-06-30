@@ -179,7 +179,8 @@ private:
     std::unordered_map<uint16_t, ChannelRegistrationKind> channel_registration_kinds;
     std::atomic<bool> connected{true};
     std::mutex mutex;
-    std::mutex send_mutex;
+    std::mutex realtime_send_mutex;
+    std::mutex bulk_send_mutex;
     std::thread realtime_thread;
     std::thread bulk_thread;
     std::thread keepalive_thread;
