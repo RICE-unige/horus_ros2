@@ -83,6 +83,42 @@ TEST(HorusLinkLightCodecsTest, JoyEncodesCountsAxesAndButtons)
   EXPECT_EQ(*decoded, joy);
 }
 
+TEST(HorusLinkLightCodecsTest, TfMessageEncodesStampedTransformsWithFrameIds)
+{
+  const TransformStamped transform{
+    1,
+    2,
+    "map",
+    "base_link",
+    Vector3{1.0F, -2.0F, 0.5F},
+    Quaternion{0.0F, 0.0F, 0.0F, 1.0F}
+  };
+
+  const auto encoded = encode_tf_message({transform});
+  const std::vector<uint8_t> expected{
+    0x01, 0x00,
+    0x01, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x00, 0x00,
+    0x03, 0x00,
+    0x09, 0x00,
+    0x6D, 0x61, 0x70,
+    0x62, 0x61, 0x73, 0x65, 0x5F, 0x6C, 0x69, 0x6E, 0x6B,
+    0x00, 0x00, 0x80, 0x3F,
+    0x00, 0x00, 0x00, 0xC0,
+    0x00, 0x00, 0x00, 0x3F,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x80, 0x3F
+  };
+  EXPECT_EQ(encoded, expected);
+
+  const auto decoded = decode_tf_message(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  ASSERT_EQ(decoded->size(), 1u);
+  EXPECT_EQ(decoded->front(), transform);
+}
+
 TEST(HorusLinkLightCodecsTest, DecodersRejectShortBuffers)
 {
   std::vector<uint8_t> bytes(light_codec::kPoseSize, 0);
@@ -94,6 +130,11 @@ TEST(HorusLinkLightCodecsTest, DecodersRejectShortBuffers)
   EXPECT_FALSE(decode_joy(bytes.data(), light_codec::kJoyHeaderSize - 1).has_value());
   const std::vector<uint8_t> truncated_joy{0x01, 0x00, 0x00, 0x00};
   EXPECT_FALSE(decode_joy(truncated_joy.data(), truncated_joy.size()).has_value());
+  EXPECT_FALSE(decode_transform_stamped(
+    bytes.data(),
+    light_codec::kTransformStampedHeaderSize - 1).has_value());
+  const std::vector<uint8_t> truncated_tf{0x01, 0x00};
+  EXPECT_FALSE(decode_tf_message(truncated_tf.data(), truncated_tf.size()).has_value());
 }
 
 TEST(HorusLinkLightCodecsTest, DecodersRejectNullPointers)
@@ -103,6 +144,9 @@ TEST(HorusLinkLightCodecsTest, DecodersRejectNullPointers)
   EXPECT_FALSE(decode_twist(nullptr, light_codec::kTwistSize).has_value());
   EXPECT_FALSE(decode_pose(nullptr, light_codec::kPoseSize).has_value());
   EXPECT_FALSE(decode_joy(nullptr, light_codec::kJoyHeaderSize).has_value());
+  EXPECT_FALSE(decode_transform_stamped(nullptr,
+      light_codec::kTransformStampedHeaderSize).has_value());
+  EXPECT_FALSE(decode_tf_message(nullptr, light_codec::kTfMessageHeaderSize).has_value());
 }
 
 }  // namespace horus_unity_bridge::horuslink

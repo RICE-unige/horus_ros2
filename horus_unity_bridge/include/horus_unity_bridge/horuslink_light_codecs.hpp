@@ -20,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace horus_unity_bridge::horuslink
@@ -68,6 +69,18 @@ struct Joy
   bool operator==(const Joy & other) const;
 };
 
+struct TransformStamped
+{
+  uint32_t seconds = 0;
+  uint32_t nanoseconds = 0;
+  std::string parent_frame_id;
+  std::string child_frame_id;
+  Vector3 translation;
+  Quaternion rotation;
+
+  bool operator==(const TransformStamped & other) const;
+};
+
 namespace light_codec
 {
 constexpr size_t kVector3Size = 12;
@@ -75,6 +88,9 @@ constexpr size_t kQuaternionSize = 16;
 constexpr size_t kTwistSize = kVector3Size * 2;
 constexpr size_t kPoseSize = kVector3Size + kQuaternionSize;
 constexpr size_t kJoyHeaderSize = 4;
+constexpr size_t kTfMessageHeaderSize = 2;
+constexpr size_t kTransformStampedHeaderSize = 12;
+constexpr size_t kTransformStampedFixedPayloadSize = kVector3Size + kQuaternionSize;
 }  // namespace light_codec
 
 std::vector<uint8_t> encode_vector3(const Vector3 & value);
@@ -91,5 +107,14 @@ std::optional<Pose> decode_pose(const uint8_t * data, size_t size);
 
 std::vector<uint8_t> encode_joy(const Joy & value);
 std::optional<Joy> decode_joy(const uint8_t * data, size_t size);
+
+std::vector<uint8_t> encode_transform_stamped(const TransformStamped & value);
+std::optional<TransformStamped> decode_transform_stamped(
+  const uint8_t * data,
+  size_t size,
+  size_t * bytes_read = nullptr);
+
+std::vector<uint8_t> encode_tf_message(const std::vector<TransformStamped> & transforms);
+std::optional<std::vector<TransformStamped>> decode_tf_message(const uint8_t * data, size_t size);
 
 }  // namespace horus_unity_bridge::horuslink

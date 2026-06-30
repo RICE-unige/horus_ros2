@@ -68,6 +68,14 @@ void write_uint16(std::vector<uint8_t> & output, uint16_t value)
   output.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
 }
 
+void write_uint32(std::vector<uint8_t> & output, uint32_t value)
+{
+  output.push_back(static_cast<uint8_t>(value & 0xFFu));
+  output.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
+  output.push_back(static_cast<uint8_t>((value >> 16) & 0xFFu));
+  output.push_back(static_cast<uint8_t>((value >> 24) & 0xFFu));
+}
+
 float read_float(const uint8_t * data)
 {
   const uint32_t bits =
@@ -76,6 +84,14 @@ float read_float(const uint8_t * data)
     (static_cast<uint32_t>(data[2]) << 16) |
     (static_cast<uint32_t>(data[3]) << 24);
   return bits_to_float(bits);
+}
+
+uint32_t read_uint32(const uint8_t * data)
+{
+  return static_cast<uint32_t>(data[0]) |
+         (static_cast<uint32_t>(data[1]) << 8) |
+         (static_cast<uint32_t>(data[2]) << 16) |
+         (static_cast<uint32_t>(data[3]) << 24);
 }
 
 int32_t read_int32(const uint8_t * data)
@@ -154,6 +170,23 @@ size_t joy_size(size_t axes_count, size_t buttons_count)
          (buttons_count * sizeof(int32_t));
 }
 
+size_t frame_id_size(const std::string & frame_id)
+{
+  if (frame_id.size() > std::numeric_limits<uint16_t>::max()) {
+    throw std::out_of_range("TF frame ID exceeds the wire limit.");
+  }
+
+  return frame_id.size();
+}
+
+size_t transform_stamped_size(const TransformStamped & value)
+{
+  return light_codec::kTransformStampedHeaderSize +
+         frame_id_size(value.parent_frame_id) +
+         frame_id_size(value.child_frame_id) +
+         light_codec::kTransformStampedFixedPayloadSize;
+}
+
 }  // namespace
 
 bool Vector3::operator==(const Vector3 & other) const
@@ -179,6 +212,16 @@ bool Pose::operator==(const Pose & other) const
 bool Joy::operator==(const Joy & other) const
 {
   return axes == other.axes && buttons == other.buttons;
+}
+
+bool TransformStamped::operator==(const TransformStamped & other) const
+{
+  return seconds == other.seconds &&
+         nanoseconds == other.nanoseconds &&
+         parent_frame_id == other.parent_frame_id &&
+         child_frame_id == other.child_frame_id &&
+         translation == other.translation &&
+         rotation == other.rotation;
 }
 
 std::vector<uint8_t> encode_vector3(const Vector3 & value)
@@ -292,6 +335,127 @@ std::optional<Joy> decode_joy(const uint8_t * data, size_t size)
   }
 
   return joy;
+}
+
+std::vector<uint8_t> encode_transform_stamped(const TransformStamped & value)
+{
+  std::vector<uint8_t> output;
+  output.reserve(transform_stamped_size(value));
+  write_uint32(output, value.seconds);
+  write_uint32(output, value.nanoseconds);
+  write_uint16(output, static_cast<uint16_t>(value.parent_frame_id.size()));
+  write_uint16(output, static_cast<uint16_t>(value.child_frame_id.size()));
+  output.insert(output.end(), value.parent_frame_id.begin(), value.parent_frame_id.end());
+  output.insert(output.end(), value.child_frame_id.begin(), value.child_frame_id.end());
+  append_vector3(output, value.translation);
+  append_quaternion(output, value.rotation);
+  return output;
+}
+
+std::optional<TransformStamped> decode_transform_stamped(
+  const uint8_t * data,
+  size_t size,
+  size_t * bytes_read)
+{
+  if (bytes_read != nullptr) {
+    *bytes_read = 0;
+  }
+
+  if (data == nullptr || size < light_codec::kTransformStampedHeaderSize) {
+    return std::nullopt;
+  }
+
+  const uint32_t seconds = read_uint32(data);
+  const uint32_t nanoseconds = read_uint32(data + 4);
+  const uint16_t parent_length = read_uint16(data + 8);
+  const uint16_t child_length = read_uint16(data + 10);
+  const size_t payload_size =
+    light_codec::kTransformStampedHeaderSize +
+    parent_length +
+    child_length +
+    light_codec::kTransformStampedFixedPayloadSize;
+  if (size < payload_size) {
+    return std::nullopt;
+  }
+
+  size_t offset = light_codec::kTransformStampedHeaderSize;
+  const std::string parent_frame_id(
+    reinterpret_cast<const char *>(data + offset),
+    parent_length);
+  offset += parent_length;
+  const std::string child_frame_id(
+    reinterpret_cast<const char *>(data + offset),
+    child_length);
+  offset += child_length;
+  const auto translation = decode_vector3(data + offset, light_codec::kVector3Size);
+  if (!translation.has_value()) {
+    return std::nullopt;
+  }
+
+  offset += light_codec::kVector3Size;
+  const auto rotation = decode_quaternion(data + offset, light_codec::kQuaternionSize);
+  if (!rotation.has_value()) {
+    return std::nullopt;
+  }
+
+  if (bytes_read != nullptr) {
+    *bytes_read = payload_size;
+  }
+
+  return TransformStamped{
+    seconds,
+    nanoseconds,
+    parent_frame_id,
+    child_frame_id,
+    *translation,
+    *rotation
+  };
+}
+
+std::vector<uint8_t> encode_tf_message(const std::vector<TransformStamped> & transforms)
+{
+  if (transforms.size() > std::numeric_limits<uint16_t>::max()) {
+    throw std::out_of_range("TF transform count exceeds the wire limit.");
+  }
+
+  size_t payload_size = light_codec::kTfMessageHeaderSize;
+  for (const auto & transform : transforms) {
+    payload_size += transform_stamped_size(transform);
+  }
+
+  std::vector<uint8_t> output;
+  output.reserve(payload_size);
+  write_uint16(output, static_cast<uint16_t>(transforms.size()));
+  for (const auto & transform : transforms) {
+    const auto encoded = encode_transform_stamped(transform);
+    output.insert(output.end(), encoded.begin(), encoded.end());
+  }
+
+  return output;
+}
+
+std::optional<std::vector<TransformStamped>> decode_tf_message(const uint8_t * data, size_t size)
+{
+  if (data == nullptr || size < light_codec::kTfMessageHeaderSize) {
+    return std::nullopt;
+  }
+
+  const uint16_t transform_count = read_uint16(data);
+  std::vector<TransformStamped> transforms;
+  transforms.reserve(transform_count);
+  size_t offset = light_codec::kTfMessageHeaderSize;
+  for (uint16_t i = 0; i < transform_count; ++i) {
+    size_t bytes_read = 0;
+    const auto transform = decode_transform_stamped(data + offset, size - offset, &bytes_read);
+    if (!transform.has_value()) {
+      return std::nullopt;
+    }
+
+    transforms.push_back(*transform);
+    offset += bytes_read;
+  }
+
+  return transforms;
 }
 
 }  // namespace horus_unity_bridge::horuslink
