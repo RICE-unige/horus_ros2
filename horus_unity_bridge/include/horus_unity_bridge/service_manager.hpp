@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include "horus_unity_bridge/serialized_payload.hpp"
+
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <rclcpp/generic_client.hpp>
@@ -33,54 +35,9 @@
 #include <mutex>
 #include <future>
 #include <chrono>
-#include <cstring>
 
 namespace horus_unity_bridge
 {
-
-namespace detail
-{
-inline bool has_cdr_header(const std::vector<uint8_t> & data)
-{
-  if (data.size() < 4) {
-    return false;
-  }
-  if (data[0] != 0x00 || data[2] != 0x00 || data[3] != 0x00) {
-    return false;
-  }
-  return data[1] == 0x00 || data[1] == 0x01;
-}
-
-inline std::vector<uint8_t> add_cdr_header(const std::vector<uint8_t> & data)
-{
-  std::vector<uint8_t> result;
-  result.reserve(data.size() + 4);
-  result.push_back(0x00);
-  result.push_back(0x01);  // little-endian
-  result.push_back(0x00);
-  result.push_back(0x00);
-  result.insert(result.end(), data.begin(), data.end());
-  return result;
-}
-
-inline void fill_serialized_message(
-  const std::vector<uint8_t> & data,
-  rclcpp::SerializedMessage & serialized_msg)
-{
-  serialized_msg.reserve(data.size());
-  auto & rcl_msg = serialized_msg.get_rcl_serialized_message();
-  // Ensure buffer is large enough
-  if (rcl_msg.buffer_capacity < data.size()) {
-    rcl_msg.allocator.deallocate(rcl_msg.buffer, rcl_msg.allocator.state);
-    rcl_msg.buffer = static_cast<uint8_t *>(rcl_msg.allocator.allocate(data.size(),
-          rcl_msg.allocator.state));
-    rcl_msg.buffer_capacity = data.size();
-  }
-  std::memcpy(rcl_msg.buffer, data.data(), data.size());
-  rcl_msg.buffer_length = data.size();
-}
-}  // namespace detail
-
 
 /**
  * @brief Manages ROS2 service calls between Unity and ROS using Generic Types

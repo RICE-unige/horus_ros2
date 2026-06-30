@@ -511,10 +511,7 @@ void UnityBridgeNode::handle_horuslink_frame(
     return;
   }
 
-  ProtocolMessage message;
-  message.destination = channel.topic;
-  message.payload = frame.payload;
-  handle_message_from_unity(connection_id, message);
+  router_->route_horuslink_data_frame(connection_id, channel, frame.payload);
 }
 
 void UnityBridgeNode::stats_timer_callback()

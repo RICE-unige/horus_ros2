@@ -83,6 +83,19 @@ public:
     const rclcpp::QoS & qos = rclcpp::QoS(10));
 
   /**
+   * @brief Register a HorusLink subscriber that receives Unity-facing payload bytes.
+   *
+   * The DDS CDR encapsulation header is stripped at this edge so HorusLink frames
+   * carry the message body bytes instead of the full ROS serialized envelope.
+   */
+  bool register_horuslink_subscriber(
+    const std::string & topic,
+    const std::string & message_type,
+    int client_fd,
+    MessageCallback callback,
+    const rclcpp::QoS & qos = rclcpp::QoS(10));
+
+  /**
    * @brief Publish a message from Unity to ROS
    *
    * @param topic Topic name
@@ -92,6 +105,16 @@ public:
   bool publish_message(
     const std::string & topic,
     const std::vector<uint8_t> & serialized_msg);
+
+  /**
+   * @brief Publish a HorusLink payload to ROS.
+   *
+   * HorusLink data frames carry the body bytes; this restores the CDR
+   * encapsulation header required by rclcpp generic publishers when needed.
+   */
+  bool publish_horuslink_message(
+    const std::string & topic,
+    const std::vector<uint8_t> & payload);
 
   /**
    * @brief Unregister a publisher

@@ -131,6 +131,14 @@ public:
     const horuslink::ChannelDescriptor & channel);
 
   /**
+   * @brief Route a HorusLink data frame to a ROS topic.
+   */
+  bool route_horuslink_data_frame(
+    int client_fd,
+    const horuslink::ChannelDescriptor & channel,
+    const std::vector<uint8_t> & payload);
+
+  /**
    * @brief Route a HorusLink service request frame to a ROS service.
    */
   bool route_horuslink_service_request(

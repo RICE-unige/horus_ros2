@@ -19,6 +19,7 @@
 #include "horus_unity_bridge/horuslink_control_messages.hpp"
 #include "horus_unity_bridge/horuslink_protocol.hpp"
 #include "horus_unity_bridge/message_router.hpp"
+#include "horus_unity_bridge/serialized_payload.hpp"
 #include "horus_unity_bridge/unity_bridge_node.hpp"
 
 #include <gtest/gtest.h>
@@ -256,11 +257,18 @@ example_interfaces::srv::AddTwoInts::Response deserialize_add_two_ints_response(
     throw std::runtime_error("empty AddTwoInts response payload");
   }
 
+  std::vector<uint8_t> normalized_payload;
+  const std::vector<uint8_t> * serialized_payload = &payload;
+  if (!detail::has_cdr_header(payload)) {
+    normalized_payload = detail::add_cdr_header(payload);
+    serialized_payload = &normalized_payload;
+  }
+
   rclcpp::SerializedMessage serialized;
-  serialized.reserve(payload.size());
+  serialized.reserve(serialized_payload->size());
   auto & rcl_msg = serialized.get_rcl_serialized_message();
-  std::memcpy(rcl_msg.buffer, payload.data(), payload.size());
-  rcl_msg.buffer_length = payload.size();
+  std::memcpy(rcl_msg.buffer, serialized_payload->data(), serialized_payload->size());
+  rcl_msg.buffer_length = serialized_payload->size();
 
   example_interfaces::srv::AddTwoInts::Response response;
   rclcpp::Serialization<example_interfaces::srv::AddTwoInts::Response> serializer;
@@ -718,7 +726,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportForwardsRosTopicToNegotiatedBulkLane
   const std::string text = "horuslink-loopback";
   std_msgs::msg::String msg;
   msg.data = text;
-  const auto expected_payload = serialize_string_message(text);
+  const auto expected_payload = detail::strip_cdr_header(serialize_string_message(text));
 
   horuslink::Frame received_frame;
   bool received = false;
@@ -734,6 +742,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportForwardsRosTopicToNegotiatedBulkLane
     received_frame.header.flags,
     horuslink::FrameFlags::RawOpaque | horuslink::FrameFlags::ReplaceLatest);
   EXPECT_EQ(received_frame.header.seq, 1u);
+  EXPECT_FALSE(detail::has_cdr_header(received_frame.payload));
   EXPECT_EQ(received_frame.payload, expected_payload);
 
   node.stop();
@@ -802,9 +811,11 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesDataFramesToRosTopic)
   ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
 
   const std::string text = "unity-to-ros";
+  const auto payload = detail::strip_cdr_header(serialize_string_message(text));
+  ASSERT_FALSE(detail::has_cdr_header(payload));
   send_horuslink_frame(
     realtime.get(),
-    make_horuslink_data_frame(channel_id, serialize_string_message(text)));
+    make_horuslink_data_frame(channel_id, payload));
 
   for (int attempt = 0; attempt < 50 && received_text.empty(); ++attempt) {
     rclcpp::spin_some(subscriber_node);
@@ -901,7 +912,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportCallsRosServiceWithCorrelationId)
       make_horuslink_service_request_frame(
         channel_id,
         corr_id,
-        serialize_add_two_ints_request(5, 7)));
+        detail::strip_cdr_header(serialize_add_two_ints_request(5, 7))));
 
     horuslink::Frame response_frame;
     if (recv_horuslink_frame(realtime.get(), response_frame, 3000)) {
@@ -909,6 +920,9 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportCallsRosServiceWithCorrelationId)
       response_channel_id = response_frame.header.channel_id;
       response_type = response_frame.header.msg_type;
       try {
+        if (detail::has_cdr_header(response_frame.payload)) {
+          throw std::runtime_error("HorusLink service response still has CDR header");
+        }
         const auto response = deserialize_add_two_ints_response(response_frame.payload);
         response_sum = response.sum;
         response_ok = true;

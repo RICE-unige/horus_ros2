@@ -17,6 +17,7 @@
 
 #include "horus_unity_bridge/topic_manager.hpp"
 #include "horus_unity_bridge/bridge_metrics.hpp"
+#include "horus_unity_bridge/serialized_payload.hpp"
 #include <rclcpp/serialization.hpp>
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
 #include <dlfcn.h>
@@ -245,6 +246,26 @@ bool TopicManager::register_subscriber(
   }
 }
 
+bool TopicManager::register_horuslink_subscriber(
+  const std::string & topic,
+  const std::string & message_type,
+  int client_fd,
+  MessageCallback callback,
+  const rclcpp::QoS & qos)
+{
+  return register_subscriber(
+    topic,
+    message_type,
+    client_fd,
+    [callback = std::move(callback)](
+      const std::string & callback_topic,
+      const std::vector<uint8_t> & data) {
+      const auto payload = detail::strip_cdr_header(data);
+      callback(callback_topic, payload);
+    },
+    qos);
+}
+
 bool TopicManager::publish_message(
   const std::string & topic,
   const std::vector<uint8_t> & serialized_msg)
@@ -311,6 +332,18 @@ bool TopicManager::publish_message(
     stats_.publish_errors++;
     return false;
   }
+}
+
+bool TopicManager::publish_horuslink_message(
+  const std::string & topic,
+  const std::vector<uint8_t> & payload)
+{
+  if (detail::has_cdr_header(payload)) {
+    return publish_message(topic, payload);
+  }
+
+  const auto serialized_msg = detail::add_cdr_header(payload);
+  return publish_message(topic, serialized_msg);
 }
 
 bool TopicManager::unregister_publisher(const std::string & topic, int client_fd)

@@ -195,7 +195,8 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
       }
 
       if (!service_name.empty() && horuslink_service_response_callback_ && target_fd != -1) {
-        horuslink_service_response_callback_(target_fd, service_name, srv_id, response);
+        const auto payload = detail::strip_cdr_header(response);
+        horuslink_service_response_callback_(target_fd, service_name, srv_id, payload);
         return;
       }
 
@@ -310,7 +311,7 @@ bool MessageRouter::register_horuslink_subscriber(
   }
 
   const OutboundMessagePolicy policy = policy_from_horuslink_channel(channel);
-  const bool success = topic_manager_->register_subscriber(
+  const bool success = topic_manager_->register_horuslink_subscriber(
     channel.topic,
     channel.type_name,
     client_fd,
@@ -403,6 +404,29 @@ bool MessageRouter::register_horuslink_ros_service(
       channel.channel_id,
       channel.topic.c_str(),
       channel.type_name.c_str());
+  }
+
+  return success;
+}
+
+bool MessageRouter::route_horuslink_data_frame(
+  int,
+  const horuslink::ChannelDescriptor & channel,
+  const std::vector<uint8_t> & payload)
+{
+  stats_.messages_routed++;
+
+  if (channel.topic.empty()) {
+    stats_.routing_errors++;
+    return false;
+  }
+
+  const bool success = topic_manager_->publish_horuslink_message(channel.topic, payload);
+
+  if (success) {
+    stats_.messages_published++;
+  } else {
+    stats_.routing_errors++;
   }
 
   return success;
