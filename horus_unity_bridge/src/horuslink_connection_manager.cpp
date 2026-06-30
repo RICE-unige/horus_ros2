@@ -400,7 +400,7 @@ void HorusLinkConnectionManager::handle_received_frame(
   Lane lane,
   const Frame & frame)
 {
-  std::vector<Frame> accepted;
+  std::vector<std::pair<ChannelDescriptor, Frame>> accepted;
   std::vector<Frame> responses;
   {
     std::lock_guard<std::mutex> lock(connection->mutex);
@@ -410,7 +410,10 @@ void HorusLinkConnectionManager::handle_received_frame(
         response.header.msg_type == MessageType::ServiceRequest ||
         response.header.msg_type == MessageType::ServiceResponse)
       {
-        accepted.push_back(response);
+        auto channel = connection->session.channel_table().get(response.header.channel_id);
+        if (channel.has_value()) {
+          accepted.emplace_back(*channel, response);
+        }
       }
     }
   }
@@ -423,7 +426,7 @@ void HorusLinkConnectionManager::handle_received_frame(
 
   if (frame_callback_) {
     for (const auto & accepted_frame : accepted) {
-      frame_callback_(connection->id, lane, accepted_frame);
+      frame_callback_(connection->id, lane, accepted_frame.first, accepted_frame.second);
     }
   }
 }

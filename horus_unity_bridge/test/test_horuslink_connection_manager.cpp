@@ -231,16 +231,18 @@ TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
   std::atomic<int> connected_id{0};
   std::mutex frame_mutex;
   std::vector<Frame> observed_frames;
+  std::vector<ChannelDescriptor> observed_channels;
   std::vector<Lane> observed_lanes;
   manager.set_connection_callback(
     [&connected_id](int connection_id, const std::string &) {
       connected_id = connection_id;
     });
   manager.set_frame_callback(
-    [&frame_mutex, &observed_frames, &observed_lanes](
-      int, Lane lane, const Frame & frame) {
+    [&frame_mutex, &observed_frames, &observed_channels, &observed_lanes](
+      int, Lane lane, const ChannelDescriptor & channel, const Frame & frame) {
       std::lock_guard<std::mutex> lock(frame_mutex);
       observed_lanes.push_back(lane);
+      observed_channels.push_back(channel);
       observed_frames.push_back(frame);
     });
   ASSERT_TRUE(manager.start());
@@ -267,6 +269,9 @@ TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
   std::lock_guard<std::mutex> lock(frame_mutex);
   ASSERT_EQ(observed_frames.size(), 1u);
   EXPECT_EQ(observed_lanes[0], Lane::Bulk);
+  EXPECT_EQ(observed_channels[0].topic, "/camera");
+  EXPECT_EQ(observed_channels[0].type_name, "sensor_msgs/msg/Image");
+  EXPECT_EQ(observed_channels[0].delivery, Delivery::ReplaceLatest);
   EXPECT_EQ(observed_frames[0].header.channel_id, 7u);
   EXPECT_EQ(observed_frames[0].payload, std::vector<uint8_t>({0x10, 0x20, 0x30}));
 }

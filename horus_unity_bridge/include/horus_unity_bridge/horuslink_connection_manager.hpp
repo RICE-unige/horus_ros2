@@ -52,7 +52,11 @@ public:
     bool tcp_nodelay = true;
   };
 
-  using FrameCallback = std::function<void(int connection_id, Lane lane, const Frame & frame)>;
+  using FrameCallback = std::function<void(
+        int connection_id,
+        Lane lane,
+        const ChannelDescriptor & channel,
+        const Frame & frame)>;
   using ConnectionCallback = std::function<void(int connection_id, const std::string & ip)>;
 
   explicit HorusLinkConnectionManager(Config config);
