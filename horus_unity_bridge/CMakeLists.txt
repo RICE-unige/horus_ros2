@@ -177,6 +177,7 @@ set(BRIDGE_CORE_SOURCES
   src/horuslink_channel_table.cpp
   src/horuslink_control_messages.cpp
   src/horuslink_light_codecs.cpp
+  src/horuslink_outbound_frame_router.cpp
   src/horuslink_outbound_lane_queue.cpp
   src/horuslink_protocol.cpp
   src/horuslink_session.cpp
@@ -280,6 +281,7 @@ if(BUILD_TESTING)
     test/test_horuslink_channel_table.cpp
     test/test_horuslink_control_messages.cpp
     test/test_horuslink_light_codecs.cpp
+    test/test_horuslink_outbound_frame_router.cpp
     test/test_horuslink_outbound_lane_queue.cpp
     test/test_horuslink_protocol.cpp
     test/test_horuslink_session.cpp
