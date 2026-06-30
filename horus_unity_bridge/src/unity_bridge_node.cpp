@@ -135,6 +135,16 @@ void UnityBridgeNode::load_parameters()
   horuslink_config_.max_connections = conn_config_.max_connections;
   horuslink_config_.socket_buffer_size = conn_config_.socket_buffer_size;
   horuslink_config_.tcp_nodelay = conn_config_.tcp_nodelay;
+  const auto configured_horuslink_max_payload_size = router_->declare_parameter<int>(
+    "horuslink_max_payload_size",
+    static_cast<int>(horuslink_config_.max_payload_size));
+  horuslink_config_.max_payload_size = static_cast<size_t>(
+    configured_horuslink_max_payload_size < 1 ? 1 : configured_horuslink_max_payload_size);
+  const auto configured_horuslink_keepalive_ms = router_->declare_parameter<int>(
+    "horuslink_keepalive_ms",
+    static_cast<int>(horuslink_config_.keepalive_ms));
+  horuslink_config_.keepalive_ms = static_cast<uint32_t>(
+    configured_horuslink_keepalive_ms < 0 ? 0 : configured_horuslink_keepalive_ms);
 
   const auto configured_worker_threads = router_->declare_parameter<int>("worker_threads", 4);
   worker_threads_ = std::max<int>(1, static_cast<int>(configured_worker_threads));

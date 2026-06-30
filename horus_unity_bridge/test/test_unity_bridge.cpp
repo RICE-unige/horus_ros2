@@ -148,11 +148,11 @@ bool recv_horuslink_frame(int fd, horuslink::Frame & frame, int timeout_ms = 200
   return true;
 }
 
-void expect_bridge_hello(int fd)
+void expect_bridge_hello(
+  int fd,
+  uint32_t expected_max_payload_bytes = 512u * 1024u * 1024u,
+  uint32_t expected_keepalive_ms = 1000u)
 {
-  constexpr uint32_t kExpectedMaxPayloadBytes = 512u * 1024u * 1024u;
-  constexpr uint32_t kExpectedKeepaliveMs = 1000u;
-
   horuslink::Frame hello_frame;
   ASSERT_TRUE(recv_horuslink_frame(fd, hello_frame));
   ASSERT_EQ(hello_frame.header.channel_id, 0u);
@@ -164,8 +164,8 @@ void expect_bridge_hello(int fd)
     hello_frame.payload.size());
   ASSERT_TRUE(hello.has_value());
   EXPECT_EQ(hello->role, horuslink::EndpointRole::Bridge);
-  EXPECT_EQ(hello->max_payload_bytes, kExpectedMaxPayloadBytes);
-  EXPECT_EQ(hello->keepalive_ms, kExpectedKeepaliveMs);
+  EXPECT_EQ(hello->max_payload_bytes, expected_max_payload_bytes);
+  EXPECT_EQ(hello->keepalive_ms, expected_keepalive_ms);
 }
 
 void send_horuslink_frame(int fd, horuslink::Frame frame)
@@ -633,6 +633,36 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeCanStartHorusLinkTransport)
   EXPECT_FALSE(node.has_service_timer());
   ASSERT_TRUE(node.start());
   EXPECT_TRUE(node.has_service_timer());
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportAdvertisesConfiguredHello)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("horuslink_max_payload_size", 4096),
+      rclcpp::Parameter("horuslink_keepalive_ms", 250),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+  expect_bridge_hello(realtime.get(), 4096u, 250u);
+
+  (void)bulk;
   node.stop();
 }
 
