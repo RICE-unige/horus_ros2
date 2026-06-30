@@ -58,6 +58,31 @@ TEST(HorusLinkLightCodecsTest, PoseRoundTripsPositionAndOrientation)
   EXPECT_EQ(*decoded, pose);
 }
 
+TEST(HorusLinkLightCodecsTest, JoyEncodesCountsAxesAndButtons)
+{
+  const Joy joy{
+    {1.0F, -0.5F, 0.25F},
+    {1, 0, -1}
+  };
+
+  const auto encoded = encode_joy(joy);
+  const std::vector<uint8_t> expected{
+    0x03, 0x00,
+    0x03, 0x00,
+    0x00, 0x00, 0x80, 0x3F,
+    0x00, 0x00, 0x00, 0xBF,
+    0x00, 0x00, 0x80, 0x3E,
+    0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xFF, 0xFF, 0xFF
+  };
+  EXPECT_EQ(encoded, expected);
+
+  const auto decoded = decode_joy(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, joy);
+}
+
 TEST(HorusLinkLightCodecsTest, DecodersRejectShortBuffers)
 {
   std::vector<uint8_t> bytes(light_codec::kPoseSize, 0);
@@ -66,6 +91,9 @@ TEST(HorusLinkLightCodecsTest, DecodersRejectShortBuffers)
   EXPECT_FALSE(decode_quaternion(bytes.data(), light_codec::kQuaternionSize - 1).has_value());
   EXPECT_FALSE(decode_twist(bytes.data(), light_codec::kTwistSize - 1).has_value());
   EXPECT_FALSE(decode_pose(bytes.data(), light_codec::kPoseSize - 1).has_value());
+  EXPECT_FALSE(decode_joy(bytes.data(), light_codec::kJoyHeaderSize - 1).has_value());
+  const std::vector<uint8_t> truncated_joy{0x01, 0x00, 0x00, 0x00};
+  EXPECT_FALSE(decode_joy(truncated_joy.data(), truncated_joy.size()).has_value());
 }
 
 TEST(HorusLinkLightCodecsTest, DecodersRejectNullPointers)
@@ -74,6 +102,7 @@ TEST(HorusLinkLightCodecsTest, DecodersRejectNullPointers)
   EXPECT_FALSE(decode_quaternion(nullptr, light_codec::kQuaternionSize).has_value());
   EXPECT_FALSE(decode_twist(nullptr, light_codec::kTwistSize).has_value());
   EXPECT_FALSE(decode_pose(nullptr, light_codec::kPoseSize).has_value());
+  EXPECT_FALSE(decode_joy(nullptr, light_codec::kJoyHeaderSize).has_value());
 }
 
 }  // namespace horus_unity_bridge::horuslink

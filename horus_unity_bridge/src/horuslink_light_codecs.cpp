@@ -18,6 +18,8 @@
 #include "horus_unity_bridge/horuslink_light_codecs.hpp"
 
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 
 namespace horus_unity_bridge::horuslink
 {
@@ -50,6 +52,22 @@ void write_float(std::vector<uint8_t> & output, float value)
   output.push_back(static_cast<uint8_t>((bits >> 24) & 0xFFu));
 }
 
+void write_int32(std::vector<uint8_t> & output, int32_t value)
+{
+  uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  output.push_back(static_cast<uint8_t>(bits & 0xFFu));
+  output.push_back(static_cast<uint8_t>((bits >> 8) & 0xFFu));
+  output.push_back(static_cast<uint8_t>((bits >> 16) & 0xFFu));
+  output.push_back(static_cast<uint8_t>((bits >> 24) & 0xFFu));
+}
+
+void write_uint16(std::vector<uint8_t> & output, uint16_t value)
+{
+  output.push_back(static_cast<uint8_t>(value & 0xFFu));
+  output.push_back(static_cast<uint8_t>((value >> 8) & 0xFFu));
+}
+
 float read_float(const uint8_t * data)
 {
   const uint32_t bits =
@@ -58,6 +76,25 @@ float read_float(const uint8_t * data)
     (static_cast<uint32_t>(data[2]) << 16) |
     (static_cast<uint32_t>(data[3]) << 24);
   return bits_to_float(bits);
+}
+
+int32_t read_int32(const uint8_t * data)
+{
+  const uint32_t bits =
+    static_cast<uint32_t>(data[0]) |
+    (static_cast<uint32_t>(data[1]) << 8) |
+    (static_cast<uint32_t>(data[2]) << 16) |
+    (static_cast<uint32_t>(data[3]) << 24);
+  int32_t value = 0;
+  std::memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+uint16_t read_uint16(const uint8_t * data)
+{
+  return static_cast<uint16_t>(
+    static_cast<uint16_t>(data[0]) |
+    static_cast<uint16_t>(static_cast<uint16_t>(data[1]) << 8));
 }
 
 void append_vector3(std::vector<uint8_t> & output, const Vector3 & value)
@@ -102,6 +139,21 @@ std::optional<Quaternion> decode_quaternion_at(const uint8_t * data, size_t size
   };
 }
 
+size_t joy_size(size_t axes_count, size_t buttons_count)
+{
+  if (axes_count > std::numeric_limits<uint16_t>::max()) {
+    throw std::out_of_range("Joy axes count exceeds the wire limit.");
+  }
+
+  if (buttons_count > std::numeric_limits<uint16_t>::max()) {
+    throw std::out_of_range("Joy button count exceeds the wire limit.");
+  }
+
+  return light_codec::kJoyHeaderSize +
+         (axes_count * sizeof(float)) +
+         (buttons_count * sizeof(int32_t));
+}
+
 }  // namespace
 
 bool Vector3::operator==(const Vector3 & other) const
@@ -122,6 +174,11 @@ bool Twist::operator==(const Twist & other) const
 bool Pose::operator==(const Pose & other) const
 {
   return position == other.position && orientation == other.orientation;
+}
+
+bool Joy::operator==(const Joy & other) const
+{
+  return axes == other.axes && buttons == other.buttons;
 }
 
 std::vector<uint8_t> encode_vector3(const Vector3 & value)
@@ -188,6 +245,53 @@ std::optional<Pose> decode_pose(const uint8_t * data, size_t size)
   }
 
   return Pose{*position, *orientation};
+}
+
+std::vector<uint8_t> encode_joy(const Joy & value)
+{
+  std::vector<uint8_t> output;
+  output.reserve(joy_size(value.axes.size(), value.buttons.size()));
+  write_uint16(output, static_cast<uint16_t>(value.axes.size()));
+  write_uint16(output, static_cast<uint16_t>(value.buttons.size()));
+  for (float axis : value.axes) {
+    write_float(output, axis);
+  }
+
+  for (int32_t button : value.buttons) {
+    write_int32(output, button);
+  }
+
+  return output;
+}
+
+std::optional<Joy> decode_joy(const uint8_t * data, size_t size)
+{
+  if (data == nullptr || size < light_codec::kJoyHeaderSize) {
+    return std::nullopt;
+  }
+
+  const uint16_t axes_count = read_uint16(data);
+  const uint16_t buttons_count = read_uint16(data + 2);
+  const size_t payload_size = joy_size(axes_count, buttons_count);
+  if (size < payload_size) {
+    return std::nullopt;
+  }
+
+  Joy joy;
+  joy.axes.reserve(axes_count);
+  joy.buttons.reserve(buttons_count);
+  size_t offset = light_codec::kJoyHeaderSize;
+  for (uint16_t i = 0; i < axes_count; ++i) {
+    joy.axes.push_back(read_float(data + offset));
+    offset += sizeof(float);
+  }
+
+  for (uint16_t i = 0; i < buttons_count; ++i) {
+    joy.buttons.push_back(read_int32(data + offset));
+    offset += sizeof(int32_t);
+  }
+
+  return joy;
 }
 
 }  // namespace horus_unity_bridge::horuslink
