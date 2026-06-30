@@ -87,23 +87,56 @@ TEST(HorusLinkOutboundFrameRouterTest, RoutesBulkReplaceLatestPayloadsToBulkQueu
 
   EXPECT_TRUE(first.accepted);
   EXPECT_TRUE(second.accepted);
+  EXPECT_TRUE(second.replaced);
   EXPECT_EQ(first.lane, Lane::Bulk);
   EXPECT_EQ(second.lane, Lane::Bulk);
   EXPECT_EQ(first.seq, 1u);
   EXPECT_EQ(second.seq, 2u);
-  EXPECT_EQ(router.bulk_depth(), 2u);
+  EXPECT_EQ(router.bulk_depth(), 1u);
 
   auto routed = router.pop(Lane::Bulk);
   ASSERT_TRUE(routed.has_value());
   EXPECT_EQ(routed->frame.header.channel_id, 9);
   EXPECT_EQ(routed->frame.header.flags, FrameFlags::RawOpaque | FrameFlags::ReplaceLatest);
-  EXPECT_EQ(routed->frame.header.seq, 1u);
+  EXPECT_EQ(routed->frame.header.seq, 2u);
   EXPECT_EQ(routed->frame.payload,
-      std::vector<uint8_t>(first_payload.begin(), first_payload.end()));
+      std::vector<uint8_t>(second_payload.begin(), second_payload.end()));
   EXPECT_FALSE(router.pop(Lane::Realtime).has_value());
 }
 
-TEST(HorusLinkOutboundFrameRouterTest, ReplaceLatestOverflowKeepsNewestFrame)
+TEST(HorusLinkOutboundFrameRouterTest, ReplaceLatestKeepsOneQueuedFramePerChannel)
+{
+  ChannelTable table;
+  activate_channel(table, 9, "/front_camera", Lane::Bulk, Delivery::ReplaceLatest);
+  activate_channel(table, 10, "/rear_camera", Lane::Bulk, Delivery::ReplaceLatest);
+  OutboundFrameRouter router(4, 4);
+  const std::array<uint8_t, 1> first_front{0x10};
+  const std::array<uint8_t, 1> second_front{0x20};
+  const std::array<uint8_t, 1> rear{0x30};
+
+  ASSERT_TRUE(router.enqueue_data(table, "/front_camera", first_front.data(),
+      first_front.size()).accepted);
+  auto replaced_front = router.enqueue_data(table, "/front_camera", second_front.data(),
+      second_front.size());
+  ASSERT_TRUE(router.enqueue_data(table, "/rear_camera", rear.data(), rear.size()).accepted);
+
+  EXPECT_TRUE(replaced_front.accepted);
+  EXPECT_TRUE(replaced_front.replaced);
+  EXPECT_EQ(router.bulk_depth(), 2u);
+
+  auto front = router.pop(Lane::Bulk);
+  ASSERT_TRUE(front.has_value());
+  EXPECT_EQ(front->frame.header.channel_id, 9);
+  EXPECT_EQ(front->frame.header.seq, 2u);
+  EXPECT_EQ(front->frame.payload, std::vector<uint8_t>(second_front.begin(), second_front.end()));
+
+  auto rear_frame = router.pop(Lane::Bulk);
+  ASSERT_TRUE(rear_frame.has_value());
+  EXPECT_EQ(rear_frame->frame.header.channel_id, 10);
+  EXPECT_EQ(rear_frame->frame.payload, std::vector<uint8_t>(rear.begin(), rear.end()));
+}
+
+TEST(HorusLinkOutboundFrameRouterTest, ReplaceLatestKeepsNewestFrame)
 {
   ChannelTable table;
   activate_channel(table, 9, "/camera", Lane::Bulk, Delivery::ReplaceLatest);
@@ -116,7 +149,7 @@ TEST(HorusLinkOutboundFrameRouterTest, ReplaceLatestOverflowKeepsNewestFrame)
   auto second = router.enqueue_data(table, "/camera", second_payload.data(), second_payload.size());
 
   EXPECT_TRUE(second.accepted);
-  EXPECT_TRUE(second.overflow);
+  EXPECT_FALSE(second.overflow);
   EXPECT_TRUE(second.replaced);
   ASSERT_TRUE(second.replaced_frame.has_value());
   EXPECT_EQ(second.replaced_frame->header.seq, 1u);

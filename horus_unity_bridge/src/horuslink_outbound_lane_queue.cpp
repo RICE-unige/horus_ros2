@@ -34,6 +34,22 @@ OutboundLaneQueue::OutboundLaneQueue(size_t max_depth)
 OutboundLaneEnqueueResult OutboundLaneQueue::enqueue(Frame frame)
 {
   OutboundLaneEnqueueResult result;
+  const bool replace_latest = is_replace_latest(frame);
+  if (replace_latest) {
+    for (auto it = frames_.begin(); it != frames_.end(); ++it) {
+      if (!is_replace_latest(*it) || it->header.channel_id != frame.header.channel_id) {
+        continue;
+      }
+
+      result.replaced_frame = std::move(*it);
+      *it = std::move(frame);
+      result.accepted = true;
+      result.replaced = true;
+      result.depth = frames_.size();
+      return result;
+    }
+  }
+
   if (frames_.size() < max_depth_) {
     frames_.push_back(std::move(frame));
     result.accepted = true;
@@ -42,7 +58,7 @@ OutboundLaneEnqueueResult OutboundLaneQueue::enqueue(Frame frame)
   }
 
   result.overflow = true;
-  if (!is_replace_latest(frame)) {
+  if (!replace_latest) {
     result.depth = frames_.size();
     return result;
   }

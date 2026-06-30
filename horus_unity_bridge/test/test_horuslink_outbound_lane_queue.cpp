@@ -25,10 +25,10 @@ namespace horus_unity_bridge::horuslink
 namespace
 {
 
-Frame make_frame(uint32_t seq, bool replace_latest = false)
+Frame make_frame(uint32_t seq, bool replace_latest = false, uint16_t channel_id = 3)
 {
   Frame frame;
-  frame.header.channel_id = 3;
+  frame.header.channel_id = channel_id;
   frame.header.msg_type = MessageType::Data;
   frame.header.flags = FrameFlags::RawOpaque;
   if (replace_latest) {
@@ -61,13 +61,31 @@ TEST(HorusLinkOutboundLaneQueueTest, ReliableOverflowIsRejectedWithoutDroppingQu
   EXPECT_FALSE(queue.pop().has_value());
 }
 
-TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestOverflowReplacesOldestReplaceableFrame)
+TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestReplacesQueuedFrameForSameChannel)
 {
   OutboundLaneQueue queue(2);
   ASSERT_TRUE(queue.enqueue(make_frame(1, true)).accepted);
-  ASSERT_TRUE(queue.enqueue(make_frame(2, true)).accepted);
 
-  auto replacement = queue.enqueue(make_frame(3, true));
+  auto replacement = queue.enqueue(make_frame(2, true));
+
+  EXPECT_TRUE(replacement.accepted);
+  EXPECT_FALSE(replacement.overflow);
+  EXPECT_TRUE(replacement.replaced);
+  ASSERT_TRUE(replacement.replaced_frame.has_value());
+  EXPECT_EQ(replacement.replaced_frame->header.seq, 1u);
+  auto first = queue.pop();
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->header.seq, 2u);
+  EXPECT_FALSE(queue.pop().has_value());
+}
+
+TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestOverflowReplacesOldestReplaceableFrame)
+{
+  OutboundLaneQueue queue(2);
+  ASSERT_TRUE(queue.enqueue(make_frame(1, true, 3)).accepted);
+  ASSERT_TRUE(queue.enqueue(make_frame(2, true, 4)).accepted);
+
+  auto replacement = queue.enqueue(make_frame(3, true, 5));
 
   EXPECT_TRUE(replacement.accepted);
   EXPECT_TRUE(replacement.overflow);
@@ -82,7 +100,7 @@ TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestOverflowReplacesOldestReplacea
   EXPECT_EQ(second->header.seq, 2u);
 }
 
-TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestOverflowPreservesReliableFrames)
+TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestPreservesReliableFrames)
 {
   OutboundLaneQueue queue(2);
   ASSERT_TRUE(queue.enqueue(make_frame(1, false)).accepted);
