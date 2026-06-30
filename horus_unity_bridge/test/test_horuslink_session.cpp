@@ -66,6 +66,17 @@ Frame make_service_frame(
   return frame;
 }
 
+Frame make_keepalive_frame(uint32_t seq, uint16_t channel_id = 0, uint32_t corr_id = 0)
+{
+  Frame frame;
+  frame.header.channel_id = channel_id;
+  frame.header.msg_type = MessageType::Keepalive;
+  frame.header.seq = seq;
+  frame.header.corr_id = corr_id;
+  frame.header.length = 0;
+  return frame;
+}
+
 void register_bulk_channel(Session & session, uint16_t channel_id)
 {
   const SubscribeRequest request{
@@ -180,6 +191,29 @@ TEST(HorusLinkSessionTest, DataFrameForUnknownChannelIsRejected)
   auto rejected = session.handle_frame(data, Lane::Bulk);
 
   EXPECT_TRUE(rejected.empty());
+}
+
+TEST(HorusLinkSessionTest, KeepaliveFrameRecordsLastSequenceWithoutResponse)
+{
+  Session session;
+  Frame keepalive = make_keepalive_frame(55);
+
+  auto responses = session.handle_frame(keepalive, Lane::Realtime);
+
+  EXPECT_TRUE(responses.empty());
+  ASSERT_TRUE(session.last_keepalive_sequence().has_value());
+  EXPECT_EQ(*session.last_keepalive_sequence(), 55u);
+}
+
+TEST(HorusLinkSessionTest, MalformedKeepaliveFrameIsIgnored)
+{
+  Session session;
+  Frame keepalive = make_keepalive_frame(55, 1, 99);
+
+  auto responses = session.handle_frame(keepalive, Lane::Realtime);
+
+  EXPECT_TRUE(responses.empty());
+  EXPECT_FALSE(session.last_keepalive_sequence().has_value());
 }
 
 TEST(HorusLinkSessionTest, ServiceFramesAreAcceptedOnlyWithCorrelationIdOnNegotiatedLane)

@@ -38,6 +38,10 @@ public:
   ChannelTable & channel_table() {return channel_table_;}
 
   const std::optional<HelloMessage> & peer_hello() const {return peer_hello_;}
+  const std::optional<uint32_t> & last_keepalive_sequence() const
+  {
+    return last_keepalive_sequence_;
+  }
 
 private:
   std::vector<Frame> handle_control_frame(const Frame & frame);
@@ -47,6 +51,7 @@ private:
   ChannelTable channel_table_;
   ServiceTable service_table_;
   std::optional<HelloMessage> peer_hello_;
+  std::optional<uint32_t> last_keepalive_sequence_;
   uint32_t control_seq_ = 0;
 };
 

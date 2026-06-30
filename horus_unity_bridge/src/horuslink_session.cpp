@@ -31,6 +31,15 @@ std::vector<Frame> Session::handle_frame(const Frame & frame, Lane lane)
     return handle_control_frame(frame);
   }
 
+  if (frame.header.msg_type == MessageType::Keepalive &&
+    frame.header.channel_id == 0 &&
+    frame.header.corr_id == 0 &&
+    frame.payload.empty())
+  {
+    last_keepalive_sequence_ = frame.header.seq;
+    return {};
+  }
+
   if (frame.header.msg_type == MessageType::Data &&
     channel_table_.can_accept_data_frame(frame.header, lane))
   {
