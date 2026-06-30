@@ -102,6 +102,17 @@ TEST(HorusLinkControlMessagesTest, ChannelCloseRequestRoundTrips)
   EXPECT_FALSE(decode_service_client_request(encoded.data(), encoded.size()).has_value());
 }
 
+TEST(HorusLinkControlMessagesTest, TopicTableRequestEncodesStableGoldenVector)
+{
+  const auto encoded = encode_topic_table_request();
+  EXPECT_EQ(encoded, load_horuslink_golden_vector("topic_table_request"));
+
+  EXPECT_TRUE(decode_topic_table_request(encoded.data(), encoded.size()));
+  EXPECT_FALSE(decode_subscribe_request(encoded.data(), encoded.size()).has_value());
+  EXPECT_FALSE(decode_publisher_request(encoded.data(), encoded.size()).has_value());
+  EXPECT_FALSE(decode_service_client_request(encoded.data(), encoded.size()).has_value());
+}
+
 TEST(HorusLinkControlMessagesTest, SubscribeAckRoundTripsAcceptedAndRejectedMessages)
 {
   const SubscribeAck accepted{9, SubscribeStatus::Accepted, ""};

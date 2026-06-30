@@ -279,6 +279,46 @@ TEST(HorusLinkConnectionManagerTest, StopClosesUnpairedPendingLaneSockets)
   EXPECT_TRUE(wait_for_peer_close(realtime.get()));
 }
 
+TEST(HorusLinkConnectionManagerTest, RepliesToTopicTableRequestOnRealtimeLane)
+{
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
+  std::atomic<int> connected_id{0};
+  std::atomic<int> request_connection_id{0};
+  const std::vector<TopicEntry> entries{
+    TopicEntry{0, "/tf", "tf2_msgs/msg/TFMessage", Lane::Realtime, Delivery::ReliableFifo},
+    TopicEntry{0, "/camera", "sensor_msgs/msg/Image", Lane::Bulk, Delivery::ReplaceLatest}
+  };
+
+  manager.set_connection_callback(
+    [&connected_id](int connection_id, const std::string &) {
+      connected_id = connection_id;
+    });
+  manager.set_topic_table_callback(
+    [&request_connection_id, &entries](int connection_id) {
+      request_connection_id = connection_id;
+      return entries;
+    });
+  ASSERT_TRUE(manager.start());
+
+  auto realtime = connect_to(manager.realtime_port());
+  auto bulk = connect_to(manager.bulk_port());
+  ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
+
+  send_frame(realtime.get(), make_control_frame(encode_topic_table_request(), 2));
+
+  Frame topic_table_frame = recv_frame(realtime.get());
+  ASSERT_EQ(topic_table_frame.header.channel_id, 0u);
+  ASSERT_EQ(topic_table_frame.header.msg_type, MessageType::Control);
+  auto decoded = decode_topic_table(
+    topic_table_frame.payload.data(),
+    topic_table_frame.payload.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, entries);
+  EXPECT_EQ(request_connection_id.load(), connected_id.load());
+}
+
 TEST(HorusLinkConnectionManagerTest, ChannelCloseDispatchesKindAndRemovesChannel)
 {
   auto config = make_config();

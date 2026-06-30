@@ -81,6 +81,7 @@ public:
         int connection_id,
         ChannelRegistrationKind registration_kind,
         const ChannelDescriptor & channel)>;
+  using TopicTableCallback = std::function<std::vector<TopicEntry>(int connection_id)>;
   using ConnectionCallback = std::function<void(int connection_id, const std::string & ip)>;
 
   explicit HorusLinkConnectionManager(Config config);
@@ -130,6 +131,10 @@ public:
   void set_channel_close_callback(ChannelCloseCallback callback)
   {
     channel_close_callback_ = std::move(callback);
+  }
+  void set_topic_table_callback(TopicTableCallback callback)
+  {
+    topic_table_callback_ = std::move(callback);
   }
   void set_connection_callback(ConnectionCallback callback)
   {
@@ -203,6 +208,7 @@ private:
   bool handle_channel_close_request(
     const std::shared_ptr<Connection> & connection,
     const ChannelCloseRequest & request);
+  bool handle_topic_table_request(const std::shared_ptr<Connection> & connection);
   bool send_frame(const std::shared_ptr<Connection> & connection, Lane lane, const Frame & frame);
   bool drain_lane(const std::shared_ptr<Connection> & connection, Lane lane);
   void disconnect_connection(int connection_id);
@@ -232,6 +238,7 @@ private:
   PublisherCallback publisher_callback_;
   ServiceClientCallback service_client_callback_;
   ChannelCloseCallback channel_close_callback_;
+  TopicTableCallback topic_table_callback_;
   ConnectionCallback connection_callback_;
   ConnectionCallback disconnection_callback_;
 };

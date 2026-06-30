@@ -20,6 +20,7 @@
 #include "connection_manager.hpp"
 #include "protocol_handler.hpp"
 #include "horus_unity_bridge/horuslink_channel_table.hpp"
+#include "horus_unity_bridge/horuslink_control_messages.hpp"
 #include "topic_manager.hpp"
 #include "service_manager.hpp"
 #include "control_lease_manager.hpp"
@@ -32,6 +33,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+#include <vector>
 
 #ifdef ENABLE_WEBRTC
 #include "horus_unity_bridge/webrtc_manager.hpp"
@@ -108,6 +110,11 @@ public:
    * @return true if message was handled successfully
    */
   bool route_message(int client_fd, const ProtocolMessage & message);
+
+  /**
+   * @brief Build the HorusLink topic discovery table from the current ROS graph.
+   */
+  std::vector<horuslink::TopicEntry> get_horuslink_topic_table();
 
   /**
    * @brief Register a HorusLink topic subscription after channel negotiation.

@@ -446,6 +446,21 @@ std::optional<ChannelCloseRequest> decode_channel_close_request(const uint8_t * 
   return request;
 }
 
+std::vector<uint8_t> encode_topic_table_request()
+{
+  return encode_tlvs({
+      byte_record(
+        control_tlv::kKind,
+        static_cast<uint8_t>(ControlMessageKind::TopicTableRequest)),
+      u16_record(control_tlv::kProtocolVersion, control_tlv::kProtocolVersionValue)
+    });
+}
+
+bool decode_topic_table_request(const uint8_t * data, size_t size)
+{
+  return decode_records(data, size, ControlMessageKind::TopicTableRequest).has_value();
+}
+
 std::vector<uint8_t> encode_subscribe_ack(const SubscribeAck & ack)
 {
   return encode_tlvs({

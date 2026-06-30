@@ -544,6 +544,10 @@ void HorusLinkConnectionManager::handle_received_frame(
       handle_channel_close_request(connection, *channel_close_request);
       return;
     }
+    if (decode_topic_table_request(frame.payload.data(), frame.payload.size())) {
+      handle_topic_table_request(connection);
+      return;
+    }
   }
 
   std::vector<std::pair<ChannelDescriptor, Frame>> accepted;
@@ -766,6 +770,22 @@ bool HorusLinkConnectionManager::handle_channel_close_request(
   }
 
   return true;
+}
+
+bool HorusLinkConnectionManager::handle_topic_table_request(
+  const std::shared_ptr<Connection> & connection)
+{
+  std::vector<TopicEntry> entries;
+  if (topic_table_callback_) {
+    entries = topic_table_callback_(connection->id);
+  }
+
+  Frame topic_table_frame;
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    topic_table_frame = connection->session.make_topic_table_frame(entries);
+  }
+  return send_frame(connection, Lane::Realtime, topic_table_frame);
 }
 
 bool HorusLinkConnectionManager::send_frame(

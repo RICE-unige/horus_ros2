@@ -112,6 +112,22 @@ OutboundMessagePolicy policy_from_horuslink_channel(
          OutboundMessagePolicy::Strict;
 }
 
+horuslink::Lane horuslink_lane_from_policy(OutboundMessagePolicy policy)
+{
+  return policy == OutboundMessagePolicy::BulkStrict ||
+         policy == OutboundMessagePolicy::BulkReplaceable ?
+         horuslink::Lane::Bulk :
+         horuslink::Lane::Realtime;
+}
+
+horuslink::Delivery horuslink_delivery_from_policy(OutboundMessagePolicy policy)
+{
+  return policy == OutboundMessagePolicy::Replaceable ||
+         policy == OutboundMessagePolicy::BulkReplaceable ?
+         horuslink::Delivery::ReplaceLatest :
+         horuslink::Delivery::ReliableFifo;
+}
+
 }  // namespace
 
 MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
@@ -300,6 +316,27 @@ bool MessageRouter::route_message(int client_fd, const ProtocolMessage & message
   }
 
   return success;
+}
+
+std::vector<horuslink::TopicEntry> MessageRouter::get_horuslink_topic_table()
+{
+  auto topic_names_and_types = get_topic_names_and_types();
+  std::vector<horuslink::TopicEntry> entries;
+  entries.reserve(topic_names_and_types.size());
+
+  for (const auto & [topic, types] : topic_names_and_types) {
+    const std::string type_name = types.empty() ? "unknown" : types.front();
+    const OutboundMessagePolicy policy = classify_subscription_policy(topic, type_name);
+    entries.push_back(horuslink::TopicEntry{
+        0,
+        topic,
+        type_name,
+        horuslink_lane_from_policy(policy),
+        horuslink_delivery_from_policy(policy)
+      });
+  }
+
+  return entries;
 }
 
 bool MessageRouter::register_horuslink_subscriber(

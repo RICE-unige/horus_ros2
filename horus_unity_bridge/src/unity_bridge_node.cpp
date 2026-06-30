@@ -287,6 +287,11 @@ void UnityBridgeNode::setup_horuslink_callbacks()
       handle_horuslink_channel_close(connection_id, registration_kind, channel);
     });
 
+  horuslink_connection_manager_->set_topic_table_callback(
+    [this](int) {
+      return router_->get_horuslink_topic_table();
+    });
+
   router_->set_send_callback(
     [this](int connection_id,
     const std::string & topic,
