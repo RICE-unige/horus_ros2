@@ -16,37 +16,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/horuslink_light_codecs.hpp"
+#include "horuslink_golden_vectors.hpp"
 
-#include <fstream>
 #include <gtest/gtest.h>
-#include <stdexcept>
-#include <string>
 
 namespace horus_unity_bridge::horuslink
 {
-
-namespace
-{
-
-std::vector<uint8_t> load_golden_vector(const std::string & name)
-{
-  const std::string path =
-    std::string(HORUS_UNITY_BRIDGE_TEST_SOURCE_DIR) + "/test/golden_vectors/" + name + ".hex";
-  std::ifstream file(path);
-  if (!file.is_open()) {
-    throw std::runtime_error("Could not open HorusLink golden vector: " + path);
-  }
-
-  std::vector<uint8_t> output;
-  std::string token;
-  while (file >> token) {
-    output.push_back(static_cast<uint8_t>(std::stoul(token, nullptr, 16)));
-  }
-
-  return output;
-}
-
-}  // namespace
 
 TEST(HorusLinkLightCodecsTest, TwistEncodesStableLittleEndianFloatVector)
 {
@@ -56,7 +31,7 @@ TEST(HorusLinkLightCodecsTest, TwistEncodesStableLittleEndianFloatVector)
   };
 
   const auto encoded = encode_twist(twist);
-  const auto expected = load_golden_vector("twist");
+  const auto expected = load_horuslink_golden_vector("twist");
   EXPECT_EQ(encoded, expected);
 
   const auto decoded = decode_twist(encoded.data(), encoded.size());
@@ -85,7 +60,7 @@ TEST(HorusLinkLightCodecsTest, JoyEncodesCountsAxesAndButtons)
   };
 
   const auto encoded = encode_joy(joy);
-  const auto expected = load_golden_vector("joy");
+  const auto expected = load_horuslink_golden_vector("joy");
   EXPECT_EQ(encoded, expected);
 
   const auto decoded = decode_joy(encoded.data(), encoded.size());
@@ -105,7 +80,7 @@ TEST(HorusLinkLightCodecsTest, TfMessageEncodesStampedTransformsWithFrameIds)
   };
 
   const auto encoded = encode_tf_message({transform});
-  const auto expected = load_golden_vector("tf_message");
+  const auto expected = load_horuslink_golden_vector("tf_message");
   EXPECT_EQ(encoded, expected);
 
   const auto decoded = decode_tf_message(encoded.data(), encoded.size());

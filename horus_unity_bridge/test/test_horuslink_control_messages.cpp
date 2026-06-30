@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/horuslink_control_messages.hpp"
+#include "horuslink_golden_vectors.hpp"
 
 #include <gtest/gtest.h>
 
@@ -25,13 +26,7 @@ namespace horus_unity_bridge::horuslink
 TEST(HorusLinkControlMessagesTest, HelloEncodesStableGoldenVector)
 {
   const auto encoded = encode_hello(HelloMessage{EndpointRole::UnityClient, 0x01020304, 1000});
-  const std::vector<uint8_t> expected{
-    0x01, 0x00, 0x01, 0x00, 0x01,
-    0x02, 0x00, 0x02, 0x00, 0x01, 0x00,
-    0x03, 0x00, 0x01, 0x00, 0x01,
-    0x09, 0x00, 0x04, 0x00, 0x04, 0x03, 0x02, 0x01,
-    0x0A, 0x00, 0x04, 0x00, 0xE8, 0x03, 0x00, 0x00
-  };
+  const auto expected = load_horuslink_golden_vector("hello");
   EXPECT_EQ(encoded, expected);
 
   auto decoded = decode_hello(encoded.data(), encoded.size());
@@ -49,18 +44,7 @@ TEST(HorusLinkControlMessagesTest, SubscribeRequestEncodesStableGoldenVector)
     Delivery::ReliableFifo
   };
   const auto encoded = encode_subscribe_request(request);
-  const std::vector<uint8_t> expected{
-    0x01, 0x00, 0x01, 0x00, 0x02,
-    0x02, 0x00, 0x02, 0x00, 0x01, 0x00,
-    0x04, 0x00, 0x02, 0x00, 0x07, 0x00,
-    0x05, 0x00, 0x03, 0x00, 0x2F, 0x74, 0x66,
-    0x06, 0x00, 0x16, 0x00,
-    0x74, 0x66, 0x32, 0x5F, 0x6D, 0x73, 0x67, 0x73,
-    0x2F, 0x6D, 0x73, 0x67, 0x2F, 0x54, 0x46, 0x4D,
-    0x65, 0x73, 0x73, 0x61, 0x67, 0x65,
-    0x07, 0x00, 0x01, 0x00, 0x01,
-    0x08, 0x00, 0x01, 0x00, 0x01
-  };
+  const auto expected = load_horuslink_golden_vector("subscribe_request");
   EXPECT_EQ(encoded, expected);
 
   auto decoded = decode_subscribe_request(encoded.data(), encoded.size());
@@ -72,12 +56,14 @@ TEST(HorusLinkControlMessagesTest, SubscribeAckRoundTripsAcceptedAndRejectedMess
 {
   const SubscribeAck accepted{9, SubscribeStatus::Accepted, ""};
   const auto accepted_bytes = encode_subscribe_ack(accepted);
+  EXPECT_EQ(accepted_bytes, load_horuslink_golden_vector("subscribe_ack_accepted"));
   auto accepted_decoded = decode_subscribe_ack(accepted_bytes.data(), accepted_bytes.size());
   ASSERT_TRUE(accepted_decoded.has_value());
   EXPECT_EQ(*accepted_decoded, accepted);
 
   const SubscribeAck rejected{9, SubscribeStatus::Rejected, "unknown topic"};
   const auto rejected_bytes = encode_subscribe_ack(rejected);
+  EXPECT_EQ(rejected_bytes, load_horuslink_golden_vector("subscribe_ack_rejected"));
   auto rejected_decoded = decode_subscribe_ack(rejected_bytes.data(), rejected_bytes.size());
   ASSERT_TRUE(rejected_decoded.has_value());
   EXPECT_EQ(*rejected_decoded, rejected);
@@ -91,6 +77,7 @@ TEST(HorusLinkControlMessagesTest, TopicTableRoundTripsRepeatedEntries)
   };
 
   const auto encoded = encode_topic_table(entries);
+  EXPECT_EQ(encoded, load_horuslink_golden_vector("topic_table"));
   auto decoded = decode_topic_table(encoded.data(), encoded.size());
   ASSERT_TRUE(decoded.has_value());
   EXPECT_EQ(*decoded, entries);

@@ -16,9 +16,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/horuslink_protocol.hpp"
+#include "horuslink_golden_vectors.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <vector>
 
@@ -38,15 +40,9 @@ TEST(HorusLinkProtocolTest, HeaderEncodesLittleEndianFixedSixteenByteFrame)
   std::array<uint8_t, FrameHeader::kSize> bytes{};
   ASSERT_TRUE(encode_header(header, bytes));
 
-  const std::array<uint8_t, FrameHeader::kSize> expected{
-    0x34, 0x12,
-    0x01,
-    0x09,
-    0x44, 0x33, 0x22, 0x11,
-    0x88, 0x77, 0x66, 0x55,
-    0xCC, 0xBB, 0xAA, 0x99
-  };
-  EXPECT_EQ(bytes, expected);
+  const auto expected = load_horuslink_golden_vector("frame_header");
+  ASSERT_EQ(expected.size(), bytes.size());
+  EXPECT_TRUE(std::equal(bytes.begin(), bytes.end(), expected.begin(), expected.end()));
 
   FrameHeader decoded;
   ASSERT_TRUE(decode_header(bytes.data(), bytes.size(), decoded));
@@ -69,11 +65,7 @@ TEST(HorusLinkProtocolTest, TlvCodecRoundTripsRecordsInOrder)
   };
 
   const auto encoded = encode_tlvs(records);
-  const std::vector<uint8_t> expected{
-    0x01, 0x00, 0x02, 0x00, 0x10, 0x11,
-    0x34, 0x12, 0x00, 0x00,
-    0x02, 0x00, 0x03, 0x00, 0x20, 0x21, 0x22
-  };
+  const auto expected = load_horuslink_golden_vector("tlv_records");
   EXPECT_EQ(encoded, expected);
 
   std::vector<TlvRecord> decoded;
