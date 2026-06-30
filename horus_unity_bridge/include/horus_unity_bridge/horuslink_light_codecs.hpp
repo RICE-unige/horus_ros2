@@ -61,6 +61,16 @@ struct Pose
   bool operator==(const Pose & other) const;
 };
 
+struct PoseStamped
+{
+  uint32_t seconds = 0;
+  uint32_t nanoseconds = 0;
+  std::string frame_id;
+  Pose pose;
+
+  bool operator==(const PoseStamped & other) const;
+};
+
 struct Joy
 {
   std::vector<float> axes;
@@ -87,6 +97,7 @@ constexpr size_t kVector3Size = 12;
 constexpr size_t kQuaternionSize = 16;
 constexpr size_t kTwistSize = kVector3Size * 2;
 constexpr size_t kPoseSize = kVector3Size + kQuaternionSize;
+constexpr size_t kPoseStampedHeaderSize = 10;
 constexpr size_t kJoyHeaderSize = 4;
 constexpr size_t kTfMessageHeaderSize = 2;
 constexpr size_t kTransformStampedHeaderSize = 12;
@@ -104,6 +115,9 @@ std::optional<Twist> decode_twist(const uint8_t * data, size_t size);
 
 std::vector<uint8_t> encode_pose(const Pose & value);
 std::optional<Pose> decode_pose(const uint8_t * data, size_t size);
+
+std::vector<uint8_t> encode_pose_stamped(const PoseStamped & value);
+std::optional<PoseStamped> decode_pose_stamped(const uint8_t * data, size_t size);
 
 std::vector<uint8_t> encode_joy(const Joy & value);
 std::optional<Joy> decode_joy(const uint8_t * data, size_t size);

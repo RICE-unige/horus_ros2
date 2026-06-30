@@ -52,6 +52,24 @@ TEST(HorusLinkLightCodecsTest, PoseRoundTripsPositionAndOrientation)
   EXPECT_EQ(*decoded, pose);
 }
 
+TEST(HorusLinkLightCodecsTest, PoseStampedRoundTripsHeaderFrameAndPose)
+{
+  const PoseStamped pose{
+    12,
+    345,
+    "drone/map",
+    Pose{
+      Vector3{1.25F, 2.5F, 5.0F},
+      Quaternion{0.0F, 0.70710677F, 0.0F, 0.70710677F}
+    }
+  };
+
+  const auto encoded = encode_pose_stamped(pose);
+  const auto decoded = decode_pose_stamped(encoded.data(), encoded.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, pose);
+}
+
 TEST(HorusLinkLightCodecsTest, JoyEncodesCountsAxesAndButtons)
 {
   const Joy joy{
@@ -97,6 +115,9 @@ TEST(HorusLinkLightCodecsTest, DecodersRejectShortBuffers)
   EXPECT_FALSE(decode_quaternion(bytes.data(), light_codec::kQuaternionSize - 1).has_value());
   EXPECT_FALSE(decode_twist(bytes.data(), light_codec::kTwistSize - 1).has_value());
   EXPECT_FALSE(decode_pose(bytes.data(), light_codec::kPoseSize - 1).has_value());
+  EXPECT_FALSE(decode_pose_stamped(
+    bytes.data(),
+    light_codec::kPoseStampedHeaderSize - 1).has_value());
   EXPECT_FALSE(decode_joy(bytes.data(), light_codec::kJoyHeaderSize - 1).has_value());
   const std::vector<uint8_t> truncated_joy{0x01, 0x00, 0x00, 0x00};
   EXPECT_FALSE(decode_joy(truncated_joy.data(), truncated_joy.size()).has_value());
@@ -113,6 +134,7 @@ TEST(HorusLinkLightCodecsTest, DecodersRejectNullPointers)
   EXPECT_FALSE(decode_quaternion(nullptr, light_codec::kQuaternionSize).has_value());
   EXPECT_FALSE(decode_twist(nullptr, light_codec::kTwistSize).has_value());
   EXPECT_FALSE(decode_pose(nullptr, light_codec::kPoseSize).has_value());
+  EXPECT_FALSE(decode_pose_stamped(nullptr, light_codec::kPoseStampedHeaderSize).has_value());
   EXPECT_FALSE(decode_joy(nullptr, light_codec::kJoyHeaderSize).has_value());
   EXPECT_FALSE(decode_transform_stamped(nullptr,
       light_codec::kTransformStampedHeaderSize).has_value());

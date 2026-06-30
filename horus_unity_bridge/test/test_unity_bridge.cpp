@@ -25,6 +25,7 @@
 
 #include <gtest/gtest.h>
 #include <example_interfaces/srv/add_two_ints.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
@@ -961,6 +962,105 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightTwistFramesToRosTopic)
   EXPECT_DOUBLE_EQ(received_twist.angular.x, twist.angular.x);
   EXPECT_DOUBLE_EQ(received_twist.angular.y, twist.angular.y);
   EXPECT_DOUBLE_EQ(received_twist.angular.z, twist.angular.z);
+
+  (void)subscriber;
+  (void)bulk;
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPoseStampedFramesToRosTopic)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+  expect_bridge_hello(realtime.get());
+
+  const std::string topic = "/horuslink_unity_publish_pose_stamped";
+  const uint16_t channel_id = 39;
+  const horuslink::PublisherRequest request{
+    channel_id,
+    topic,
+    "geometry_msgs/msg/PoseStamped",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_publisher_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("horuslink_pose_stamped_subscriber");
+  geometry_msgs::msg::PoseStamped received_pose;
+  bool received = false;
+  auto subscriber = subscriber_node->create_subscription<geometry_msgs::msg::PoseStamped>(
+    topic,
+    10,
+    [&received_pose, &received](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+      received_pose = *msg;
+      received = true;
+    });
+
+  for (int attempt = 0; attempt < 50 && subscriber_node->count_publishers(topic) == 0; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
+
+  const horuslink::PoseStamped pose{
+    12,
+    345,
+    "drone/map",
+    horuslink::Pose{
+      horuslink::Vector3{1.25F, -0.5F, 0.75F},
+      horuslink::Quaternion{0.0F, 0.0F, 0.70710677F, 0.70710677F}
+    }
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_data_frame(channel_id, horuslink::encode_pose_stamped(pose)));
+
+  for (int attempt = 0; attempt < 50 && !received; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  ASSERT_TRUE(received);
+  EXPECT_EQ(received_pose.header.stamp.sec, static_cast<int32_t>(pose.seconds));
+  EXPECT_EQ(received_pose.header.stamp.nanosec, pose.nanoseconds);
+  EXPECT_EQ(received_pose.header.frame_id, pose.frame_id);
+  EXPECT_DOUBLE_EQ(received_pose.pose.position.x, pose.pose.position.x);
+  EXPECT_DOUBLE_EQ(received_pose.pose.position.y, pose.pose.position.y);
+  EXPECT_DOUBLE_EQ(received_pose.pose.position.z, pose.pose.position.z);
+  EXPECT_DOUBLE_EQ(received_pose.pose.orientation.x, pose.pose.orientation.x);
+  EXPECT_DOUBLE_EQ(received_pose.pose.orientation.y, pose.pose.orientation.y);
+  EXPECT_DOUBLE_EQ(received_pose.pose.orientation.z, pose.pose.orientation.z);
+  EXPECT_DOUBLE_EQ(received_pose.pose.orientation.w, pose.pose.orientation.w);
 
   (void)subscriber;
   (void)bulk;

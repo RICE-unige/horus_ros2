@@ -19,6 +19,7 @@
 #include "horus_unity_bridge/bridge_metrics.hpp"
 #include "horus_unity_bridge/horuslink_light_codecs.hpp"
 #include "horus_unity_bridge/serialized_payload.hpp"
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/serialization.hpp>
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
@@ -389,6 +390,32 @@ bool TopicManager::publish_horuslink_message(
     twist_msg.angular.y = decoded->angular.y;
     twist_msg.angular.z = decoded->angular.z;
     return publish_message(topic, serialize_ros_message(twist_msg));
+  }
+
+  if (message_type == "geometry_msgs/msg/PoseStamped") {
+    const auto decoded = horuslink::decode_pose_stamped(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink PoseStamped payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    geometry_msgs::msg::PoseStamped pose_msg;
+    pose_msg.header.stamp.sec = static_cast<int32_t>(decoded->seconds);
+    pose_msg.header.stamp.nanosec = decoded->nanoseconds;
+    pose_msg.header.frame_id = decoded->frame_id;
+    pose_msg.pose.position.x = decoded->pose.position.x;
+    pose_msg.pose.position.y = decoded->pose.position.y;
+    pose_msg.pose.position.z = decoded->pose.position.z;
+    pose_msg.pose.orientation.x = decoded->pose.orientation.x;
+    pose_msg.pose.orientation.y = decoded->pose.orientation.y;
+    pose_msg.pose.orientation.z = decoded->pose.orientation.z;
+    pose_msg.pose.orientation.w = decoded->pose.orientation.w;
+    return publish_message(topic, serialize_ros_message(pose_msg));
   }
 
   const auto serialized_msg = detail::add_cdr_header(payload);

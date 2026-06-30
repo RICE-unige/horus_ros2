@@ -187,6 +187,13 @@ size_t transform_stamped_size(const TransformStamped & value)
          light_codec::kTransformStampedFixedPayloadSize;
 }
 
+size_t pose_stamped_size(const PoseStamped & value)
+{
+  return light_codec::kPoseStampedHeaderSize +
+         frame_id_size(value.frame_id) +
+         light_codec::kPoseSize;
+}
+
 }  // namespace
 
 bool Vector3::operator==(const Vector3 & other) const
@@ -207,6 +214,14 @@ bool Twist::operator==(const Twist & other) const
 bool Pose::operator==(const Pose & other) const
 {
   return position == other.position && orientation == other.orientation;
+}
+
+bool PoseStamped::operator==(const PoseStamped & other) const
+{
+  return seconds == other.seconds &&
+         nanoseconds == other.nanoseconds &&
+         frame_id == other.frame_id &&
+         pose == other.pose;
 }
 
 bool Joy::operator==(const Joy & other) const
@@ -288,6 +303,54 @@ std::optional<Pose> decode_pose(const uint8_t * data, size_t size)
   }
 
   return Pose{*position, *orientation};
+}
+
+std::vector<uint8_t> encode_pose_stamped(const PoseStamped & value)
+{
+  std::vector<uint8_t> output;
+  output.reserve(pose_stamped_size(value));
+  write_uint32(output, value.seconds);
+  write_uint32(output, value.nanoseconds);
+  write_uint16(output, static_cast<uint16_t>(value.frame_id.size()));
+  output.insert(output.end(), value.frame_id.begin(), value.frame_id.end());
+  const auto encoded_pose = encode_pose(value.pose);
+  output.insert(output.end(), encoded_pose.begin(), encoded_pose.end());
+  return output;
+}
+
+std::optional<PoseStamped> decode_pose_stamped(const uint8_t * data, size_t size)
+{
+  if (data == nullptr || size < light_codec::kPoseStampedHeaderSize) {
+    return std::nullopt;
+  }
+
+  const uint32_t seconds = read_uint32(data);
+  const uint32_t nanoseconds = read_uint32(data + 4);
+  const uint16_t frame_id_length = read_uint16(data + 8);
+  const size_t payload_size =
+    light_codec::kPoseStampedHeaderSize +
+    frame_id_length +
+    light_codec::kPoseSize;
+  if (size < payload_size) {
+    return std::nullopt;
+  }
+
+  size_t offset = light_codec::kPoseStampedHeaderSize;
+  const std::string frame_id(
+    reinterpret_cast<const char *>(data + offset),
+    frame_id_length);
+  offset += frame_id_length;
+  const auto pose = decode_pose(data + offset, light_codec::kPoseSize);
+  if (!pose.has_value()) {
+    return std::nullopt;
+  }
+
+  return PoseStamped{
+    seconds,
+    nanoseconds,
+    frame_id,
+    *pose
+  };
 }
 
 std::vector<uint8_t> encode_joy(const Joy & value)
