@@ -3,6 +3,8 @@ horus_unity_bridge:
     # Network Configuration
     tcp_ip: "0.0.0.0"
     tcp_port: 10000
+    transport_protocol: "horuslink"
+    horuslink_bulk_port: 10001
     max_connections: 10
     
     # Performance Tuning

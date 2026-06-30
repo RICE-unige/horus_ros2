@@ -622,11 +622,15 @@ TEST_F(BridgeRuntimeTest, PendingServiceStateIsTrackedPerClientAndClearedIndepen
 TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAlive)
 {
   const uint16_t port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
   ASSERT_NE(port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(port, bulk_port);
   rclcpp::NodeOptions options;
   options.parameter_overrides({
       rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
       rclcpp::Parameter("tcp_port", static_cast<int>(port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
       rclcpp::Parameter("max_connections", 7),
       rclcpp::Parameter("socket_buffer_size", 131072),
       rclcpp::Parameter("message_queue_size", 17),
@@ -642,9 +646,10 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
 
   UnityBridgeNode node(options);
   EXPECT_EQ(node.bind_address(), "127.0.0.1");
-  EXPECT_EQ(node.transport_protocol(), UnityBridgeNode::TransportProtocol::LegacyConnector);
-  EXPECT_EQ(node.transport_protocol_name(), "legacy");
+  EXPECT_EQ(node.transport_protocol(), UnityBridgeNode::TransportProtocol::HorusLink);
+  EXPECT_EQ(node.transport_protocol_name(), "horuslink");
   EXPECT_EQ(node.connection_config().port, port);
+  EXPECT_EQ(node.horuslink_bulk_port(), bulk_port);
   EXPECT_EQ(node.connection_config().max_connections, 7);
   EXPECT_EQ(node.connection_config().socket_buffer_size, 131072u);
   EXPECT_EQ(node.connection_config().message_queue_size, 17u);
@@ -663,6 +668,27 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
   EXPECT_FALSE(node.has_service_timer());
   ASSERT_TRUE(node.start());
   EXPECT_TRUE(node.has_service_timer());
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, UnityBridgeNodeCanStartLegacyTransportWhenExplicitlyRequested)
+{
+  const uint16_t port = find_unused_port();
+  ASSERT_NE(port, 0);
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(port)),
+      rclcpp::Parameter("transport_protocol", std::string("legacy")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  EXPECT_EQ(node.transport_protocol(), UnityBridgeNode::TransportProtocol::LegacyConnector);
+  EXPECT_EQ(node.transport_protocol_name(), "legacy");
+  EXPECT_EQ(node.connection_config().port, port);
+
+  ASSERT_TRUE(node.start());
   node.stop();
 }
 

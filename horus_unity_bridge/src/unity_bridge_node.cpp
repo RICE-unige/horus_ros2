@@ -110,7 +110,7 @@ void UnityBridgeNode::load_parameters()
       5000);
 
   transport_protocol_name_ = normalize_transport_protocol(
-    router_->declare_parameter<std::string>("transport_protocol", "legacy"));
+    router_->declare_parameter<std::string>("transport_protocol", "horuslink"));
   const bool legacy_transport_requested = transport_protocol_name_ == "legacy" ||
     transport_protocol_name_ == "connector" ||
     transport_protocol_name_ == "ros_tcp_connector";
@@ -122,10 +122,10 @@ void UnityBridgeNode::load_parameters()
   } else {
     RCLCPP_WARN(
       router_->get_logger(),
-      "Unknown transport_protocol '%s'; falling back to legacy connector mode",
+      "Unknown transport_protocol '%s'; falling back to horuslink mode",
       transport_protocol_name_.c_str());
-    transport_protocol_name_ = "legacy";
-    transport_protocol_ = TransportProtocol::LegacyConnector;
+    transport_protocol_name_ = "horuslink";
+    transport_protocol_ = TransportProtocol::HorusLink;
   }
 
   horuslink_config_.bind_address = conn_config_.bind_address;

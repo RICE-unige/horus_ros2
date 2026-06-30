@@ -102,8 +102,8 @@ private:
   // Configuration
   ConnectionManager::Config conn_config_;
   horuslink::HorusLinkConnectionManager::Config horuslink_config_;
-  TransportProtocol transport_protocol_ = TransportProtocol::LegacyConnector;
-  std::string transport_protocol_name_ = "legacy";
+  TransportProtocol transport_protocol_ = TransportProtocol::HorusLink;
+  std::string transport_protocol_name_ = "horuslink";
   int worker_threads_ = 4;
   bool log_protocol_messages_ = true;
   std::vector<std::string> reserved_parameter_warnings_;
