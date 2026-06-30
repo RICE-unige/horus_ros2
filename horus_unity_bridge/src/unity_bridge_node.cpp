@@ -103,9 +103,7 @@ void UnityBridgeNode::load_parameters()
 
   transport_protocol_name_ = normalize_transport_protocol(
     router_->declare_parameter<std::string>("transport_protocol", "horuslink"));
-  const bool removed_legacy_transport_requested = transport_protocol_name_ == "legacy" ||
-    transport_protocol_name_ == "connector" ||
-    transport_protocol_name_ == "ros_tcp_connector";
+  const bool removed_legacy_transport_requested = transport_protocol_name_ == "legacy";
   if (transport_protocol_name_ == "horuslink") {
     transport_protocol_ = TransportProtocol::HorusLink;
   } else {

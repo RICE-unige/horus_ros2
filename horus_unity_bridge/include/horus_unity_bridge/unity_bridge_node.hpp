@@ -33,7 +33,7 @@ namespace horus_unity_bridge
  * Integrates connection management and message routing for high-performance
  * Unity-ROS2 communication.
  *
- * Key improvements over ROS-TCP-Endpoint:
+ * Key improvements over the previous Unity bridge endpoint:
  * - Single-node architecture (vs one node per topic)
  * - Epoll-based async I/O (vs Python threading)
  * - Zero-copy optimizations

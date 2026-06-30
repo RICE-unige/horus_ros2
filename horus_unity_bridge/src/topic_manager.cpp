@@ -171,9 +171,8 @@ bool TopicManager::register_subscriber(
         // Convert serialized message to vector
         const auto & rcl_msg = msg->get_rcl_serialized_message();
 
-        // PATCH: Strip CDR Header (4 bytes) for StringMsg on Registration Topic
-        // Unity ROS-TCP-Connector expects [Len][Bytes], but ROS 2 CDR is [Header][Len][Bytes]
-        // Check for registration topic more loosely to avoid mismatch issues
+        // Keep the shared callback in DDS CDR form. HorusLink-specific subscribers
+        // strip the CDR encapsulation at the Unity-facing edge.
         bool is_reg = (topic.find("registration") != std::string::npos);
 
         if (protocol_logging_enabled_ && is_reg) {
@@ -185,9 +184,8 @@ bool TopicManager::register_subscriber(
           RCLCPP_DEBUG(node_->get_logger(), "%s", ss.str().c_str());
         }
 
-        // Send the raw message (ROS 2 CDR formatted)
-        // Unity ROS-TCP-Connector in ROS2 mode expects this header and will skip it.
-        // If Unity is in ROS1 mode, it will misinterpret it (ArgumentOutOfRangeException).
+        // Send the raw ROS 2 CDR bytes to shared bridge consumers. HorusLink
+        // subscribers wrap this callback and forward only the body bytes.
 
         std::vector<uint8_t> data;
         data.assign(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
