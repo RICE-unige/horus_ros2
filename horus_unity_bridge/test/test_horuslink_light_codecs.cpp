@@ -17,10 +17,36 @@
 
 #include "horus_unity_bridge/horuslink_light_codecs.hpp"
 
+#include <fstream>
 #include <gtest/gtest.h>
+#include <stdexcept>
+#include <string>
 
 namespace horus_unity_bridge::horuslink
 {
+
+namespace
+{
+
+std::vector<uint8_t> load_golden_vector(const std::string & name)
+{
+  const std::string path =
+    std::string(HORUS_UNITY_BRIDGE_TEST_SOURCE_DIR) + "/test/golden_vectors/" + name + ".hex";
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    throw std::runtime_error("Could not open HorusLink golden vector: " + path);
+  }
+
+  std::vector<uint8_t> output;
+  std::string token;
+  while (file >> token) {
+    output.push_back(static_cast<uint8_t>(std::stoul(token, nullptr, 16)));
+  }
+
+  return output;
+}
+
+}  // namespace
 
 TEST(HorusLinkLightCodecsTest, TwistEncodesStableLittleEndianFloatVector)
 {
@@ -30,14 +56,7 @@ TEST(HorusLinkLightCodecsTest, TwistEncodesStableLittleEndianFloatVector)
   };
 
   const auto encoded = encode_twist(twist);
-  const std::vector<uint8_t> expected{
-    0x00, 0x00, 0x80, 0x3F,
-    0x00, 0x00, 0x00, 0xC0,
-    0x00, 0x00, 0x00, 0x3F,
-    0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x50, 0x40,
-    0x00, 0x00, 0x90, 0xC0
-  };
+  const auto expected = load_golden_vector("twist");
   EXPECT_EQ(encoded, expected);
 
   const auto decoded = decode_twist(encoded.data(), encoded.size());
@@ -66,16 +85,7 @@ TEST(HorusLinkLightCodecsTest, JoyEncodesCountsAxesAndButtons)
   };
 
   const auto encoded = encode_joy(joy);
-  const std::vector<uint8_t> expected{
-    0x03, 0x00,
-    0x03, 0x00,
-    0x00, 0x00, 0x80, 0x3F,
-    0x00, 0x00, 0x00, 0xBF,
-    0x00, 0x00, 0x80, 0x3E,
-    0x01, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    0xFF, 0xFF, 0xFF, 0xFF
-  };
+  const auto expected = load_golden_vector("joy");
   EXPECT_EQ(encoded, expected);
 
   const auto decoded = decode_joy(encoded.data(), encoded.size());
@@ -95,22 +105,7 @@ TEST(HorusLinkLightCodecsTest, TfMessageEncodesStampedTransformsWithFrameIds)
   };
 
   const auto encoded = encode_tf_message({transform});
-  const std::vector<uint8_t> expected{
-    0x01, 0x00,
-    0x01, 0x00, 0x00, 0x00,
-    0x02, 0x00, 0x00, 0x00,
-    0x03, 0x00,
-    0x09, 0x00,
-    0x6D, 0x61, 0x70,
-    0x62, 0x61, 0x73, 0x65, 0x5F, 0x6C, 0x69, 0x6E, 0x6B,
-    0x00, 0x00, 0x80, 0x3F,
-    0x00, 0x00, 0x00, 0xC0,
-    0x00, 0x00, 0x00, 0x3F,
-    0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x80, 0x3F
-  };
+  const auto expected = load_golden_vector("tf_message");
   EXPECT_EQ(encoded, expected);
 
   const auto decoded = decode_tf_message(encoded.data(), encoded.size());

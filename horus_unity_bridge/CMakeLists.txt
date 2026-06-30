@@ -285,6 +285,9 @@ if(BUILD_TESTING)
   )
   if(TARGET horus_unity_bridge_tests)
     target_compile_options(horus_unity_bridge_tests PRIVATE ${HORUS_UNITY_BRIDGE_COMPILE_OPTIONS})
+    target_compile_definitions(horus_unity_bridge_tests
+      PRIVATE HORUS_UNITY_BRIDGE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     target_link_libraries(horus_unity_bridge_tests horus_unity_bridge_core)
     ament_target_dependencies(horus_unity_bridge_tests
       rclcpp
