@@ -158,8 +158,10 @@ private:
     OutboundFrameRouter outbound;
     std::atomic<bool> connected{true};
     std::mutex mutex;
+    std::mutex send_mutex;
     std::thread realtime_thread;
     std::thread bulk_thread;
+    std::thread keepalive_thread;
   };
 
   bool setup_server_socket(uint16_t requested_port, int & out_fd, uint16_t & out_port);
@@ -168,6 +170,7 @@ private:
   void pair_pending_sockets();
   void start_connection(AcceptedSocket realtime_socket, AcceptedSocket bulk_socket);
   void read_loop(std::shared_ptr<Connection> connection, Lane lane);
+  void keepalive_loop(std::shared_ptr<Connection> connection);
   void handle_received_frame(
     const std::shared_ptr<Connection> & connection,
     Lane lane,

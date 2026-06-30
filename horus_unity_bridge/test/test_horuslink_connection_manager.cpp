@@ -241,6 +241,33 @@ TEST(HorusLinkConnectionManagerTest, AcceptsDualLaneSessionAndAcksSubscribe)
   EXPECT_EQ(ack->status, SubscribeStatus::Accepted);
 }
 
+TEST(HorusLinkConnectionManagerTest, SendsRealtimeKeepaliveAfterHandshake)
+{
+  auto config = make_config();
+  config.keepalive_ms = 20;
+  HorusLinkConnectionManager manager(config);
+  std::atomic<int> connected_id{0};
+  manager.set_connection_callback(
+    [&connected_id](int connection_id, const std::string &) {
+      connected_id = connection_id;
+    });
+  ASSERT_TRUE(manager.start());
+
+  auto realtime = connect_to(manager.realtime_port());
+  auto bulk = connect_to(manager.bulk_port());
+  ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
+
+  Frame keepalive = recv_frame(realtime.get());
+  EXPECT_EQ(keepalive.header.channel_id, 0u);
+  EXPECT_EQ(keepalive.header.msg_type, MessageType::Keepalive);
+  EXPECT_EQ(keepalive.header.flags, 0u);
+  EXPECT_EQ(keepalive.header.seq, 2u);
+  EXPECT_EQ(keepalive.header.corr_id, 0u);
+  EXPECT_EQ(keepalive.header.length, 0u);
+  EXPECT_TRUE(keepalive.payload.empty());
+}
+
 TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
 {
   auto config = make_config();

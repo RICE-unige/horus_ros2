@@ -25,6 +25,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -71,6 +72,13 @@ HorusLinkConnectionManager::Connection::~Connection()
       bulk_thread.detach();
     } else {
       bulk_thread.join();
+    }
+  }
+  if (keepalive_thread.joinable()) {
+    if (keepalive_thread.get_id() == current_thread) {
+      keepalive_thread.detach();
+    } else {
+      keepalive_thread.join();
     }
   }
 }
@@ -137,6 +145,9 @@ void HorusLinkConnectionManager::stop()
     }
     if (connection->bulk_thread.joinable()) {
       connection->bulk_thread.join();
+    }
+    if (connection->keepalive_thread.joinable()) {
+      connection->keepalive_thread.join();
     }
   }
 }
@@ -428,6 +439,12 @@ void HorusLinkConnectionManager::start_connection(
     this,
     connection,
     Lane::Bulk);
+  if (config_.keepalive_ms > 0) {
+    connection->keepalive_thread = std::thread(
+      &HorusLinkConnectionManager::keepalive_loop,
+      this,
+      connection);
+  }
 
   if (connection_callback_) {
     connection_callback_(connection_id, connection->ip);
@@ -464,6 +481,38 @@ void HorusLinkConnectionManager::read_loop(std::shared_ptr<Connection> connectio
   }
 
   disconnect_connection(connection->id);
+}
+
+void HorusLinkConnectionManager::keepalive_loop(std::shared_ptr<Connection> connection)
+{
+  if (config_.keepalive_ms == 0) {
+    return;
+  }
+
+  const auto interval = std::chrono::milliseconds(config_.keepalive_ms);
+  const auto max_sleep = std::chrono::milliseconds(50);
+  auto next_keepalive = std::chrono::steady_clock::now() + interval;
+
+  while (running_.load() && connection->connected.load()) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < next_keepalive) {
+      const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(next_keepalive - now);
+      std::this_thread::sleep_for(remaining < max_sleep ? remaining : max_sleep);
+      continue;
+    }
+
+    Frame keepalive_frame;
+    {
+      std::lock_guard<std::mutex> lock(connection->mutex);
+      keepalive_frame = connection->session.make_keepalive_frame();
+    }
+    if (!send_frame(connection, Lane::Realtime, keepalive_frame)) {
+      break;
+    }
+
+    next_keepalive += interval;
+  }
 }
 
 void HorusLinkConnectionManager::handle_received_frame(
@@ -686,6 +735,7 @@ bool HorusLinkConnectionManager::send_frame(
 
   const int fd = lane == Lane::Bulk ? connection->bulk_fd : connection->realtime_fd;
   const auto bytes = serialize_frame(frame.header, frame.payload.data(), frame.payload.size());
+  std::lock_guard<std::mutex> send_lock(connection->send_mutex);
   if (!send_all(fd, bytes.data(), bytes.size())) {
     disconnect_connection(connection->id);
     return false;
@@ -766,6 +816,11 @@ void HorusLinkConnectionManager::prune_disconnected_connections()
       connection->bulk_thread.get_id() != current_thread)
     {
       connection->bulk_thread.join();
+    }
+    if (connection->keepalive_thread.joinable() &&
+      connection->keepalive_thread.get_id() != current_thread)
+    {
+      connection->keepalive_thread.join();
     }
   }
 }
