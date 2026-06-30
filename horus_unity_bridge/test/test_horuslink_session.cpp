@@ -48,6 +48,24 @@ Frame make_data_frame(uint16_t channel_id, std::vector<uint8_t> payload, uint32_
   return frame;
 }
 
+Frame make_service_frame(
+  uint16_t channel_id,
+  MessageType message_type,
+  uint32_t corr_id,
+  std::vector<uint8_t> payload,
+  uint32_t seq = 1)
+{
+  Frame frame;
+  frame.header.channel_id = channel_id;
+  frame.header.msg_type = message_type;
+  frame.header.flags = FrameFlags::RawOpaque;
+  frame.header.seq = seq;
+  frame.header.corr_id = corr_id;
+  frame.header.length = static_cast<uint32_t>(payload.size());
+  frame.payload = std::move(payload);
+  return frame;
+}
+
 void register_bulk_channel(Session & session, uint16_t channel_id)
 {
   const SubscribeRequest request{
@@ -160,6 +178,56 @@ TEST(HorusLinkSessionTest, DataFrameForUnknownChannelIsRejected)
   Frame data = make_data_frame(99, {0x01});
 
   auto rejected = session.handle_frame(data, Lane::Bulk);
+
+  EXPECT_TRUE(rejected.empty());
+}
+
+TEST(HorusLinkSessionTest, ServiceFramesAreAcceptedOnlyWithCorrelationIdOnNegotiatedLane)
+{
+  Session session;
+  register_bulk_channel(session, 22);
+  Frame request = make_service_frame(
+    22,
+    MessageType::ServiceRequest,
+    123,
+    {0x01, 0x02},
+    9);
+  Frame response = make_service_frame(
+    22,
+    MessageType::ServiceResponse,
+    123,
+    {0x03},
+    10);
+
+  auto accepted_request = session.handle_frame(request, Lane::Bulk);
+  auto accepted_response = session.handle_frame(response, Lane::Bulk);
+
+  ASSERT_EQ(accepted_request.size(), 1u);
+  ASSERT_EQ(accepted_response.size(), 1u);
+  EXPECT_EQ(accepted_request[0].header.corr_id, 123u);
+  EXPECT_EQ(accepted_request[0].payload, request.payload);
+  EXPECT_EQ(accepted_response[0].header.corr_id, 123u);
+  EXPECT_EQ(accepted_response[0].payload, response.payload);
+}
+
+TEST(HorusLinkSessionTest, ServiceFrameWithoutCorrelationIdIsRejected)
+{
+  Session session;
+  register_bulk_channel(session, 22);
+  Frame request = make_service_frame(22, MessageType::ServiceRequest, 0, {0x01}, 9);
+
+  auto rejected = session.handle_frame(request, Lane::Bulk);
+
+  EXPECT_TRUE(rejected.empty());
+}
+
+TEST(HorusLinkSessionTest, ServiceFrameOnWrongLaneIsRejected)
+{
+  Session session;
+  register_bulk_channel(session, 22);
+  Frame request = make_service_frame(22, MessageType::ServiceRequest, 123, {0x01}, 9);
+
+  auto rejected = session.handle_frame(request, Lane::Realtime);
 
   EXPECT_TRUE(rejected.empty());
 }

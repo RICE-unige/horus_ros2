@@ -37,6 +37,14 @@ std::vector<Frame> Session::handle_frame(const Frame & frame, Lane lane)
     return {frame};
   }
 
+  if ((frame.header.msg_type == MessageType::ServiceRequest ||
+    frame.header.msg_type == MessageType::ServiceResponse) &&
+    frame.header.corr_id != 0 &&
+    channel_table_.can_accept_data_frame(frame.header, lane))
+  {
+    return {frame};
+  }
+
   return {};
 }
 
