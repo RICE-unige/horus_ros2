@@ -535,6 +535,52 @@ TEST_F(BridgeRuntimeTest, SubscriptionPolicyIsStrictByDefaultAndReplaceableOnlyF
     OutboundMessagePolicy::Strict);
 }
 
+TEST_F(BridgeRuntimeTest, HorusLinkTopicTableIsSortedByTopicAndType)
+{
+  MessageRouter router;
+  auto fixture_node = std::make_shared<rclcpp::Node>("horuslink_topic_table_fixture");
+  auto z_publisher = fixture_node->create_publisher<std_msgs::msg::String>(
+    "/zz_horuslink_topic_table",
+    rclcpp::QoS(1));
+  auto a_publisher = fixture_node->create_publisher<std_msgs::msg::String>(
+    "/aa_horuslink_topic_table",
+    rclcpp::QoS(1));
+
+  std::vector<horuslink::TopicEntry> entries;
+  bool observed_fixture_topics = false;
+  for (int attempt = 0; attempt < 100 && !observed_fixture_topics; ++attempt) {
+    rclcpp::spin_some(fixture_node);
+    entries = router.get_horuslink_topic_table();
+
+    bool saw_a_topic = false;
+    bool saw_z_topic = false;
+    for (const auto & entry : entries) {
+      saw_a_topic = saw_a_topic || entry.topic == "/aa_horuslink_topic_table";
+      saw_z_topic = saw_z_topic || entry.topic == "/zz_horuslink_topic_table";
+    }
+
+    observed_fixture_topics = saw_a_topic && saw_z_topic;
+    if (!observed_fixture_topics) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+
+  ASSERT_TRUE(observed_fixture_topics);
+  for (size_t i = 1; i < entries.size(); ++i) {
+    const auto & previous = entries[i - 1];
+    const auto & current = entries[i];
+    EXPECT_TRUE(
+      previous.topic < current.topic ||
+      (previous.topic == current.topic && previous.type_name <= current.type_name))
+      << "Topic table was not sorted at index " << i << ": "
+      << previous.topic << " [" << previous.type_name << "] before "
+      << current.topic << " [" << current.type_name << "]";
+  }
+
+  (void)z_publisher;
+  (void)a_publisher;
+}
+
 TEST_F(BridgeRuntimeTest, PendingServiceStateIsTrackedPerClientAndClearedIndependently)
 {
   MessageRouter router;

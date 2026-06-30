@@ -336,6 +336,16 @@ std::vector<horuslink::TopicEntry> MessageRouter::get_horuslink_topic_table()
       });
   }
 
+  std::sort(
+    entries.begin(),
+    entries.end(),
+    [](const horuslink::TopicEntry & lhs, const horuslink::TopicEntry & rhs) {
+      if (lhs.topic != rhs.topic) {
+        return lhs.topic < rhs.topic;
+      }
+      return lhs.type_name < rhs.type_name;
+    });
+
   return entries;
 }
 
