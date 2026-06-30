@@ -21,6 +21,7 @@
 #include "horus_unity_bridge/serialized_payload.hpp"
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/serialization.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
@@ -435,6 +436,41 @@ bool TopicManager::publish_horuslink_message(
     joy_msg.axes = decoded->axes;
     joy_msg.buttons = decoded->buttons;
     return publish_message(topic, serialize_ros_message(joy_msg));
+  }
+
+  if (message_type == "nav_msgs/msg/Path") {
+    const auto decoded = horuslink::decode_path(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink Path payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    nav_msgs::msg::Path path_msg;
+    path_msg.header.stamp.sec = static_cast<int32_t>(decoded->seconds);
+    path_msg.header.stamp.nanosec = decoded->nanoseconds;
+    path_msg.header.frame_id = decoded->frame_id;
+    path_msg.poses.reserve(decoded->poses.size());
+    for (const auto & pose : decoded->poses) {
+      geometry_msgs::msg::PoseStamped pose_msg;
+      pose_msg.header.stamp.sec = static_cast<int32_t>(pose.seconds);
+      pose_msg.header.stamp.nanosec = pose.nanoseconds;
+      pose_msg.header.frame_id = pose.frame_id;
+      pose_msg.pose.position.x = pose.pose.position.x;
+      pose_msg.pose.position.y = pose.pose.position.y;
+      pose_msg.pose.position.z = pose.pose.position.z;
+      pose_msg.pose.orientation.x = pose.pose.orientation.x;
+      pose_msg.pose.orientation.y = pose.pose.orientation.y;
+      pose_msg.pose.orientation.z = pose.pose.orientation.z;
+      pose_msg.pose.orientation.w = pose.pose.orientation.w;
+      path_msg.poses.push_back(std::move(pose_msg));
+    }
+
+    return publish_message(topic, serialize_ros_message(path_msg));
   }
 
   const auto serialized_msg = detail::add_cdr_header(payload);

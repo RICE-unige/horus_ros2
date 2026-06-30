@@ -20,6 +20,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace horus_unity_bridge::horuslink
 {
@@ -194,6 +195,20 @@ size_t pose_stamped_size(const PoseStamped & value)
          light_codec::kPoseSize;
 }
 
+size_t path_size(const Path & value)
+{
+  if (value.poses.size() > std::numeric_limits<uint16_t>::max()) {
+    throw std::out_of_range("Path pose count exceeds the wire limit.");
+  }
+
+  size_t size = light_codec::kPathHeaderSize + frame_id_size(value.frame_id);
+  for (const auto & pose : value.poses) {
+    size += pose_stamped_size(pose);
+  }
+
+  return size;
+}
+
 }  // namespace
 
 bool Vector3::operator==(const Vector3 & other) const
@@ -222,6 +237,14 @@ bool PoseStamped::operator==(const PoseStamped & other) const
          nanoseconds == other.nanoseconds &&
          frame_id == other.frame_id &&
          pose == other.pose;
+}
+
+bool Path::operator==(const Path & other) const
+{
+  return seconds == other.seconds &&
+         nanoseconds == other.nanoseconds &&
+         frame_id == other.frame_id &&
+         poses == other.poses;
 }
 
 bool Joy::operator==(const Joy & other) const
@@ -350,6 +373,68 @@ std::optional<PoseStamped> decode_pose_stamped(const uint8_t * data, size_t size
     nanoseconds,
     frame_id,
     *pose
+  };
+}
+
+std::vector<uint8_t> encode_path(const Path & value)
+{
+  std::vector<uint8_t> output;
+  output.reserve(path_size(value));
+  write_uint32(output, value.seconds);
+  write_uint32(output, value.nanoseconds);
+  write_uint16(output, static_cast<uint16_t>(value.frame_id.size()));
+  write_uint16(output, static_cast<uint16_t>(value.poses.size()));
+  output.insert(output.end(), value.frame_id.begin(), value.frame_id.end());
+  for (const auto & pose : value.poses) {
+    const auto encoded_pose = encode_pose_stamped(pose);
+    output.insert(output.end(), encoded_pose.begin(), encoded_pose.end());
+  }
+
+  return output;
+}
+
+std::optional<Path> decode_path(const uint8_t * data, size_t size)
+{
+  if (data == nullptr || size < light_codec::kPathHeaderSize) {
+    return std::nullopt;
+  }
+
+  const uint32_t seconds = read_uint32(data);
+  const uint32_t nanoseconds = read_uint32(data + 4);
+  const uint16_t frame_id_length = read_uint16(data + 8);
+  const uint16_t pose_count = read_uint16(data + 10);
+  const size_t header_size = light_codec::kPathHeaderSize + frame_id_length;
+  if (size < header_size) {
+    return std::nullopt;
+  }
+
+  const std::string frame_id(
+    reinterpret_cast<const char *>(data + light_codec::kPathHeaderSize),
+    frame_id_length);
+
+  std::vector<PoseStamped> poses;
+  poses.reserve(pose_count);
+  size_t offset = header_size;
+  for (uint16_t i = 0; i < pose_count; ++i) {
+    const auto pose = decode_pose_stamped(data + offset, size - offset);
+    if (!pose.has_value()) {
+      return std::nullopt;
+    }
+
+    const size_t bytes_read = pose_stamped_size(*pose);
+    if (size - offset < bytes_read) {
+      return std::nullopt;
+    }
+
+    poses.push_back(*pose);
+    offset += bytes_read;
+  }
+
+  return Path{
+    seconds,
+    nanoseconds,
+    frame_id,
+    std::move(poses)
   };
 }
 

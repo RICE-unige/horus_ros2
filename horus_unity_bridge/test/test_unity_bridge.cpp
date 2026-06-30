@@ -27,6 +27,7 @@
 #include <example_interfaces/srv/add_two_ints.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <sensor_msgs/msg/joy.hpp>
@@ -1153,6 +1154,129 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightJoyFramesToRosTopic)
   }
   for (size_t i = 0; i < joy.buttons.size(); ++i) {
     EXPECT_EQ(received_joy.buttons[i], joy.buttons[i]);
+  }
+
+  (void)subscriber;
+  (void)bulk;
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPathFramesToRosTopic)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+  expect_bridge_hello(realtime.get());
+
+  const std::string topic = "/horuslink_unity_publish_path";
+  const uint16_t channel_id = 41;
+  const horuslink::PublisherRequest request{
+    channel_id,
+    topic,
+    "nav_msgs/msg/Path",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_publisher_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("horuslink_path_subscriber");
+  nav_msgs::msg::Path received_path;
+  bool received = false;
+  auto subscriber = subscriber_node->create_subscription<nav_msgs::msg::Path>(
+    topic,
+    10,
+    [&received_path, &received](const nav_msgs::msg::Path::SharedPtr msg) {
+      received_path = *msg;
+      received = true;
+    });
+
+  for (int attempt = 0; attempt < 50 && subscriber_node->count_publishers(topic) == 0; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
+
+  const horuslink::Path path{
+    50,
+    60,
+    "map",
+    {
+      horuslink::PoseStamped{
+        51,
+        61,
+        "map",
+        horuslink::Pose{
+          horuslink::Vector3{1.0F, 2.0F, 3.0F},
+          horuslink::Quaternion{0.0F, 0.0F, 0.0F, 1.0F}
+        }
+      },
+      horuslink::PoseStamped{
+        52,
+        62,
+        "odom",
+        horuslink::Pose{
+          horuslink::Vector3{4.0F, 5.0F, 6.0F},
+          horuslink::Quaternion{0.0F, 0.0F, 0.70710677F, 0.70710677F}
+        }
+      }
+    }
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_data_frame(channel_id, horuslink::encode_path(path)));
+
+  for (int attempt = 0; attempt < 50 && !received; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  ASSERT_TRUE(received);
+  EXPECT_EQ(received_path.header.stamp.sec, static_cast<int32_t>(path.seconds));
+  EXPECT_EQ(received_path.header.stamp.nanosec, path.nanoseconds);
+  EXPECT_EQ(received_path.header.frame_id, path.frame_id);
+  ASSERT_EQ(received_path.poses.size(), path.poses.size());
+  for (size_t i = 0; i < path.poses.size(); ++i) {
+    const auto & expected = path.poses[i];
+    const auto & actual = received_path.poses[i];
+    EXPECT_EQ(actual.header.stamp.sec, static_cast<int32_t>(expected.seconds));
+    EXPECT_EQ(actual.header.stamp.nanosec, expected.nanoseconds);
+    EXPECT_EQ(actual.header.frame_id, expected.frame_id);
+    EXPECT_DOUBLE_EQ(actual.pose.position.x, expected.pose.position.x);
+    EXPECT_DOUBLE_EQ(actual.pose.position.y, expected.pose.position.y);
+    EXPECT_DOUBLE_EQ(actual.pose.position.z, expected.pose.position.z);
+    EXPECT_DOUBLE_EQ(actual.pose.orientation.x, expected.pose.orientation.x);
+    EXPECT_DOUBLE_EQ(actual.pose.orientation.y, expected.pose.orientation.y);
+    EXPECT_DOUBLE_EQ(actual.pose.orientation.z, expected.pose.orientation.z);
+    EXPECT_DOUBLE_EQ(actual.pose.orientation.w, expected.pose.orientation.w);
   }
 
   (void)subscriber;
