@@ -49,6 +49,7 @@ public:
     size_t max_payload_size = 512u * 1024u * 1024u;
     size_t realtime_queue_depth = 1024;
     size_t bulk_queue_depth = 1024;
+    uint32_t keepalive_ms = 1000;
     bool tcp_nodelay = true;
   };
 

@@ -148,6 +148,26 @@ bool recv_horuslink_frame(int fd, horuslink::Frame & frame, int timeout_ms = 200
   return true;
 }
 
+void expect_bridge_hello(int fd)
+{
+  constexpr uint32_t kExpectedMaxPayloadBytes = 512u * 1024u * 1024u;
+  constexpr uint32_t kExpectedKeepaliveMs = 1000u;
+
+  horuslink::Frame hello_frame;
+  ASSERT_TRUE(recv_horuslink_frame(fd, hello_frame));
+  ASSERT_EQ(hello_frame.header.channel_id, 0u);
+  ASSERT_EQ(hello_frame.header.msg_type, horuslink::MessageType::Control);
+  ASSERT_EQ(hello_frame.header.seq, 1u);
+  ASSERT_EQ(hello_frame.header.corr_id, 0u);
+  const auto hello = horuslink::decode_hello(
+    hello_frame.payload.data(),
+    hello_frame.payload.size());
+  ASSERT_TRUE(hello.has_value());
+  EXPECT_EQ(hello->role, horuslink::EndpointRole::Bridge);
+  EXPECT_EQ(hello->max_payload_bytes, kExpectedMaxPayloadBytes);
+  EXPECT_EQ(hello->keepalive_ms, kExpectedKeepaliveMs);
+}
+
 void send_horuslink_frame(int fd, horuslink::Frame frame)
 {
   const auto bytes = horuslink::serialize_frame(
@@ -638,6 +658,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportForwardsRosTopicToNegotiatedBulkLane
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  expect_bridge_hello(realtime.get());
 
   const std::string topic = "/horuslink_loopback_string";
   const uint16_t channel_id = 31;
@@ -710,6 +731,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesDataFramesToRosTopic)
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  expect_bridge_hello(realtime.get());
 
   const std::string topic = "/horuslink_unity_publish_string";
   const uint16_t channel_id = 37;
@@ -804,6 +826,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportCallsRosServiceWithCorrelationId)
 
   auto realtime = connect_to_port(realtime_port);
   auto bulk = connect_to_port(bulk_port);
+  expect_bridge_hello(realtime.get());
 
   const uint16_t channel_id = 44;
   const uint32_t corr_id = 1234;

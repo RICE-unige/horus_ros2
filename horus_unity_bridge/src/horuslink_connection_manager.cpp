@@ -27,6 +27,7 @@
 #include <cerrno>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <thread>
 #include <utility>
 
@@ -401,6 +402,20 @@ void HorusLinkConnectionManager::start_connection(
   {
     std::lock_guard<std::mutex> lock(mutex_);
     connections_[connection_id] = connection;
+  }
+
+  const uint32_t max_payload_bytes =
+    config_.max_payload_size > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) ?
+    std::numeric_limits<uint32_t>::max() :
+    static_cast<uint32_t>(config_.max_payload_size);
+  Frame hello_frame;
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    hello_frame = connection->session.make_hello_frame(
+      HelloMessage{EndpointRole::Bridge, max_payload_bytes, config_.keepalive_ms});
+  }
+  if (!send_frame(connection, Lane::Realtime, hello_frame)) {
+    return;
   }
 
   connection->realtime_thread = std::thread(

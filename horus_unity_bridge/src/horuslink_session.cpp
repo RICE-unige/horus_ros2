@@ -62,6 +62,11 @@ Frame Session::make_topic_table_frame(const std::vector<TopicEntry> & entries)
   return make_control_response(encode_topic_table(entries));
 }
 
+Frame Session::make_hello_frame(const HelloMessage & message)
+{
+  return make_control_response(encode_hello(message));
+}
+
 Frame Session::make_subscribe_ack_frame(const SubscribeAck & ack)
 {
   return make_control_response(encode_subscribe_ack(ack));

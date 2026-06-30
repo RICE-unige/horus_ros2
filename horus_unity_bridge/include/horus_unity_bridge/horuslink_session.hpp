@@ -33,6 +33,7 @@ class Session
 public:
   std::vector<Frame> handle_frame(const Frame & frame);
   std::vector<Frame> handle_frame(const Frame & frame, Lane lane);
+  Frame make_hello_frame(const HelloMessage & message);
   Frame make_topic_table_frame(const std::vector<TopicEntry> & entries);
   Frame make_subscribe_ack_frame(const SubscribeAck & ack);
 

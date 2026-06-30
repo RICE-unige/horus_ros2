@@ -106,6 +106,23 @@ TEST(HorusLinkSessionTest, HelloFrameStoresPeerRoleWithoutResponse)
   EXPECT_EQ(session.peer_hello()->max_payload_bytes, 1024u);
 }
 
+TEST(HorusLinkSessionTest, MakeHelloFrameEncodesControlResponse)
+{
+  Session session;
+  const HelloMessage bridge_hello{EndpointRole::Bridge, 4096, 500};
+
+  Frame frame = session.make_hello_frame(bridge_hello);
+
+  EXPECT_EQ(frame.header.channel_id, 0);
+  EXPECT_EQ(frame.header.msg_type, MessageType::Control);
+  EXPECT_EQ(frame.header.seq, 1u);
+  EXPECT_EQ(frame.header.corr_id, 0u);
+  EXPECT_EQ(frame.header.length, frame.payload.size());
+  auto decoded = decode_hello(frame.payload.data(), frame.payload.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, bridge_hello);
+}
+
 TEST(HorusLinkSessionTest, SubscribeRequestActivatesChannelAndReturnsAck)
 {
   Session session;

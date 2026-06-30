@@ -146,6 +146,20 @@ Frame recv_frame(int fd)
   return Frame{header, std::move(payload)};
 }
 
+void expect_bridge_hello(int fd, const HorusLinkConnectionManager::Config & config)
+{
+  const Frame hello_frame = recv_frame(fd);
+  ASSERT_EQ(hello_frame.header.channel_id, 0u);
+  ASSERT_EQ(hello_frame.header.msg_type, MessageType::Control);
+  ASSERT_EQ(hello_frame.header.seq, 1u);
+  ASSERT_EQ(hello_frame.header.corr_id, 0u);
+  auto hello = decode_hello(hello_frame.payload.data(), hello_frame.payload.size());
+  ASSERT_TRUE(hello.has_value());
+  EXPECT_EQ(hello->role, EndpointRole::Bridge);
+  EXPECT_EQ(hello->max_payload_bytes, static_cast<uint32_t>(config.max_payload_size));
+  EXPECT_EQ(hello->keepalive_ms, config.keepalive_ms);
+}
+
 void send_frame(int fd, Frame frame)
 {
   const auto bytes = serialize_frame(frame.header, frame.payload.data(), frame.payload.size());
@@ -195,7 +209,8 @@ HorusLinkConnectionManager::Config make_config()
 
 TEST(HorusLinkConnectionManagerTest, AcceptsDualLaneSessionAndAcksSubscribe)
 {
-  HorusLinkConnectionManager manager(make_config());
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
   std::atomic<int> connected_id{0};
   manager.set_connection_callback(
     [&connected_id](int connection_id, const std::string &) {
@@ -207,6 +222,7 @@ TEST(HorusLinkConnectionManagerTest, AcceptsDualLaneSessionAndAcksSubscribe)
   auto bulk = connect_to(manager.bulk_port());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
   EXPECT_EQ(manager.connection_count(), 1u);
+  expect_bridge_hello(realtime.get(), config);
 
   const SubscribeRequest request{
     7,
@@ -227,7 +243,8 @@ TEST(HorusLinkConnectionManagerTest, AcceptsDualLaneSessionAndAcksSubscribe)
 
 TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
 {
-  HorusLinkConnectionManager manager(make_config());
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
   std::atomic<int> connected_id{0};
   std::mutex frame_mutex;
   std::vector<Frame> observed_frames;
@@ -250,6 +267,7 @@ TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
 
   const SubscribeRequest request{
     7,
@@ -278,7 +296,8 @@ TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
 
 TEST(HorusLinkConnectionManagerTest, RejectsSubscribeWhenBridgeCallbackFails)
 {
-  HorusLinkConnectionManager manager(make_config());
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
   std::atomic<int> connected_id{0};
   manager.set_connection_callback(
     [&connected_id](int connection_id, const std::string &) {
@@ -294,6 +313,7 @@ TEST(HorusLinkConnectionManagerTest, RejectsSubscribeWhenBridgeCallbackFails)
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
 
   const SubscribeRequest request{
     11,
@@ -315,7 +335,8 @@ TEST(HorusLinkConnectionManagerTest, RejectsSubscribeWhenBridgeCallbackFails)
 
 TEST(HorusLinkConnectionManagerTest, SendsOutboundPayloadOnNegotiatedBulkLane)
 {
-  HorusLinkConnectionManager manager(make_config());
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
   std::atomic<int> connected_id{0};
   manager.set_connection_callback(
     [&connected_id](int connection_id, const std::string &) {
@@ -326,6 +347,7 @@ TEST(HorusLinkConnectionManagerTest, SendsOutboundPayloadOnNegotiatedBulkLane)
   auto realtime = connect_to(manager.realtime_port());
   auto bulk = connect_to(manager.bulk_port());
   ASSERT_TRUE(wait_until([&connected_id]() {return connected_id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
 
   const SubscribeRequest request{
     9,
