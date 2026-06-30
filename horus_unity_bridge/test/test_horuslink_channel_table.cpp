@@ -103,6 +103,40 @@ TEST(HorusLinkChannelTableTest, TopicLookupAndRemoveKeepBindingsConsistent)
   EXPECT_FALSE(table.get_by_topic("/robot/state").has_value());
 }
 
+TEST(HorusLinkChannelTableTest, DuplicateTopicBindingsRemainChannelIdBased)
+{
+  ChannelTable table;
+  ASSERT_TRUE(table.begin_subscribe(
+      2,
+      "/workspace/progress",
+      "std_msgs/msg/String",
+      Lane::Realtime,
+      Delivery::ReliableFifo));
+  ASSERT_TRUE(table.begin_subscribe(
+      3,
+      "/workspace/progress",
+      "std_msgs/msg/String",
+      Lane::Realtime,
+      Delivery::ReliableFifo));
+
+  auto first = table.get_by_topic("/workspace/progress");
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first->channel_id, 2);
+
+  auto second = table.get(3);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_EQ(second->topic, "/workspace/progress");
+
+  EXPECT_TRUE(table.remove(2));
+  EXPECT_FALSE(table.get(2).has_value());
+  auto remaining = table.get_by_topic("/workspace/progress");
+  ASSERT_TRUE(remaining.has_value());
+  EXPECT_EQ(remaining->channel_id, 3);
+
+  EXPECT_TRUE(table.remove(3));
+  EXPECT_FALSE(table.get_by_topic("/workspace/progress").has_value());
+}
+
 TEST(HorusLinkServiceTableTest, RegisterAllocatesNonzeroUniqueCorrelationIds)
 {
   ServiceTable table;

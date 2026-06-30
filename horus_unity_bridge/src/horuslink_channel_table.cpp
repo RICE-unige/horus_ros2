@@ -52,11 +52,6 @@ bool ChannelTable::begin_subscribe(
     return false;
   }
 
-  const auto existing_topic = topic_to_channel_.find(topic);
-  if (existing_topic != topic_to_channel_.end() && existing_topic->second != channel_id) {
-    return false;
-  }
-
   channels_[channel_id] = ChannelDescriptor{
     channel_id,
     topic,
@@ -65,7 +60,9 @@ bool ChannelTable::begin_subscribe(
     delivery,
     ChannelState::PendingSubscribe
   };
-  topic_to_channel_[channels_[channel_id].topic] = channel_id;
+  if (topic_to_channel_.find(channels_[channel_id].topic) == topic_to_channel_.end()) {
+    topic_to_channel_[channels_[channel_id].topic] = channel_id;
+  }
   return true;
 }
 
@@ -121,7 +118,19 @@ bool ChannelTable::remove(uint16_t channel_id)
     return false;
   }
 
-  topic_to_channel_.erase(channel->second.topic);
+  const auto topic_entry = topic_to_channel_.find(channel->second.topic);
+  if (topic_entry != topic_to_channel_.end() && topic_entry->second == channel_id) {
+    topic_to_channel_.erase(topic_entry);
+    for (const auto & candidate : channels_) {
+      if (candidate.first == channel_id) {
+        continue;
+      }
+      if (candidate.second.topic == channel->second.topic) {
+        topic_to_channel_[candidate.second.topic] = candidate.first;
+        break;
+      }
+    }
+  }
   channels_.erase(channel);
   return true;
 }
