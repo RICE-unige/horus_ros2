@@ -17,6 +17,7 @@
 
 #include "horus_unity_bridge/connection_manager.hpp"
 #include "horus_unity_bridge/horuslink_control_messages.hpp"
+#include "horus_unity_bridge/horuslink_light_codecs.hpp"
 #include "horus_unity_bridge/horuslink_protocol.hpp"
 #include "horus_unity_bridge/message_router.hpp"
 #include "horus_unity_bridge/serialized_payload.hpp"
@@ -24,6 +25,7 @@
 
 #include <gtest/gtest.h>
 #include <example_interfaces/srv/add_two_ints.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -869,6 +871,96 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesDataFramesToRosTopic)
   }
 
   EXPECT_EQ(received_text, text);
+
+  (void)subscriber;
+  (void)bulk;
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightTwistFramesToRosTopic)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+  expect_bridge_hello(realtime.get());
+
+  const std::string topic = "/horuslink_unity_publish_twist";
+  const uint16_t channel_id = 38;
+  const horuslink::PublisherRequest request{
+    channel_id,
+    topic,
+    "geometry_msgs/msg/Twist",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_publisher_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("horuslink_twist_subscriber");
+  geometry_msgs::msg::Twist received_twist;
+  bool received = false;
+  auto subscriber = subscriber_node->create_subscription<geometry_msgs::msg::Twist>(
+    topic,
+    10,
+    [&received_twist, &received](const geometry_msgs::msg::Twist::SharedPtr msg) {
+      received_twist = *msg;
+      received = true;
+    });
+
+  for (int attempt = 0; attempt < 50 && subscriber_node->count_publishers(topic) == 0; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
+
+  const horuslink::Twist twist{
+    horuslink::Vector3{1.25F, -0.5F, 0.75F},
+    horuslink::Vector3{0.0F, 0.0F, -1.5F}
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_data_frame(channel_id, horuslink::encode_twist(twist)));
+
+  for (int attempt = 0; attempt < 50 && !received; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  ASSERT_TRUE(received);
+  EXPECT_DOUBLE_EQ(received_twist.linear.x, twist.linear.x);
+  EXPECT_DOUBLE_EQ(received_twist.linear.y, twist.linear.y);
+  EXPECT_DOUBLE_EQ(received_twist.linear.z, twist.linear.z);
+  EXPECT_DOUBLE_EQ(received_twist.angular.x, twist.angular.x);
+  EXPECT_DOUBLE_EQ(received_twist.angular.y, twist.angular.y);
+  EXPECT_DOUBLE_EQ(received_twist.angular.z, twist.angular.z);
 
   (void)subscriber;
   (void)bulk;

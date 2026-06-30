@@ -17,7 +17,9 @@
 
 #include "horus_unity_bridge/topic_manager.hpp"
 #include "horus_unity_bridge/bridge_metrics.hpp"
+#include "horus_unity_bridge/horuslink_light_codecs.hpp"
 #include "horus_unity_bridge/serialized_payload.hpp"
+#include <geometry_msgs/msg/twist.hpp>
 #include <rclcpp/serialization.hpp>
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
 #include <dlfcn.h>
@@ -27,6 +29,22 @@
 
 namespace horus_unity_bridge
 {
+
+namespace
+{
+
+template<typename MessageT>
+std::vector<uint8_t> serialize_ros_message(MessageT message)
+{
+  rclcpp::SerializedMessage serialized;
+  rclcpp::Serialization<MessageT> serializer;
+  serializer.serialize_message(&message, &serialized);
+
+  const auto & rcl_msg = serialized.get_rcl_serialized_message();
+  return std::vector<uint8_t>(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
+}
+
+}  // namespace
 
 TopicManager::TopicManager(rclcpp::Node * node)
 : node_(node)
@@ -340,6 +358,37 @@ bool TopicManager::publish_horuslink_message(
 {
   if (detail::has_cdr_header(payload)) {
     return publish_message(topic, payload);
+  }
+
+  std::string message_type;
+  {
+    std::lock_guard<std::mutex> lock(publishers_mutex_);
+    auto it = publishers_.find(topic);
+    if (it != publishers_.end()) {
+      message_type = it->second.message_type;
+    }
+  }
+
+  if (message_type == "geometry_msgs/msg/Twist") {
+    const auto decoded = horuslink::decode_twist(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink Twist payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    geometry_msgs::msg::Twist twist_msg;
+    twist_msg.linear.x = decoded->linear.x;
+    twist_msg.linear.y = decoded->linear.y;
+    twist_msg.linear.z = decoded->linear.z;
+    twist_msg.angular.x = decoded->angular.x;
+    twist_msg.angular.y = decoded->angular.y;
+    twist_msg.angular.z = decoded->angular.z;
+    return publish_message(topic, serialize_ros_message(twist_msg));
   }
 
   const auto serialized_msg = detail::add_cdr_header(payload);
