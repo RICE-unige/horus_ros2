@@ -486,15 +486,9 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
       rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
       rclcpp::Parameter("max_connections", 7),
       rclcpp::Parameter("socket_buffer_size", 131072),
-      rclcpp::Parameter("message_queue_size", 17),
       rclcpp::Parameter("worker_threads", 3),
-      rclcpp::Parameter("connection_timeout_ms", 7000),
       rclcpp::Parameter("tcp_nodelay", false),
-      rclcpp::Parameter("log_protocol_messages", false),
-      rclcpp::Parameter("message_pool_size", 2048),
-      rclcpp::Parameter("enable_zero_copy", false),
-      rclcpp::Parameter("default_publisher_qos.depth", 32),
-      rclcpp::Parameter("default_subscriber_qos.depth", 32)
+      rclcpp::Parameter("log_protocol_messages", false)
   });
 
   UnityBridgeNode node(options);
@@ -508,15 +502,6 @@ TEST_F(BridgeRuntimeTest, UnityBridgeNodeLoadsParametersAndKeepsServiceTimerAliv
   EXPECT_FALSE(node.tcp_nodelay());
   EXPECT_EQ(node.worker_threads(), 3);
   EXPECT_FALSE(node.log_protocol_messages());
-
-  const auto & warnings = node.reserved_parameter_warnings();
-  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "message_pool_size"), warnings.end());
-  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "message_queue_size"), warnings.end());
-  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "connection_timeout_ms"), warnings.end());
-  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "enable_zero_copy"), warnings.end());
-  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "default_publisher_qos.*"), warnings.end());
-  EXPECT_NE(std::find(warnings.begin(), warnings.end(), "default_subscriber_qos.*"),
-      warnings.end());
 
   EXPECT_FALSE(node.has_service_timer());
   ASSERT_TRUE(node.start());

@@ -20,7 +20,6 @@
 #include <iostream>
 #include <chrono>
 #include <cctype>
-#include <sstream>
 
 namespace horus_unity_bridge
 {
@@ -67,18 +66,6 @@ UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions & options)
     executor_options, worker_threads_, false
   );
   executor_->add_node(router_);
-
-  if (!reserved_parameter_warnings_.empty()) {
-    std::ostringstream warning_stream;
-    warning_stream << "Reserved bridge parameters currently ignored: ";
-    for (size_t i = 0; i < reserved_parameter_warnings_.size(); ++i) {
-      if (i > 0) {
-        warning_stream << ", ";
-      }
-      warning_stream << reserved_parameter_warnings_[i];
-    }
-    RCLCPP_WARN(router_->get_logger(), "%s", warning_stream.str().c_str());
-  }
 
   RCLCPP_INFO(
     router_->get_logger(),
@@ -131,52 +118,6 @@ void UnityBridgeNode::load_parameters()
   worker_threads_ = std::max<int>(1, static_cast<int>(configured_worker_threads));
   log_protocol_messages_ = router_->declare_parameter<bool>("log_protocol_messages", true);
   router_->set_log_protocol_messages(log_protocol_messages_);
-
-  reserved_parameter_warnings_.clear();
-  auto add_reserved_warning = [this](const std::string & name) {
-      if (std::find(
-          reserved_parameter_warnings_.begin(),
-          reserved_parameter_warnings_.end(),
-          name) == reserved_parameter_warnings_.end())
-      {
-        reserved_parameter_warnings_.push_back(name);
-      }
-    };
-
-  router_->declare_parameter<int>("message_pool_size", 10000);
-  router_->declare_parameter<int>("message_queue_size", 1000);
-  router_->declare_parameter<int>("connection_timeout_ms", 5000);
-  router_->declare_parameter<bool>("enable_zero_copy", true);
-  add_reserved_warning("message_pool_size");
-  add_reserved_warning("message_queue_size");
-  add_reserved_warning("connection_timeout_ms");
-  add_reserved_warning("enable_zero_copy");
-
-  const std::string publisher_reliability = router_->declare_parameter<std::string>(
-    "default_publisher_qos.reliability", "reliable");
-  const std::string publisher_durability = router_->declare_parameter<std::string>(
-    "default_publisher_qos.durability", "volatile");
-  const std::string publisher_history = router_->declare_parameter<std::string>(
-    "default_publisher_qos.history", "keep_last");
-  const int publisher_depth = router_->declare_parameter<int>("default_publisher_qos.depth", 10);
-  (void)publisher_reliability;
-  (void)publisher_durability;
-  (void)publisher_history;
-  (void)publisher_depth;
-  add_reserved_warning("default_publisher_qos.*");
-
-  const std::string subscriber_reliability = router_->declare_parameter<std::string>(
-    "default_subscriber_qos.reliability", "reliable");
-  const std::string subscriber_durability = router_->declare_parameter<std::string>(
-    "default_subscriber_qos.durability", "volatile");
-  const std::string subscriber_history = router_->declare_parameter<std::string>(
-    "default_subscriber_qos.history", "keep_last");
-  const int subscriber_depth = router_->declare_parameter<int>("default_subscriber_qos.depth", 10);
-  (void)subscriber_reliability;
-  (void)subscriber_durability;
-  (void)subscriber_history;
-  (void)subscriber_depth;
-  add_reserved_warning("default_subscriber_qos.*");
 }
 
 void UnityBridgeNode::setup_callbacks()

@@ -82,10 +82,6 @@ public:
   int worker_threads() const {return worker_threads_;}
   bool log_protocol_messages() const {return log_protocol_messages_;}
   bool has_service_timer() const {return static_cast<bool>(service_timer_);}
-  const std::vector<std::string> & reserved_parameter_warnings() const
-  {
-    return reserved_parameter_warnings_;
-  }
 
   /**
    * @brief Print comprehensive statistics
@@ -104,7 +100,6 @@ private:
   std::string transport_protocol_name_ = "horuslink";
   int worker_threads_ = 4;
   bool log_protocol_messages_ = true;
-  std::vector<std::string> reserved_parameter_warnings_;
   rclcpp::NodeOptions node_options_;
 
   // State
