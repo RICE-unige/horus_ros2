@@ -14,21 +14,21 @@
 
 > [!IMPORTANT]
 > `horus_unity_bridge` is the ROS 2 runtime bridge between HORUS SDK clients and Unity-based MR applications.
-> It preserves Unity ROS-TCP protocol compatibility while adding HORUS-specific operational behavior.
+> It speaks the HORUS HorusLink transport on the Unity-facing side and keeps ROS 2 CDR strictly at the DDS edge.
 
 ## Operator Scope
 
 This package handles:
 - TCP server lifecycle for Unity client connectivity,
-- topic/service routing between Unity protocol and ROS 2 graph,
+- topic/service routing between HorusLink channels and the ROS 2 graph,
 - optional WebRTC signaling + media session runtime,
 - bridge diagnostics for integration triage.
 
 ## Runtime Components
 
-- `ConnectionManager`: socket lifecycle and client handling
-- `MessageRouter`: protocol command routing, publisher/subscriber binding, WebRTC signaling dispatch
-- `TopicManager`: ROS 2 topic registry + QoS handling
+- `HorusLinkConnectionManager`: dual-lane realtime/bulk socket lifecycle and client handling
+- `MessageRouter`: channel routing, publisher/subscriber binding, WebRTC signaling dispatch
+- `TopicManager`: ROS 2 topic registry, QoS handling, and CDR/HorusLink payload conversion
 - `ServiceManager`: ROS/Unity service proxy handling
 - `WebRTCManager` (optional): offer/candidate handling, SDP/ICE flow, RTP sender pipeline
 
@@ -101,8 +101,8 @@ Primary configuration file:
 - `config/bridge_config.yaml`
 
 Important keys:
-- network: `tcp_ip`, `tcp_port`, `max_connections`
-- performance: `socket_buffer_size`, `message_queue_size`, `worker_threads`
+- network: `tcp_ip`, `tcp_port`, `horuslink_bulk_port`, `max_connections`
+- performance: `socket_buffer_size`, `worker_threads`
 - QoS defaults: publisher/subscriber reliability + durability + depth
 - WebRTC block:
   - `enabled`
@@ -127,6 +127,18 @@ Important keys:
 > This gate avoids the common "session appears connected but white panel" condition caused by negotiation mismatch.
 
 ## Diagnostics Decoding Guide
+
+For HorusLink wire captures, use the checked-in frame inspector:
+
+```bash
+cd ~/horus_ws/src/horus_ros2/horus_unity_bridge
+tools/horuslink_frame_inspector.py capture.bin --pretty
+tools/horuslink_frame_inspector.py --hex capture.hex --pretty
+```
+
+The inspector decodes the fixed 16-byte frame header, frame flags, and binary
+TLV control payloads. It is useful when comparing Unity and bridge logs for
+lane negotiation, subscribe acknowledgments, and service correlation IDs.
 
 Bridge telemetry includes:
 - negotiated video MID,

@@ -29,6 +29,7 @@ find_package(rosidl_typesupport_introspection_cpp REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(example_interfaces REQUIRED)
 find_package(PkgConfig QUIET)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # Find nlohmann_json (header-only library)
 find_package(nlohmann_json 3.2.0 QUIET)
@@ -251,6 +252,14 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(DIRECTORY tools
+  DESTINATION share/${PROJECT_NAME}
+  FILE_PERMISSIONS
+    OWNER_READ OWNER_WRITE OWNER_EXECUTE
+    GROUP_READ GROUP_EXECUTE
+    WORLD_READ WORLD_EXECUTE
+)
+
 # Install header files
 install(DIRECTORY include/
   DESTINATION include
@@ -307,6 +316,14 @@ if(BUILD_TESTING)
       example_interfaces
     )
   endif()
+
+  add_test(
+    NAME horuslink_frame_inspector_py
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/test_horuslink_frame_inspector.py
+      ${CMAKE_CURRENT_SOURCE_DIR}
+  )
 endif()
 
 ament_package()
