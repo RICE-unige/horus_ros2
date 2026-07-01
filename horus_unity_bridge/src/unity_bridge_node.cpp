@@ -103,14 +103,11 @@ void UnityBridgeNode::load_parameters()
 
   transport_protocol_name_ = normalize_transport_protocol(
     router_->declare_parameter<std::string>("transport_protocol", "horuslink"));
-  const bool removed_legacy_transport_requested = transport_protocol_name_ == "legacy";
   if (transport_protocol_name_ == "horuslink") {
     transport_protocol_ = TransportProtocol::HorusLink;
   } else {
     RCLCPP_WARN(
       router_->get_logger(),
-      removed_legacy_transport_requested ?
-      "Removed transport_protocol '%s' requested; using horuslink mode" :
       "Unknown transport_protocol '%s'; falling back to horuslink mode",
       transport_protocol_name_.c_str());
     transport_protocol_name_ = "horuslink";
