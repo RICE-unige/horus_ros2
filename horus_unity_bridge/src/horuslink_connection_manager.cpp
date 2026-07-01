@@ -903,11 +903,21 @@ bool HorusLinkConnectionManager::send_frame(
   }
 
   const int fd = lane == Lane::Bulk ? connection->bulk_fd : connection->realtime_fd;
-  const auto bytes = serialize_frame(frame.header, frame.payload.data(), frame.payload.size());
+  if (frame.payload.size() > std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+
+  FrameHeader encoded_header = frame.header;
+  encoded_header.length = static_cast<uint32_t>(frame.payload.size());
+  std::array<uint8_t, FrameHeader::kSize> header_bytes{};
+  encode_header(encoded_header, header_bytes);
+
   std::mutex & lane_send_mutex =
     lane == Lane::Bulk ? connection->bulk_send_mutex : connection->realtime_send_mutex;
   std::lock_guard<std::mutex> send_lock(lane_send_mutex);
-  if (!send_all(fd, bytes.data(), bytes.size())) {
+  if (!send_all(fd, header_bytes.data(), header_bytes.size()) ||
+    !send_all(fd, frame.payload.data(), frame.payload.size()))
+  {
     disconnect_connection(connection->id);
     return false;
   }
