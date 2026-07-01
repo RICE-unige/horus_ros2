@@ -188,12 +188,10 @@ ros2 run horus_unity_bridge_test unity_client_simulator
 
 ## Acknowledgments
 
-`horus_unity_bridge` design and interoperability strategy were strongly informed by the Unity ROS networking stack:
-
-- Unity ROS TCP Endpoint: <https://github.com/Unity-Technologies/ROS-TCP-Endpoint>
-- Unity ROS TCP Connector package <https://github.com/Unity-Technologies/ROS-TCP-Connector>
-
-These references helped guide compatibility decisions while extending the bridge for HORUS-specific runtime and WebRTC features.
+`horus_unity_bridge` is maintained as the HORUS-specific ROS 2 integration
+bridge for mixed-reality robot operation, including HorusLink transport,
+control leases, service routing, diagnostics, and optional WebRTC media
+coordination.
 
 ## License
 
