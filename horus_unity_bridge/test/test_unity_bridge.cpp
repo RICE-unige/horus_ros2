@@ -407,7 +407,7 @@ TEST_F(BridgeRuntimeTest, HorusLinkTopicTableIsSortedByTopicAndType)
   (void)a_publisher;
 }
 
-TEST_F(BridgeRuntimeTest, HorusLinkTopicTableAssignsLaneAndDelivery)
+TEST_F(BridgeRuntimeTest, HorusLinkTopicTableUsesNeutralLaneAndDelivery)
 {
   MessageRouter router;
   auto fixture_node = std::make_shared<rclcpp::Node>("horuslink_topic_table_route_fixture");
@@ -457,11 +457,11 @@ TEST_F(BridgeRuntimeTest, HorusLinkTopicTableAssignsLaneAndDelivery)
 
   const auto camera_entry = find_topic("/camera/front/image");
   EXPECT_EQ(camera_entry.lane, horuslink::Lane::Realtime);
-  EXPECT_EQ(camera_entry.delivery, horuslink::Delivery::ReplaceLatest);
+  EXPECT_EQ(camera_entry.delivery, horuslink::Delivery::ReliableFifo);
 
   const auto cloud_entry = find_topic("/map_3d");
-  EXPECT_EQ(cloud_entry.lane, horuslink::Lane::Bulk);
-  EXPECT_EQ(cloud_entry.delivery, horuslink::Delivery::ReplaceLatest);
+  EXPECT_EQ(cloud_entry.lane, horuslink::Lane::Realtime);
+  EXPECT_EQ(cloud_entry.delivery, horuslink::Delivery::ReliableFifo);
 
   const auto control_entry = find_topic("/horus/registration");
   EXPECT_EQ(control_entry.lane, horuslink::Lane::Realtime);

@@ -23,7 +23,6 @@
 #include <sensor_msgs/image_encodings.hpp>
 #include <rclcpp/qos.hpp>
 #include <algorithm>
-#include <cctype>
 #include <cstring>
 
 #ifdef ENABLE_WEBRTC
@@ -34,83 +33,6 @@
 
 namespace horus_unity_bridge
 {
-
-namespace
-{
-
-std::string normalize_message_type_for_policy(std::string message_type)
-{
-  if (!message_type.empty() && message_type.back() == '\0') {
-    message_type.pop_back();
-  }
-
-  const std::string msg_marker = "/msg/";
-  const size_t msg_pos = message_type.find(msg_marker);
-  if (msg_pos != std::string::npos) {
-    message_type.erase(msg_pos, msg_marker.size() - 1);
-  }
-
-  std::transform(
-    message_type.begin(),
-    message_type.end(),
-    message_type.begin(),
-    [](unsigned char c) {return static_cast<char>(std::tolower(c));});
-  return message_type;
-}
-
-struct HorusLinkRoute
-{
-  horuslink::Lane lane = horuslink::Lane::Realtime;
-  horuslink::Delivery delivery = horuslink::Delivery::ReliableFifo;
-};
-
-HorusLinkRoute classify_horuslink_route(
-  const std::string & topic,
-  const std::string & message_type)
-{
-  const std::string normalized_type = normalize_message_type_for_policy(message_type);
-
-  static const std::unordered_set<std::string> kBulkReplaceableTypes = {
-    "sensor_msgs/pointcloud2",
-    "nav_msgs/occupancygrid"
-  };
-  static const std::unordered_set<std::string> kBulkStrictTypes = {
-    "visualization_msgs/marker",
-    "visualization_msgs/markerarray"
-  };
-
-  if ((topic.find("chunk") != std::string::npos &&
-    topic.find("manifest") == std::string::npos) ||
-    (topic.find("gaussian_splat") != std::string::npos &&
-    topic.find("manifest") == std::string::npos))
-  {
-    return {horuslink::Lane::Bulk, horuslink::Delivery::ReliableFifo};
-  }
-
-  if (kBulkReplaceableTypes.find(normalized_type) != kBulkReplaceableTypes.end()) {
-    return {horuslink::Lane::Bulk, horuslink::Delivery::ReplaceLatest};
-  }
-  if (kBulkStrictTypes.find(normalized_type) != kBulkStrictTypes.end()) {
-    return {horuslink::Lane::Bulk, horuslink::Delivery::ReliableFifo};
-  }
-
-  if (topic.rfind("/horus/", 0) == 0) {
-    return {horuslink::Lane::Realtime, horuslink::Delivery::ReliableFifo};
-  }
-
-  static const std::unordered_set<std::string> kReplaceableTypes = {
-    "sensor_msgs/image",
-    "sensor_msgs/compressedimage",
-    "sensor_msgs/laserscan"
-  };
-  if (kReplaceableTypes.find(normalized_type) != kReplaceableTypes.end()) {
-    return {horuslink::Lane::Realtime, horuslink::Delivery::ReplaceLatest};
-  }
-
-  return {};
-}
-
-}  // namespace
 
 MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
 : Node("horus_unity_bridge", options)
@@ -226,13 +148,12 @@ std::vector<horuslink::TopicEntry> MessageRouter::get_horuslink_topic_table()
 
   for (const auto & [topic, types] : topic_names_and_types) {
     const std::string type_name = types.empty() ? "unknown" : types.front();
-    const auto route = classify_horuslink_route(topic, type_name);
     entries.push_back(horuslink::TopicEntry{
         0,
         topic,
         type_name,
-        route.lane,
-        route.delivery
+        horuslink::Lane::Realtime,
+        horuslink::Delivery::ReliableFifo
       });
   }
 
