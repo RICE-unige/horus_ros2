@@ -65,11 +65,11 @@ class MessageRouter : public rclcpp::Node
 {
 public:
   using SendCallback = std::function<bool(
-        int client_fd,
+        int connection_id,
         const std::string &,
         const std::vector<uint8_t> &)>;
   using HorusLinkServiceResponseCallback = std::function<bool(
-        int client_fd,
+        int connection_id,
         const std::string & service_name,
         uint32_t corr_id,
         const std::vector<uint8_t> & response)>;
@@ -99,49 +99,49 @@ public:
    * @brief Register a HorusLink topic subscription after channel negotiation.
    */
   bool register_horuslink_subscriber(
-    int client_fd,
+    int connection_id,
     const horuslink::ChannelDescriptor & channel);
 
   /**
    * @brief Register a HorusLink publisher after channel negotiation.
    */
   bool register_horuslink_publisher(
-    int client_fd,
+    int connection_id,
     const horuslink::ChannelDescriptor & channel);
 
   /**
    * @brief Register a HorusLink ROS service client after channel negotiation.
    */
   bool register_horuslink_ros_service(
-    int client_fd,
+    int connection_id,
     const horuslink::ChannelDescriptor & channel);
 
   /**
    * @brief Unregister a HorusLink topic subscription after channel close.
    */
   bool unregister_horuslink_subscriber(
-    int client_fd,
+    int connection_id,
     const horuslink::ChannelDescriptor & channel);
 
   /**
    * @brief Unregister a HorusLink publisher after channel close.
    */
   bool unregister_horuslink_publisher(
-    int client_fd,
+    int connection_id,
     const horuslink::ChannelDescriptor & channel);
 
   /**
    * @brief Unregister a HorusLink ROS service client after channel close.
    */
   bool unregister_horuslink_ros_service(
-    int client_fd,
+    int connection_id,
     const horuslink::ChannelDescriptor & channel);
 
   /**
    * @brief Route a HorusLink data frame to a ROS topic.
    */
   bool route_horuslink_data_frame(
-    int client_fd,
+    int connection_id,
     const horuslink::ChannelDescriptor & channel,
     const std::vector<uint8_t> & payload);
 
@@ -149,7 +149,7 @@ public:
    * @brief Route a HorusLink service request frame to a ROS service.
    */
   bool route_horuslink_service_request(
-    int client_fd,
+    int connection_id,
     const horuslink::ChannelDescriptor & channel,
     uint32_t corr_id,
     const std::vector<uint8_t> & request);
@@ -269,14 +269,14 @@ private:
   // Statistics
   Statistics stats_;
 
-  // Map service request IDs to client FDs for routing responses
-  std::unordered_map<uint32_t, int> service_response_client_;
-  std::unordered_map<uint32_t, std::string> service_response_topic_;
+  // Map HorusLink service correlation IDs to requesting connections for responses
+  std::unordered_map<uint32_t, int> service_response_connection_by_corr_id_;
+  std::unordered_map<uint32_t, std::string> service_response_topic_by_corr_id_;
   std::mutex service_response_mutex_;
   bool log_protocol_messages_ = true;
 
 public:
-  void on_client_disconnected(int client_fd);
+  void on_client_disconnected(int connection_id);
 
 private:
   struct ClientResourceState
@@ -289,16 +289,16 @@ private:
   };
   std::unordered_map<int, ClientResourceState> client_resources_;
   std::mutex client_resources_mutex_;
-  void track_client_subscriber(int client_fd, const std::string & topic);
-  void track_client_publisher(int client_fd, const std::string & topic);
-  void track_client_ros_service(int client_fd, const std::string & service_name);
-  void track_client_unity_service(int client_fd, const std::string & service_name);
-  void track_client_webrtc_session(int client_fd, const std::string & session_id);
-  void untrack_client_webrtc_session(int client_fd, const std::string & session_id);
-  void untrack_client_subscriber(int client_fd, const std::string & topic);
-  void untrack_client_publisher(int client_fd, const std::string & topic);
-  void untrack_client_ros_service(int client_fd, const std::string & service_name);
-  void untrack_client_unity_service(int client_fd, const std::string & service_name);
+  void track_client_subscriber(int connection_id, const std::string & topic);
+  void track_client_publisher(int connection_id, const std::string & topic);
+  void track_client_ros_service(int connection_id, const std::string & service_name);
+  void track_client_unity_service(int connection_id, const std::string & service_name);
+  void track_client_webrtc_session(int connection_id, const std::string & session_id);
+  void untrack_client_webrtc_session(int connection_id, const std::string & session_id);
+  void untrack_client_subscriber(int connection_id, const std::string & topic);
+  void untrack_client_publisher(int connection_id, const std::string & topic);
+  void untrack_client_ros_service(int connection_id, const std::string & service_name);
+  void untrack_client_unity_service(int connection_id, const std::string & service_name);
 };
 
 } // namespace horus_unity_bridge

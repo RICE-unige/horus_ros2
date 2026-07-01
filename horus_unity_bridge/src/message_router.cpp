@@ -96,35 +96,37 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
 
   // Setup service manager callback for sending responses to Unity
   service_manager_->set_response_callback(
-    [this](uint32_t srv_id, const std::vector<uint8_t> & response) {
+    [this](uint32_t corr_id, const std::vector<uint8_t> & response) {
       // Send service response back to the requesting Unity client
-      int target_fd = -1;
+      int target_connection_id = -1;
       std::string service_name;
       {
         std::lock_guard<std::mutex> lock(service_response_mutex_);
-        auto it = service_response_client_.find(srv_id);
-        if (it != service_response_client_.end()) {
-          target_fd = it->second;
-          service_response_client_.erase(it);
+        auto it = service_response_connection_by_corr_id_.find(corr_id);
+        if (it != service_response_connection_by_corr_id_.end()) {
+          target_connection_id = it->second;
+          service_response_connection_by_corr_id_.erase(it);
         }
-        auto service_it = service_response_topic_.find(srv_id);
-        if (service_it != service_response_topic_.end()) {
+        auto service_it = service_response_topic_by_corr_id_.find(corr_id);
+        if (service_it != service_response_topic_by_corr_id_.end()) {
           service_name = service_it->second;
-          service_response_topic_.erase(service_it);
+          service_response_topic_by_corr_id_.erase(service_it);
         }
       }
 
-      if (!service_name.empty() && horuslink_service_response_callback_ && target_fd != -1) {
+      if (!service_name.empty() && horuslink_service_response_callback_ &&
+      target_connection_id != -1)
+      {
         const auto payload = detail::strip_cdr_header(response);
-        horuslink_service_response_callback_(target_fd, service_name, srv_id, payload);
+        horuslink_service_response_callback_(target_connection_id, service_name, corr_id, payload);
         return;
       }
 
       stats_.routing_errors++;
       RCLCPP_WARN(
         get_logger(),
-        "Dropping ROS service response id=%u because no HorusLink response channel is registered",
-        srv_id);
+        "Dropping ROS service response corr_id=%u because no HorusLink response channel is registered",
+        corr_id);
     }
   );
 
@@ -171,7 +173,7 @@ std::vector<horuslink::TopicEntry> MessageRouter::get_horuslink_topic_table()
 }
 
 bool MessageRouter::register_horuslink_subscriber(
-  int client_fd,
+  int connection_id,
   const horuslink::ChannelDescriptor & channel)
 {
   if (channel.topic.empty() || channel.type_name.empty()) {
@@ -181,18 +183,18 @@ bool MessageRouter::register_horuslink_subscriber(
   const bool success = topic_manager_->register_horuslink_subscriber(
     channel.topic,
     channel.type_name,
-    client_fd,
-    [this, client_fd](
+    connection_id,
+    [this, connection_id](
       const std::string & topic,
       const std::vector<uint8_t> & data)
     {
       if (send_callback_) {
-        send_callback_(client_fd, topic, data);
+        send_callback_(connection_id, topic, data);
       }
     });
 
   if (success) {
-    track_client_subscriber(client_fd, channel.topic);
+    track_client_subscriber(connection_id, channel.topic);
     RCLCPP_INFO(
       get_logger(),
       "Registered HorusLink subscriber: channel=%u topic=%s [%s]",
@@ -212,7 +214,7 @@ bool MessageRouter::register_horuslink_subscriber(
 }
 
 bool MessageRouter::register_horuslink_publisher(
-  int client_fd,
+  int connection_id,
   const horuslink::ChannelDescriptor & channel)
 {
   if (channel.topic.empty() || channel.type_name.empty()) {
@@ -222,10 +224,10 @@ bool MessageRouter::register_horuslink_publisher(
   const bool success = topic_manager_->register_publisher(
     channel.topic,
     channel.type_name,
-    client_fd);
+    connection_id);
 
   if (success) {
-    track_client_publisher(client_fd, channel.topic);
+    track_client_publisher(connection_id, channel.topic);
     RCLCPP_INFO(
       get_logger(),
       "Registered HorusLink publisher: channel=%u topic=%s [%s]",
@@ -245,7 +247,7 @@ bool MessageRouter::register_horuslink_publisher(
 }
 
 bool MessageRouter::register_horuslink_ros_service(
-  int client_fd,
+  int connection_id,
   const horuslink::ChannelDescriptor & channel)
 {
   if (channel.topic.empty() || channel.type_name.empty()) {
@@ -257,7 +259,7 @@ bool MessageRouter::register_horuslink_ros_service(
     channel.type_name);
 
   if (success) {
-    track_client_ros_service(client_fd, channel.topic);
+    track_client_ros_service(connection_id, channel.topic);
     RCLCPP_INFO(
       get_logger(),
       "Registered HorusLink ROS service: channel=%u service=%s [%s]",
@@ -277,15 +279,15 @@ bool MessageRouter::register_horuslink_ros_service(
 }
 
 bool MessageRouter::unregister_horuslink_subscriber(
-  int client_fd,
+  int connection_id,
   const horuslink::ChannelDescriptor & channel)
 {
   if (channel.topic.empty()) {
     return false;
   }
 
-  const bool success = topic_manager_->unregister_subscriber(channel.topic, client_fd);
-  untrack_client_subscriber(client_fd, channel.topic);
+  const bool success = topic_manager_->unregister_subscriber(channel.topic, connection_id);
+  untrack_client_subscriber(connection_id, channel.topic);
   if (success) {
     RCLCPP_INFO(
       get_logger(),
@@ -304,15 +306,15 @@ bool MessageRouter::unregister_horuslink_subscriber(
 }
 
 bool MessageRouter::unregister_horuslink_publisher(
-  int client_fd,
+  int connection_id,
   const horuslink::ChannelDescriptor & channel)
 {
   if (channel.topic.empty()) {
     return false;
   }
 
-  const bool success = topic_manager_->unregister_publisher(channel.topic, client_fd);
-  untrack_client_publisher(client_fd, channel.topic);
+  const bool success = topic_manager_->unregister_publisher(channel.topic, connection_id);
+  untrack_client_publisher(connection_id, channel.topic);
   if (success) {
     RCLCPP_INFO(
       get_logger(),
@@ -331,7 +333,7 @@ bool MessageRouter::unregister_horuslink_publisher(
 }
 
 bool MessageRouter::unregister_horuslink_ros_service(
-  int client_fd,
+  int connection_id,
   const horuslink::ChannelDescriptor & channel)
 {
   if (channel.topic.empty()) {
@@ -339,7 +341,7 @@ bool MessageRouter::unregister_horuslink_ros_service(
   }
 
   const bool success = service_manager_->unregister_ros_service(channel.topic);
-  untrack_client_ros_service(client_fd, channel.topic);
+  untrack_client_ros_service(connection_id, channel.topic);
   if (success) {
     RCLCPP_INFO(
       get_logger(),
@@ -358,7 +360,7 @@ bool MessageRouter::unregister_horuslink_ros_service(
 }
 
 bool MessageRouter::route_horuslink_data_frame(
-  int client_fd,
+  int connection_id,
   const horuslink::ChannelDescriptor & channel,
   const std::vector<uint8_t> & payload)
 {
@@ -371,7 +373,7 @@ bool MessageRouter::route_horuslink_data_frame(
 
   if (control_lease_manager_ && control_lease_manager_->is_internal_topic(channel.topic)) {
     const bool handled = control_lease_manager_->handle_internal_message(
-      client_fd,
+      connection_id,
       channel.topic,
       payload);
     if (!handled) {
@@ -384,7 +386,7 @@ bool MessageRouter::route_horuslink_data_frame(
   std::string denied_robot_name;
   if (control_lease_manager_ &&
     !control_lease_manager_->authorize_command_publish(
-      client_fd,
+      connection_id,
       channel.topic,
       &denied_reason,
       &denied_robot_name))
@@ -395,7 +397,7 @@ bool MessageRouter::route_horuslink_data_frame(
       *get_clock(),
       1000,
       "Denied HorusLink publish from connection %d on protected topic '%s' (robot='%s', reason='%s')",
-      client_fd,
+      connection_id,
       channel.topic.c_str(),
       denied_robot_name.c_str(),
       denied_reason.c_str());
@@ -414,7 +416,7 @@ bool MessageRouter::route_horuslink_data_frame(
 }
 
 bool MessageRouter::route_horuslink_service_request(
-  int client_fd,
+  int connection_id,
   const horuslink::ChannelDescriptor & channel,
   uint32_t corr_id,
   const std::vector<uint8_t> & request)
@@ -428,8 +430,8 @@ bool MessageRouter::route_horuslink_service_request(
 
   {
     std::lock_guard<std::mutex> lock(service_response_mutex_);
-    service_response_client_[corr_id] = client_fd;
-    service_response_topic_[corr_id] = channel.topic;
+    service_response_connection_by_corr_id_[corr_id] = connection_id;
+    service_response_topic_by_corr_id_[corr_id] = channel.topic;
   }
 
   const bool success = service_manager_->call_ros_service_async(
@@ -438,8 +440,8 @@ bool MessageRouter::route_horuslink_service_request(
     request);
   if (!success) {
     std::lock_guard<std::mutex> lock(service_response_mutex_);
-    service_response_client_.erase(corr_id);
-    service_response_topic_.erase(corr_id);
+    service_response_connection_by_corr_id_.erase(corr_id);
+    service_response_topic_by_corr_id_.erase(corr_id);
     stats_.routing_errors++;
     return false;
   }
@@ -453,98 +455,100 @@ void MessageRouter::set_log_protocol_messages(bool enabled)
   topic_manager_->set_protocol_logging_enabled(enabled);
 }
 
-void MessageRouter::track_client_subscriber(int client_fd, const std::string & topic)
+void MessageRouter::track_client_subscriber(int connection_id, const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  auto & state = client_resources_[client_fd];
+  auto & state = client_resources_[connection_id];
   state.subscribed_topics.insert(topic);
   RCLCPP_INFO(get_logger(), "Client %d subscribed topics=%zu (last=%s)",
-              client_fd, state.subscribed_topics.size(), topic.c_str());
+              connection_id, state.subscribed_topics.size(), topic.c_str());
 }
 
-void MessageRouter::track_client_publisher(int client_fd, const std::string & topic)
+void MessageRouter::track_client_publisher(int connection_id, const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  client_resources_[client_fd].published_topics.insert(topic);
+  client_resources_[connection_id].published_topics.insert(topic);
 }
 
-void MessageRouter::track_client_ros_service(int client_fd, const std::string & service_name)
+void MessageRouter::track_client_ros_service(int connection_id, const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  client_resources_[client_fd].ros_services.insert(service_name);
+  client_resources_[connection_id].ros_services.insert(service_name);
 }
 
-void MessageRouter::track_client_unity_service(int client_fd, const std::string & service_name)
+void MessageRouter::track_client_unity_service(int connection_id, const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  client_resources_[client_fd].unity_services.insert(service_name);
+  client_resources_[connection_id].unity_services.insert(service_name);
 }
 
-void MessageRouter::track_client_webrtc_session(int client_fd, const std::string & session_id)
+void MessageRouter::track_client_webrtc_session(int connection_id, const std::string & session_id)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  client_resources_[client_fd].webrtc_session_ids.insert(session_id);
+  client_resources_[connection_id].webrtc_session_ids.insert(session_id);
 }
 
-void MessageRouter::untrack_client_webrtc_session(int client_fd, const std::string & session_id)
+void MessageRouter::untrack_client_webrtc_session(int connection_id, const std::string & session_id)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  auto it = client_resources_.find(client_fd);
+  auto it = client_resources_.find(connection_id);
   if (it == client_resources_.end()) {
     return;
   }
   it->second.webrtc_session_ids.erase(session_id);
 }
 
-void MessageRouter::untrack_client_subscriber(int client_fd, const std::string & topic)
+void MessageRouter::untrack_client_subscriber(int connection_id, const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  auto it = client_resources_.find(client_fd);
+  auto it = client_resources_.find(connection_id);
   if (it == client_resources_.end()) {
     return;
   }
   it->second.subscribed_topics.erase(topic);
   RCLCPP_INFO(get_logger(), "Client %d subscribed topics=%zu after remove (%s)",
-              client_fd, it->second.subscribed_topics.size(), topic.c_str());
+              connection_id, it->second.subscribed_topics.size(), topic.c_str());
 }
 
-void MessageRouter::untrack_client_publisher(int client_fd, const std::string & topic)
+void MessageRouter::untrack_client_publisher(int connection_id, const std::string & topic)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  auto it = client_resources_.find(client_fd);
+  auto it = client_resources_.find(connection_id);
   if (it == client_resources_.end()) {
     return;
   }
   it->second.published_topics.erase(topic);
 }
 
-void MessageRouter::untrack_client_ros_service(int client_fd, const std::string & service_name)
+void MessageRouter::untrack_client_ros_service(int connection_id, const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  auto it = client_resources_.find(client_fd);
+  auto it = client_resources_.find(connection_id);
   if (it == client_resources_.end()) {
     return;
   }
   it->second.ros_services.erase(service_name);
 }
 
-void MessageRouter::untrack_client_unity_service(int client_fd, const std::string & service_name)
+void MessageRouter::untrack_client_unity_service(
+  int connection_id,
+  const std::string & service_name)
 {
   std::lock_guard<std::mutex> lock(client_resources_mutex_);
-  auto it = client_resources_.find(client_fd);
+  auto it = client_resources_.find(connection_id);
   if (it == client_resources_.end()) {
     return;
   }
   it->second.unity_services.erase(service_name);
 }
 
-void MessageRouter::on_client_disconnected(int client_fd)
+void MessageRouter::on_client_disconnected(int connection_id)
 {
   ClientResourceState resources;
   bool had_resources = false;
   {
     std::lock_guard<std::mutex> lock(client_resources_mutex_);
-    auto it = client_resources_.find(client_fd);
+    auto it = client_resources_.find(connection_id);
     if (it != client_resources_.end()) {
       resources = it->second;
       client_resources_.erase(it);
@@ -552,11 +556,12 @@ void MessageRouter::on_client_disconnected(int client_fd)
     }
   }
 
-  size_t removed_subscriber_topics = topic_manager_->unregister_all_client_subscribers(client_fd);
-  size_t removed_publisher_owners = topic_manager_->unregister_all_client_publishers(client_fd);
+  size_t removed_subscriber_topics =
+    topic_manager_->unregister_all_client_subscribers(connection_id);
+  size_t removed_publisher_owners = topic_manager_->unregister_all_client_publishers(connection_id);
 
   if (control_lease_manager_) {
-    control_lease_manager_->on_client_disconnected(client_fd);
+    control_lease_manager_->on_client_disconnected(connection_id);
   }
 
   size_t removed_ros_services = 0;
@@ -575,10 +580,12 @@ void MessageRouter::on_client_disconnected(int client_fd)
 
   {
     std::lock_guard<std::mutex> lock(service_response_mutex_);
-    for (auto it = service_response_client_.begin(); it != service_response_client_.end(); ) {
-      if (it->second == client_fd) {
-        service_response_topic_.erase(it->first);
-        it = service_response_client_.erase(it);
+    for (auto it = service_response_connection_by_corr_id_.begin();
+      it != service_response_connection_by_corr_id_.end(); )
+    {
+      if (it->second == connection_id) {
+        service_response_topic_by_corr_id_.erase(it->first);
+        it = service_response_connection_by_corr_id_.erase(it);
       } else {
         ++it;
       }
@@ -595,7 +602,7 @@ void MessageRouter::on_client_disconnected(int client_fd)
     RCLCPP_INFO(
       get_logger(),
       "Client %d cleanup: subscribers=%zu publishers=%zu ros_services=%zu unity_services=%zu webrtc_sessions=%zu",
-      client_fd,
+      connection_id,
       removed_subscriber_topics,
       removed_publisher_owners,
       removed_ros_services,
