@@ -42,7 +42,8 @@ enum FrameFlags : uint8_t
   Begin = 1u << 1,
   End = 1u << 2,
   ReplaceLatest = 1u << 3,
-  Compressed = 1u << 4
+  Compressed = 1u << 4,
+  LightCodec = 1u << 5
 };
 
 struct FrameHeader

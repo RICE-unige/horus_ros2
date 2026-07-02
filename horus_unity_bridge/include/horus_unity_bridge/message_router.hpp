@@ -103,6 +103,16 @@ public:
     const horuslink::ChannelDescriptor & channel);
 
   /**
+   * @brief Replay cached retained-state payloads to a client after its channel is active.
+   *
+   * Called once a HorusLink subscribe has been acknowledged (channel active) so that a
+   * late-joining or reconnecting client is deterministically re-synced with the latched
+   * registration / multi-operator replay / static-TF state, without disturbing already
+   * connected clients. A no-op for topics that carry no cached retained state.
+   */
+  void replay_retained_payloads(int connection_id, const std::string & topic);
+
+  /**
    * @brief Register a HorusLink publisher after channel negotiation.
    */
   bool register_horuslink_publisher(
@@ -143,7 +153,8 @@ public:
   bool route_horuslink_data_frame(
     int connection_id,
     const horuslink::ChannelDescriptor & channel,
-    const std::vector<uint8_t> & payload);
+    const std::vector<uint8_t> & payload,
+    uint8_t frame_flags);
 
   /**
    * @brief Route a HorusLink service request frame to a ROS service.

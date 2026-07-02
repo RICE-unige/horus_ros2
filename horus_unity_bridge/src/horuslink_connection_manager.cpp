@@ -27,9 +27,11 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <utility>
 
@@ -173,6 +175,10 @@ bool HorusLinkConnectionManager::send_to_topic(
       payload,
       size);
     if (!result.accepted) {
+      if (result.error == "channel is not active") {
+        std::cerr << "HorusLink dropped frame (channel not active): connection=" <<
+          connection_id << " topic=" << topic << std::endl;
+      }
       return false;
     }
     lane = result.lane;
@@ -737,6 +743,14 @@ bool HorusLinkConnectionManager::handle_subscribe_request(
     ack_frame = connection->session.make_subscribe_ack_frame(ack);
   }
   send_frame(connection, Lane::Realtime, ack_frame);
+
+  if (ack.status == SubscribeStatus::Accepted && post_subscribe_callback_) {
+    // The channel is now active, so the outbound router will accept frames for it.
+    // Deterministically re-sync this client with any cached retained state for the topic
+    // (late-joiner / reconnect) instead of relying on DDS re-delivery races.
+    post_subscribe_callback_(connection->id, request.topic);
+  }
+
   return ack.status == SubscribeStatus::Accepted;
 }
 

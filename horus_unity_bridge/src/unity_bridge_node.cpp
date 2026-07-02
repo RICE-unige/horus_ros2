@@ -173,6 +173,11 @@ void UnityBridgeNode::setup_horuslink_callbacks()
       return router_->get_horuslink_topic_table();
     });
 
+  horuslink_connection_manager_->set_post_subscribe_callback(
+    [this](int connection_id, const std::string & topic) {
+      router_->replay_retained_payloads(connection_id, topic);
+    });
+
   router_->set_send_callback(
     [this](int connection_id,
     const std::string & topic,
@@ -396,7 +401,11 @@ void UnityBridgeNode::handle_horuslink_frame(
     return;
   }
 
-  router_->route_horuslink_data_frame(connection_id, channel, frame.payload);
+  router_->route_horuslink_data_frame(
+    connection_id,
+    channel,
+    frame.payload,
+    frame.header.flags);
 }
 
 void UnityBridgeNode::stats_timer_callback()

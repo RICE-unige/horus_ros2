@@ -83,6 +83,9 @@ public:
         const ChannelDescriptor & channel)>;
   using TopicTableCallback = std::function<std::vector<TopicEntry>(int connection_id)>;
   using ConnectionCallback = std::function<void(int connection_id, const std::string & ip)>;
+  using PostSubscribeCallback = std::function<void(
+        int connection_id,
+        const std::string & topic)>;
 
   explicit HorusLinkConnectionManager(Config config);
   ~HorusLinkConnectionManager();
@@ -139,6 +142,10 @@ public:
   void set_connection_callback(ConnectionCallback callback)
   {
     connection_callback_ = std::move(callback);
+  }
+  void set_post_subscribe_callback(PostSubscribeCallback callback)
+  {
+    post_subscribe_callback_ = std::move(callback);
   }
   void set_disconnection_callback(ConnectionCallback callback)
   {
@@ -249,6 +256,7 @@ private:
   TopicTableCallback topic_table_callback_;
   ConnectionCallback connection_callback_;
   ConnectionCallback disconnection_callback_;
+  PostSubscribeCallback post_subscribe_callback_;
 };
 
 }  // namespace horus_unity_bridge::horuslink

@@ -213,6 +213,35 @@ bool MessageRouter::register_horuslink_subscriber(
   return success;
 }
 
+void MessageRouter::replay_retained_payloads(
+  int connection_id,
+  const std::string & topic)
+{
+  if (!send_callback_) {
+    return;
+  }
+
+  const auto payloads = topic_manager_->get_retained_payloads(topic);
+  if (payloads.empty()) {
+    return;
+  }
+
+  size_t delivered = 0;
+  for (const auto & payload : payloads) {
+    if (send_callback_(connection_id, topic, payload)) {
+      ++delivered;
+    }
+  }
+
+  RCLCPP_INFO(
+    get_logger(),
+    "Replayed %zu/%zu retained payload(s) to connection=%d topic=%s",
+    delivered,
+    payloads.size(),
+    connection_id,
+    topic.c_str());
+}
+
 bool MessageRouter::register_horuslink_publisher(
   int connection_id,
   const horuslink::ChannelDescriptor & channel)
@@ -362,7 +391,8 @@ bool MessageRouter::unregister_horuslink_ros_service(
 bool MessageRouter::route_horuslink_data_frame(
   int connection_id,
   const horuslink::ChannelDescriptor & channel,
-  const std::vector<uint8_t> & payload)
+  const std::vector<uint8_t> & payload,
+  uint8_t frame_flags)
 {
   stats_.messages_routed++;
 
@@ -404,7 +434,10 @@ bool MessageRouter::route_horuslink_data_frame(
     return false;
   }
 
-  const bool success = topic_manager_->publish_horuslink_message(channel.topic, payload);
+  const bool success = topic_manager_->publish_horuslink_message(
+    channel.topic,
+    payload,
+    frame_flags);
 
   if (success) {
     stats_.messages_published++;

@@ -64,7 +64,7 @@ OutboundLaneEnqueueResult OutboundLaneQueue::enqueue(Frame frame)
   }
 
   for (auto it = frames_.begin(); it != frames_.end(); ++it) {
-    if (!is_replace_latest(*it)) {
+    if (!is_replace_latest(*it) || it->header.channel_id != frame.header.channel_id) {
       continue;
     }
 

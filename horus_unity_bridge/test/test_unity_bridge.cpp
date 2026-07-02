@@ -20,10 +20,12 @@
 #include "horus_unity_bridge/horuslink_protocol.hpp"
 #include "horus_unity_bridge/message_router.hpp"
 #include "horus_unity_bridge/serialized_payload.hpp"
+#include "horus_unity_bridge/topic_manager.hpp"
 #include "horus_unity_bridge/unity_bridge_node.hpp"
 
 #include <gtest/gtest.h>
 #include <example_interfaces/srv/add_two_ints.hpp>
+#include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -32,6 +34,7 @@
 #include <sensor_msgs/msg/joy.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -644,6 +647,363 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportForwardsRosTopicToNegotiatedBulkLane
   node.stop();
 }
 
+TEST_F(BridgeRuntimeTest, HorusLinkRegistrationSubscriberReceivesRetainedState)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto publisher_node = std::make_shared<rclcpp::Node>("horuslink_registration_retained_publisher");
+  auto retained_qos = rclcpp::QoS(rclcpp::KeepLast(10))
+    .reliability(rclcpp::ReliabilityPolicy::Reliable)
+    .durability(rclcpp::DurabilityPolicy::TransientLocal);
+  auto publisher = publisher_node->create_publisher<std_msgs::msg::String>(
+    "/horus/registration",
+    retained_qos);
+
+  const std::string text = R"({"robot_name":"retained_bot","action":"register"})";
+  std_msgs::msg::String msg;
+  msg.data = text;
+  publisher->publish(msg);
+  rclcpp::spin_some(publisher_node);
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
+  expect_bridge_hello(realtime.get());
+
+  const uint16_t channel_id = 91;
+  const horuslink::SubscribeRequest request{
+    channel_id,
+    "/horus/registration",
+    "std_msgs/msg/String",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_subscribe_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  const auto expected_payload = detail::strip_cdr_header(serialize_string_message(text));
+  horuslink::Frame received_frame;
+  bool received = false;
+  for (int attempt = 0; attempt < 30 && !received; ++attempt) {
+    rclcpp::spin_some(publisher_node);
+    horuslink::Frame candidate;
+    if (!recv_horuslink_frame(realtime.get(), candidate, 100)) {
+      continue;
+    }
+    if (candidate.header.msg_type == horuslink::MessageType::Data &&
+      candidate.header.channel_id == channel_id)
+    {
+      received_frame = std::move(candidate);
+      received = true;
+    }
+  }
+
+  ASSERT_TRUE(received);
+  EXPECT_EQ(received_frame.header.channel_id, channel_id);
+  EXPECT_EQ(received_frame.header.msg_type, horuslink::MessageType::Data);
+  EXPECT_FALSE(detail::has_cdr_header(received_frame.payload));
+  EXPECT_EQ(received_frame.payload, expected_payload);
+
+  (void)bulk;
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkRegistrationReplayedToLateJoiner)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto publisher_node =
+    std::make_shared<rclcpp::Node>("horuslink_registration_latejoin_publisher");
+  auto retained_qos = rclcpp::QoS(rclcpp::KeepLast(10))
+    .reliability(rclcpp::ReliabilityPolicy::Reliable)
+    .durability(rclcpp::DurabilityPolicy::TransientLocal);
+  auto publisher = publisher_node->create_publisher<std_msgs::msg::String>(
+    "/horus/registration",
+    retained_qos);
+
+  const std::string text = R"({"robot_name":"latejoin_bot","action":"register"})";
+  std_msgs::msg::String msg;
+  msg.data = text;
+  publisher->publish(msg);
+  rclcpp::spin_some(publisher_node);
+
+  const auto expected_payload = detail::strip_cdr_header(serialize_string_message(text));
+
+  // Subscribe on the given socket/channel and confirm both the ack and the retained
+  // registration payload arrive (regardless of frame ordering).
+  auto subscribe_and_expect_registration =
+    [&](int fd, uint16_t channel_id) {
+      const horuslink::SubscribeRequest request{
+        channel_id,
+        "/horus/registration",
+        "std_msgs/msg/String",
+        horuslink::Lane::Realtime,
+        horuslink::Delivery::ReliableFifo
+      };
+      send_horuslink_frame(
+        fd,
+        make_horuslink_control_frame(horuslink::encode_subscribe_request(request)));
+
+      bool acked = false;
+      bool received = false;
+      for (int attempt = 0; attempt < 40 && !(acked && received); ++attempt) {
+        rclcpp::spin_some(publisher_node);
+        horuslink::Frame candidate;
+        if (!recv_horuslink_frame(fd, candidate, 100)) {
+          continue;
+        }
+        if (candidate.header.msg_type == horuslink::MessageType::Control) {
+          const auto ack = horuslink::decode_subscribe_ack(
+            candidate.payload.data(),
+            candidate.payload.size());
+          if (ack.has_value() && ack->channel_id == channel_id) {
+            EXPECT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+            acked = true;
+          }
+          continue;
+        }
+
+        if (candidate.header.msg_type == horuslink::MessageType::Data &&
+          candidate.header.channel_id == channel_id)
+        {
+          EXPECT_FALSE(detail::has_cdr_header(candidate.payload));
+          EXPECT_EQ(candidate.payload, expected_payload);
+          received = true;
+        }
+      }
+      EXPECT_TRUE(acked) << "subscribe was not acknowledged on channel " << channel_id;
+      EXPECT_TRUE(received)
+        << "retained registration was not delivered on channel " << channel_id;
+    };
+
+  // First operator connects, receives the retained registration, and primes the
+  // bridge-side retained cache.
+  auto realtime_a = connect_to_port(realtime_port);
+  auto bulk_a = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime_a.get(), bulk_a.get(), 0x1111111111111111ull);
+  expect_bridge_hello(realtime_a.get());
+  subscribe_and_expect_registration(realtime_a.get(), 91);
+
+  // A late-joining second operator (distinct session) must be re-synced with the same
+  // retained registration via deterministic replay -- this is the path that previously
+  // relied on destroying/recreating the shared subscription and dropped the re-delivery.
+  auto realtime_b = connect_to_port(realtime_port);
+  auto bulk_b = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime_b.get(), bulk_b.get(), 0x2222222222222222ull);
+  expect_bridge_hello(realtime_b.get());
+  subscribe_and_expect_registration(realtime_b.get(), 92);
+
+  (void)bulk_a;
+  (void)bulk_b;
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkChunkSequenceReplayedToLateJoiner)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  // Simulate the SDK's retained robot-description chunk response.
+  auto publisher_node =
+    std::make_shared<rclcpp::Node>("horuslink_chunk_latejoin_publisher");
+  auto retained_qos = rclcpp::QoS(rclcpp::KeepLast(512))
+    .reliability(rclcpp::ReliabilityPolicy::Reliable)
+    .durability(rclcpp::DurabilityPolicy::TransientLocal);
+  auto chunk_item_pub = publisher_node->create_publisher<std_msgs::msg::String>(
+    "/horus/robot_description/chunk_item",
+    retained_qos);
+
+  const std::string text =
+    R"({"request_id":"RA","robot_name":"chunk_bot","description_id":"desc-1",)"
+    R"("chunk_index":0,"total_chunks":1,"chunk_data":"QUFBQQ=="})";
+  std_msgs::msg::String msg;
+  msg.data = text;
+  chunk_item_pub->publish(msg);
+  rclcpp::spin_some(publisher_node);
+
+  const auto expected_payload = detail::strip_cdr_header(serialize_string_message(text));
+
+  // Subscribe the chunk_item topic on the Bulk lane (as Unity does); ack arrives on the Realtime
+  // lane, the chunk payload on the Bulk lane. Confirm the chunk is delivered on both operators.
+  auto subscribe_bulk_and_expect_chunk =
+    [&](int realtime_fd, int bulk_fd, uint16_t channel_id) {
+      const horuslink::SubscribeRequest request{
+        channel_id,
+        "/horus/robot_description/chunk_item",
+        "std_msgs/msg/String",
+        horuslink::Lane::Bulk,
+        horuslink::Delivery::ReliableFifo
+      };
+      send_horuslink_frame(
+        realtime_fd,
+        make_horuslink_control_frame(horuslink::encode_subscribe_request(request)));
+
+      bool acked = false;
+      for (int attempt = 0; attempt < 20 && !acked; ++attempt) {
+        horuslink::Frame ack_frame;
+        if (!recv_horuslink_frame(realtime_fd, ack_frame, 100)) {
+          continue;
+        }
+        if (ack_frame.header.msg_type != horuslink::MessageType::Control) {
+          continue;
+        }
+        const auto ack = horuslink::decode_subscribe_ack(
+          ack_frame.payload.data(),
+          ack_frame.payload.size());
+        if (ack.has_value() && ack->channel_id == channel_id) {
+          EXPECT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+          acked = true;
+        }
+      }
+      EXPECT_TRUE(acked) << "chunk subscribe not acked on channel " << channel_id;
+
+      bool received = false;
+      for (int attempt = 0; attempt < 30 && !received; ++attempt) {
+        rclcpp::spin_some(publisher_node);
+        horuslink::Frame candidate;
+        if (!recv_horuslink_frame(bulk_fd, candidate, 100)) {
+          continue;
+        }
+        if (candidate.header.msg_type == horuslink::MessageType::Data &&
+          candidate.header.channel_id == channel_id)
+        {
+          EXPECT_EQ(candidate.payload, expected_payload);
+          received = true;
+        }
+      }
+      EXPECT_TRUE(received)
+        << "retained chunk_item not delivered on channel " << channel_id;
+    };
+
+  // First operator: fresh ROS subscription (DDS latch) that also primes the bridge chunk cache.
+  auto realtime_a = connect_to_port(realtime_port);
+  auto bulk_a = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime_a.get(), bulk_a.get(), 0x3111111111111111ull);
+  expect_bridge_hello(realtime_a.get());
+  subscribe_bulk_and_expect_chunk(realtime_a.get(), bulk_a.get(), 61);
+
+  // Late joiner: the shared ROS subscription already exists, so it gets NO DDS latch re-delivery
+  // and must be re-synced from the bridge chunk cache replay — the exact path that previously left
+  // it with interaction boxes and no robot bodies.
+  auto realtime_b = connect_to_port(realtime_port);
+  auto bulk_b = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime_b.get(), bulk_b.get(), 0x3222222222222222ull);
+  expect_bridge_hello(realtime_b.get());
+  subscribe_bulk_and_expect_chunk(realtime_b.get(), bulk_b.get(), 62);
+
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, DynamicRobotDescriptionReplyTopicUsesTransientQosWithoutSharedReplayCache)
+{
+  auto subscriber_node =
+    std::make_shared<rclcpp::Node>("horuslink_dynamic_reply_subscriber");
+  TopicManager manager(subscriber_node.get());
+
+  auto publisher_node =
+    std::make_shared<rclcpp::Node>("horuslink_dynamic_reply_publisher");
+  auto retained_qos = rclcpp::QoS(rclcpp::KeepLast(512))
+    .reliability(rclcpp::ReliabilityPolicy::Reliable)
+    .durability(rclcpp::DurabilityPolicy::TransientLocal);
+
+  const std::string topic =
+    "/horus/robot_description/replies/app_abc123/chunk_item";
+  auto publisher = publisher_node->create_publisher<std_msgs::msg::String>(
+    topic,
+    retained_qos);
+
+  const std::string text =
+    R"({"request_id":"R_DYNAMIC","robot_name":"late_bot","description_id":"desc-dyn",)"
+    R"("chunk_index":0,"total_chunks":1,"chunk_data":"QUFBQQ=="})";
+  std_msgs::msg::String msg;
+  msg.data = text;
+  publisher->publish(msg);
+  rclcpp::spin_some(publisher_node);
+
+  const auto expected_payload = detail::strip_cdr_header(serialize_string_message(text));
+  std::vector<uint8_t> received_payload;
+  bool received = false;
+
+  ASSERT_TRUE(manager.register_horuslink_subscriber(
+    topic,
+    "std_msgs/msg/String",
+    77,
+      [&](const std::string & callback_topic, const std::vector<uint8_t> & payload) {
+        EXPECT_EQ(callback_topic, topic);
+        received_payload = payload;
+        received = true;
+    },
+    rclcpp::QoS(10)));
+
+  for (int attempt = 0; attempt < 40 && !received; ++attempt) {
+    rclcpp::spin_some(publisher_node);
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+  }
+
+  ASSERT_TRUE(received);
+  EXPECT_EQ(received_payload, expected_payload);
+  EXPECT_TRUE(manager.get_retained_payloads(topic).empty());
+}
+
 TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesDataFramesToRosTopic)
 {
   const uint16_t realtime_port = find_unused_port();
@@ -792,12 +1152,16 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightTwistFramesToRosTopic)
   ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
 
   const horuslink::Twist twist{
-    horuslink::Vector3{1.25F, -0.5F, 0.75F},
+    horuslink::Vector3{0.0F, -0.5F, 0.75F},
     horuslink::Vector3{0.0F, 0.0F, -1.5F}
   };
   send_horuslink_frame(
     realtime.get(),
-    make_horuslink_data_frame(channel_id, horuslink::encode_twist(twist)));
+    make_horuslink_data_frame(
+      channel_id,
+      horuslink::encode_twist(twist),
+      1,
+      static_cast<uint8_t>(horuslink::FrameFlags::RawOpaque | horuslink::FrameFlags::LightCodec)));
 
   for (int attempt = 0; attempt < 50 && !received; ++attempt) {
     rclcpp::spin_some(subscriber_node);
@@ -811,6 +1175,102 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightTwistFramesToRosTopic)
   EXPECT_DOUBLE_EQ(received_twist.angular.x, twist.angular.x);
   EXPECT_DOUBLE_EQ(received_twist.angular.y, twist.angular.y);
   EXPECT_DOUBLE_EQ(received_twist.angular.z, twist.angular.z);
+
+  (void)subscriber;
+  (void)bulk;
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPoseFramesToRosTopic)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
+  expect_bridge_hello(realtime.get());
+
+  const std::string topic = "/horuslink_unity_publish_pose";
+  const uint16_t channel_id = 42;
+  const horuslink::PublisherRequest request{
+    channel_id,
+    topic,
+    "geometry_msgs/msg/Pose",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_publisher_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("horuslink_pose_subscriber");
+  geometry_msgs::msg::Pose received_pose;
+  bool received = false;
+  auto subscriber = subscriber_node->create_subscription<geometry_msgs::msg::Pose>(
+    topic,
+    10,
+    [&received_pose, &received](const geometry_msgs::msg::Pose::SharedPtr msg) {
+      received_pose = *msg;
+      received = true;
+    });
+
+  for (int attempt = 0; attempt < 50 && subscriber_node->count_publishers(topic) == 0; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
+
+  const horuslink::Pose pose{
+    horuslink::Vector3{2.0F, -1.5F, 0.25F},
+    horuslink::Quaternion{0.0F, 0.70710677F, 0.0F, 0.70710677F}
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_data_frame(
+      channel_id,
+      horuslink::encode_pose(pose),
+      1,
+      static_cast<uint8_t>(horuslink::FrameFlags::RawOpaque | horuslink::FrameFlags::LightCodec)));
+
+  for (int attempt = 0; attempt < 50 && !received; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  ASSERT_TRUE(received);
+  EXPECT_DOUBLE_EQ(received_pose.position.x, pose.position.x);
+  EXPECT_DOUBLE_EQ(received_pose.position.y, pose.position.y);
+  EXPECT_DOUBLE_EQ(received_pose.position.z, pose.position.z);
+  EXPECT_DOUBLE_EQ(received_pose.orientation.x, pose.orientation.x);
+  EXPECT_DOUBLE_EQ(received_pose.orientation.y, pose.orientation.y);
+  EXPECT_DOUBLE_EQ(received_pose.orientation.z, pose.orientation.z);
+  EXPECT_DOUBLE_EQ(received_pose.orientation.w, pose.orientation.w);
 
   (void)subscriber;
   (void)bulk;
@@ -893,7 +1353,11 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPoseStampedFramesToRos
   };
   send_horuslink_frame(
     realtime.get(),
-    make_horuslink_data_frame(channel_id, horuslink::encode_pose_stamped(pose)));
+    make_horuslink_data_frame(
+      channel_id,
+      horuslink::encode_pose_stamped(pose),
+      1,
+      static_cast<uint8_t>(horuslink::FrameFlags::RawOpaque | horuslink::FrameFlags::LightCodec)));
 
   for (int attempt = 0; attempt < 50 && !received; ++attempt) {
     rclcpp::spin_some(subscriber_node);
@@ -988,7 +1452,11 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightJoyFramesToRosTopic)
   };
   send_horuslink_frame(
     realtime.get(),
-    make_horuslink_data_frame(channel_id, horuslink::encode_joy(joy)));
+    make_horuslink_data_frame(
+      channel_id,
+      horuslink::encode_joy(joy),
+      1,
+      static_cast<uint8_t>(horuslink::FrameFlags::RawOpaque | horuslink::FrameFlags::LightCodec)));
 
   for (int attempt = 0; attempt < 50 && !received; ++attempt) {
     rclcpp::spin_some(subscriber_node);
@@ -1102,7 +1570,11 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPathFramesToRosTopic)
   };
   send_horuslink_frame(
     realtime.get(),
-    make_horuslink_data_frame(channel_id, horuslink::encode_path(path)));
+    make_horuslink_data_frame(
+      channel_id,
+      horuslink::encode_path(path),
+      1,
+      static_cast<uint8_t>(horuslink::FrameFlags::RawOpaque | horuslink::FrameFlags::LightCodec)));
 
   for (int attempt = 0; attempt < 50 && !received; ++attempt) {
     rclcpp::spin_some(subscriber_node);
@@ -1128,6 +1600,115 @@ TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightPathFramesToRosTopic)
     EXPECT_DOUBLE_EQ(actual.pose.orientation.z, expected.pose.orientation.z);
     EXPECT_DOUBLE_EQ(actual.pose.orientation.w, expected.pose.orientation.w);
   }
+
+  (void)subscriber;
+  (void)bulk;
+  node.stop();
+}
+
+TEST_F(BridgeRuntimeTest, HorusLinkTransportPublishesLightTfFramesToRosTopic)
+{
+  const uint16_t realtime_port = find_unused_port();
+  const uint16_t bulk_port = find_unused_port();
+  ASSERT_NE(realtime_port, 0);
+  ASSERT_NE(bulk_port, 0);
+  ASSERT_NE(realtime_port, bulk_port);
+
+  rclcpp::NodeOptions options;
+  options.parameter_overrides({
+      rclcpp::Parameter("tcp_ip", std::string("127.0.0.1")),
+      rclcpp::Parameter("tcp_port", static_cast<int>(realtime_port)),
+      rclcpp::Parameter("horuslink_bulk_port", static_cast<int>(bulk_port)),
+      rclcpp::Parameter("transport_protocol", std::string("horuslink")),
+      rclcpp::Parameter("log_protocol_messages", false)
+  });
+
+  UnityBridgeNode node(options);
+  ASSERT_TRUE(node.start());
+
+  auto realtime = connect_to_port(realtime_port);
+  auto bulk = connect_to_port(bulk_port);
+  send_horuslink_client_hellos(realtime.get(), bulk.get());
+  expect_bridge_hello(realtime.get());
+
+  const std::string topic = "/horuslink_unity_publish_tf";
+  const uint16_t channel_id = 43;
+  const horuslink::PublisherRequest request{
+    channel_id,
+    topic,
+    "tf2_msgs/msg/TFMessage",
+    horuslink::Lane::Realtime,
+    horuslink::Delivery::ReliableFifo
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_control_frame(horuslink::encode_publisher_request(request)));
+
+  horuslink::Frame ack_frame;
+  ASSERT_TRUE(recv_horuslink_frame(realtime.get(), ack_frame));
+  ASSERT_EQ(ack_frame.header.msg_type, horuslink::MessageType::Control);
+  const auto ack = horuslink::decode_subscribe_ack(
+    ack_frame.payload.data(),
+    ack_frame.payload.size());
+  ASSERT_TRUE(ack.has_value());
+  ASSERT_EQ(ack->status, horuslink::SubscribeStatus::Accepted);
+  ASSERT_EQ(ack->channel_id, channel_id);
+
+  auto subscriber_node = std::make_shared<rclcpp::Node>("horuslink_tf_subscriber");
+  tf2_msgs::msg::TFMessage received_tf;
+  bool received = false;
+  auto subscriber = subscriber_node->create_subscription<tf2_msgs::msg::TFMessage>(
+    topic,
+    10,
+    [&received_tf, &received](const tf2_msgs::msg::TFMessage::SharedPtr msg) {
+      received_tf = *msg;
+      received = true;
+    });
+
+  for (int attempt = 0; attempt < 50 && subscriber_node->count_publishers(topic) == 0; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+  ASSERT_GT(subscriber_node->count_publishers(topic), 0u);
+
+  const std::vector<horuslink::TransformStamped> transforms{
+    horuslink::TransformStamped{
+      1,
+      2,
+      "map",
+      "base_link",
+      horuslink::Vector3{1.0F, -2.0F, 0.5F},
+      horuslink::Quaternion{0.0F, 0.0F, 0.0F, 1.0F}
+    }
+  };
+  send_horuslink_frame(
+    realtime.get(),
+    make_horuslink_data_frame(
+      channel_id,
+      horuslink::encode_tf_message(transforms),
+      1,
+      static_cast<uint8_t>(horuslink::FrameFlags::RawOpaque | horuslink::FrameFlags::LightCodec)));
+
+  for (int attempt = 0; attempt < 50 && !received; ++attempt) {
+    rclcpp::spin_some(subscriber_node);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
+
+  ASSERT_TRUE(received);
+  ASSERT_EQ(received_tf.transforms.size(), transforms.size());
+  const auto & actual = received_tf.transforms[0];
+  const auto & expected = transforms[0];
+  EXPECT_EQ(actual.header.stamp.sec, static_cast<int32_t>(expected.seconds));
+  EXPECT_EQ(actual.header.stamp.nanosec, expected.nanoseconds);
+  EXPECT_EQ(actual.header.frame_id, expected.parent_frame_id);
+  EXPECT_EQ(actual.child_frame_id, expected.child_frame_id);
+  EXPECT_DOUBLE_EQ(actual.transform.translation.x, expected.translation.x);
+  EXPECT_DOUBLE_EQ(actual.transform.translation.y, expected.translation.y);
+  EXPECT_DOUBLE_EQ(actual.transform.translation.z, expected.translation.z);
+  EXPECT_DOUBLE_EQ(actual.transform.rotation.x, expected.rotation.x);
+  EXPECT_DOUBLE_EQ(actual.transform.rotation.y, expected.rotation.y);
+  EXPECT_DOUBLE_EQ(actual.transform.rotation.z, expected.rotation.z);
+  EXPECT_DOUBLE_EQ(actual.transform.rotation.w, expected.rotation.w);
 
   (void)subscriber;
   (void)bulk;

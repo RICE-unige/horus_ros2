@@ -79,7 +79,7 @@ TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestReplacesQueuedFrameForSameChan
   EXPECT_FALSE(queue.pop().has_value());
 }
 
-TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestOverflowReplacesOldestReplaceableFrame)
+TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestOverflowDoesNotEvictOtherChannel)
 {
   OutboundLaneQueue queue(2);
   ASSERT_TRUE(queue.enqueue(make_frame(1, true, 3)).accepted);
@@ -87,16 +87,15 @@ TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestOverflowReplacesOldestReplacea
 
   auto replacement = queue.enqueue(make_frame(3, true, 5));
 
-  EXPECT_TRUE(replacement.accepted);
+  EXPECT_FALSE(replacement.accepted);
   EXPECT_TRUE(replacement.overflow);
-  EXPECT_TRUE(replacement.replaced);
-  ASSERT_TRUE(replacement.replaced_frame.has_value());
-  EXPECT_EQ(replacement.replaced_frame->header.seq, 1u);
+  EXPECT_FALSE(replacement.replaced);
+  EXPECT_FALSE(replacement.replaced_frame.has_value());
   auto first = queue.pop();
   auto second = queue.pop();
   ASSERT_TRUE(first.has_value());
   ASSERT_TRUE(second.has_value());
-  EXPECT_EQ(first->header.seq, 3u);
+  EXPECT_EQ(first->header.seq, 1u);
   EXPECT_EQ(second->header.seq, 2u);
 }
 
