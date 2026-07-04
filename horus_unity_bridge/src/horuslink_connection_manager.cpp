@@ -24,6 +24,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -166,25 +167,32 @@ bool HorusLinkConnectionManager::send_to_topic(
     return false;
   }
 
-  Lane lane = Lane::Realtime;
-  {
-    std::lock_guard<std::mutex> lock(connection->mutex);
-    auto result = connection->outbound.enqueue_data(
-      connection->session.channel_table(),
-      topic,
-      payload,
-      size);
+  while (connection->connected.load()) {
+    OutboundFrameRouteResult result;
+    {
+      std::lock_guard<std::mutex> lock(connection->mutex);
+      result = connection->outbound.enqueue_data(
+        connection->session.channel_table(),
+        topic,
+        payload,
+        size);
+    }
     if (!result.accepted) {
       if (result.error == "channel is not active") {
         std::cerr << "HorusLink dropped frame (channel not active): connection=" <<
           connection_id << " topic=" << topic << std::endl;
       }
+      if (should_retry_reliable_overflow(result) && drain_lane(connection, result.lane)) {
+        std::this_thread::yield();
+        continue;
+      }
       return false;
     }
-    lane = result.lane;
+
+    return drain_lane(connection, result.lane);
   }
 
-  return drain_lane(connection, lane);
+  return false;
 }
 
 bool HorusLinkConnectionManager::send_to_topic(
@@ -206,23 +214,30 @@ bool HorusLinkConnectionManager::send_service_response(
     return false;
   }
 
-  Lane lane = Lane::Realtime;
-  {
-    std::lock_guard<std::mutex> lock(connection->mutex);
-    auto result = connection->outbound.enqueue_payload(
-      connection->session.channel_table(),
-      service_name,
-      MessageType::ServiceResponse,
-      corr_id,
-      payload.data(),
-      payload.size());
+  while (connection->connected.load()) {
+    OutboundFrameRouteResult result;
+    {
+      std::lock_guard<std::mutex> lock(connection->mutex);
+      result = connection->outbound.enqueue_payload(
+        connection->session.channel_table(),
+        service_name,
+        MessageType::ServiceResponse,
+        corr_id,
+        payload.data(),
+        payload.size());
+    }
     if (!result.accepted) {
+      if (should_retry_reliable_overflow(result) && drain_lane(connection, result.lane)) {
+        std::this_thread::yield();
+        continue;
+      }
       return false;
     }
-    lane = result.lane;
+
+    return drain_lane(connection, result.lane);
   }
 
-  return drain_lane(connection, lane);
+  return false;
 }
 
 void HorusLinkConnectionManager::broadcast_to_topic(
@@ -338,6 +353,7 @@ void HorusLinkConnectionManager::accept_loop()
       break;
     }
     if (ready == 0) {
+      pair_pending_sockets();
       continue;
     }
 
@@ -376,7 +392,8 @@ void HorusLinkConnectionManager::accept_ready_sockets(
       continue;
     }
 
-    out_sockets.push_back(AcceptedSocket{fd, ip, hello.session_id, hello});
+    out_sockets.push_back(
+      AcceptedSocket{fd, ip, hello.session_id, hello, std::chrono::steady_clock::now()});
   }
 }
 
@@ -387,6 +404,8 @@ void HorusLinkConnectionManager::pair_pending_sockets()
     AcceptedSocket bulk_socket;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      const auto now = std::chrono::steady_clock::now();
+      prune_pending_sockets_locked(now);
       bool found_pair = false;
       size_t realtime_index = 0;
       size_t bulk_index = 0;
@@ -395,6 +414,17 @@ void HorusLinkConnectionManager::pair_pending_sockets()
           if (pending_realtime_[rt].session_id != 0 &&
             pending_realtime_[rt].session_id == pending_bulk_[bulk].session_id)
           {
+            const auto skew =
+              pending_realtime_[rt].accepted_at > pending_bulk_[bulk].accepted_at ?
+              pending_realtime_[rt].accepted_at - pending_bulk_[bulk].accepted_at :
+              pending_bulk_[bulk].accepted_at - pending_realtime_[rt].accepted_at;
+            const auto skew_ms =
+              std::chrono::duration_cast<std::chrono::milliseconds>(skew).count();
+            if (config_.pending_socket_pair_max_skew_ms > 0 &&
+              skew_ms > config_.pending_socket_pair_max_skew_ms)
+            {
+              continue;
+            }
             realtime_index = rt;
             bulk_index = bulk;
             found_pair = true;
@@ -960,6 +990,12 @@ bool HorusLinkConnectionManager::drain_lane(
   return true;
 }
 
+bool HorusLinkConnectionManager::should_retry_reliable_overflow(
+  const OutboundFrameRouteResult & result)
+{
+  return result.overflow && result.delivery == Delivery::ReliableFifo;
+}
+
 void HorusLinkConnectionManager::disconnect_connection(int connection_id)
 {
   std::shared_ptr<Connection> connection;
@@ -1039,9 +1075,50 @@ void HorusLinkConnectionManager::configure_socket(int socket_fd) const
     setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
   }
 
+  if (config_.tcp_keepalive) {
+    int flag = 1;
+    setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+  }
+
+  if (config_.socket_send_timeout_ms > 0) {
+    timeval timeout{};
+    timeout.tv_sec = config_.socket_send_timeout_ms / 1000;
+    timeout.tv_usec = (config_.socket_send_timeout_ms % 1000) * 1000;
+    setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  }
+
   int buffer_size = static_cast<int>(config_.socket_buffer_size);
   setsockopt(socket_fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size));
   setsockopt(socket_fd, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
+}
+
+void HorusLinkConnectionManager::prune_pending_sockets_locked(
+  std::chrono::steady_clock::time_point now)
+{
+  if (config_.pending_socket_timeout_ms <= 0) {
+    return;
+  }
+
+  const auto timeout = std::chrono::milliseconds(config_.pending_socket_timeout_ms);
+  auto prune = [now, timeout](std::vector<AcceptedSocket> & sockets) {
+      auto end = std::remove_if(
+        sockets.begin(),
+        sockets.end(),
+        [now, timeout](AcceptedSocket & socket) {
+          if (socket.accepted_at.time_since_epoch().count() == 0 ||
+          now - socket.accepted_at <= timeout)
+          {
+            return false;
+          }
+
+          close_fd(socket.fd);
+          return true;
+        });
+      sockets.erase(end, sockets.end());
+    };
+
+  prune(pending_realtime_);
+  prune(pending_bulk_);
 }
 
 void HorusLinkConnectionManager::close_pending_sockets(std::vector<AcceptedSocket> & sockets)

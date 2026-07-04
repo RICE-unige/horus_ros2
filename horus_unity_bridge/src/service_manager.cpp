@@ -42,15 +42,10 @@ struct ServiceManager::TypedRosServiceClient final : public ServiceManager::RosS
     }
 
     try {
-      std::vector<uint8_t> normalized_request;
-      const std::vector<uint8_t> * payload = &request;
-      if (!detail::has_cdr_header(request)) {
-        normalized_request = detail::add_cdr_header(request);
-        payload = &normalized_request;
-      }
+      const auto normalized_request = detail::add_cdr_header(request);
 
       rclcpp::SerializedMessage serialized_request;
-      detail::fill_serialized_message(*payload, serialized_request);
+      detail::fill_serialized_message(normalized_request, serialized_request);
 
       auto typed_request = std::make_shared<typename ServiceT::Request>();
       rclcpp::Serialization<typename ServiceT::Request> request_serializer;
@@ -244,22 +239,17 @@ bool ServiceManager::call_ros_service_async(
 
     rcutils_allocator_t allocator = rcutils_get_default_allocator();
 
-    std::vector<uint8_t> normalized_request;
-    const std::vector<uint8_t> * payload = &request;
+    const auto normalized_request = detail::add_cdr_header(request);
 
-    // Ensure CDR header if missing
-    if (!detail::has_cdr_header(request)) {
-      normalized_request = detail::add_cdr_header(request);
-      payload = &normalized_request;
-    }
-
-    if (rmw_serialized_message_init(req_msg.get(), payload->size(), &allocator) != RMW_RET_OK) {
+    if (rmw_serialized_message_init(
+        req_msg.get(), normalized_request.size(), &allocator) != RMW_RET_OK)
+    {
       RCLCPP_ERROR(node_->get_logger(), "Failed to init serialized message");
       return false;
     }
 
-    std::memcpy(req_msg->buffer, payload->data(), payload->size());
-    req_msg->buffer_length = payload->size();
+    std::memcpy(req_msg->buffer, normalized_request.data(), normalized_request.size());
+    req_msg->buffer_length = normalized_request.size();
 
     // Call generic service - pass raw pointer as per Jazzy void* signature
     // We cast to prevent type mismatch, assuming GenericClient takes ownership or copies
@@ -272,10 +262,9 @@ bool ServiceManager::call_ros_service_async(
     call.start_time = node_->now();
     call.request_id = future_and_request_id.request_id;
 
-    wrapper->pending[srv_id] = call;
-
     {
       std::lock_guard<std::mutex> lock(ros_clients_mutex_);
+      wrapper->pending[srv_id] = call;
       pending_service_names_[srv_id] = service_name;
     }
 
@@ -443,14 +432,9 @@ void ServiceManager::handle_unity_service_response(
     if (it != add_two_ints_server->pending.end()) {
       // Deserialize response
       auto resp = std::make_shared<example_interfaces::srv::AddTwoInts::Response>();
-      std::vector<uint8_t> normalized;
-      const std::vector<uint8_t> * payload = &response;
-      if (!detail::has_cdr_header(response)) {
-        normalized = detail::add_cdr_header(response);
-        payload = &normalized;
-      }
+      const auto normalized = detail::add_cdr_header(response);
       rclcpp::SerializedMessage serialized_msg;
-      detail::fill_serialized_message(*payload, serialized_msg);
+      detail::fill_serialized_message(normalized, serialized_msg);
 
       rclcpp::Serialization<example_interfaces::srv::AddTwoInts::Response> serializer;
       serializer.deserialize_message(&serialized_msg, resp.get());
@@ -471,14 +455,9 @@ void ServiceManager::handle_unity_service_response(
     auto it = trigger_server->pending.find(srv_id);
     if (it != trigger_server->pending.end()) {
       auto resp = std::make_shared<std_srvs::srv::Trigger::Response>();
-      std::vector<uint8_t> normalized;
-      const std::vector<uint8_t> * payload = &response;
-      if (!detail::has_cdr_header(response)) {
-        normalized = detail::add_cdr_header(response);
-        payload = &normalized;
-      }
+      const auto normalized = detail::add_cdr_header(response);
       rclcpp::SerializedMessage serialized_msg;
-      detail::fill_serialized_message(*payload, serialized_msg);
+      detail::fill_serialized_message(normalized, serialized_msg);
 
       rclcpp::Serialization<std_srvs::srv::Trigger::Response> serializer;
       serializer.deserialize_message(&serialized_msg, resp.get());
@@ -499,14 +478,9 @@ void ServiceManager::handle_unity_service_response(
     auto it = set_bool_server->pending.find(srv_id);
     if (it != set_bool_server->pending.end()) {
       auto resp = std::make_shared<std_srvs::srv::SetBool::Response>();
-      std::vector<uint8_t> normalized;
-      const std::vector<uint8_t> * payload = &response;
-      if (!detail::has_cdr_header(response)) {
-        normalized = detail::add_cdr_header(response);
-        payload = &normalized;
-      }
+      const auto normalized = detail::add_cdr_header(response);
       rclcpp::SerializedMessage serialized_msg;
-      detail::fill_serialized_message(*payload, serialized_msg);
+      detail::fill_serialized_message(normalized, serialized_msg);
 
       rclcpp::Serialization<std_srvs::srv::SetBool::Response> serializer;
       serializer.deserialize_message(&serialized_msg, resp.get());

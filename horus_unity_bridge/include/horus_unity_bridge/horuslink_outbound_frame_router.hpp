@@ -42,6 +42,7 @@ struct OutboundFrameRouteResult
   bool replaced = false;
   bool overflow = false;
   Lane lane = Lane::Realtime;
+  Delivery delivery = Delivery::ReliableFifo;
   uint16_t channel_id = 0;
   uint32_t seq = 0;
   size_t realtime_depth = 0;

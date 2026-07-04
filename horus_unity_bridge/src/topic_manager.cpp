@@ -138,6 +138,8 @@ std::vector<uint8_t> serialize_ros_message(MessageT message)
 TopicManager::TopicManager(rclcpp::Node * node)
 : node_(node)
 {
+  subscriber_callback_group_ =
+    node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   stats_ = TopicStatistics{};
 }
 
@@ -268,6 +270,9 @@ bool TopicManager::register_subscriber(
     info.type_support = nullptr;  // Not needed for subscription
     subscribers_[topic] = std::move(info);
 
+    rclcpp::SubscriptionOptions subscription_options;
+    subscription_options.callback_group = subscriber_callback_group_;
+
     auto sub = node_->create_generic_subscription(
       topic,
       normalized_type,
@@ -366,7 +371,8 @@ bool TopicManager::register_subscriber(
         }
 
         stats_.messages_received++;
-      }
+      },
+      subscription_options
     );
 
     subscribers_[topic].subscription = sub;
@@ -508,10 +514,6 @@ bool TopicManager::publish_horuslink_message(
   }
 
   if (!is_light_codec) {
-    if (detail::has_cdr_header(payload)) {
-      return publish_message(topic, payload);
-    }
-
     const auto serialized_msg = detail::add_cdr_header(payload);
     return publish_message(topic, serialized_msg);
   }

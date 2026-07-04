@@ -42,7 +42,7 @@ Frame make_frame(uint32_t seq, bool replace_latest = false, uint16_t channel_id 
 
 }  // namespace
 
-TEST(HorusLinkOutboundLaneQueueTest, ReliableOverflowIsRejectedWithoutDroppingQueuedFrames)
+TEST(HorusLinkOutboundLaneQueueTest, ReliableOverflowReportsBackpressureWithoutDroppingQueuedFrames)
 {
   OutboundLaneQueue queue(1);
 

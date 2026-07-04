@@ -176,6 +176,7 @@ TEST(HorusLinkOutboundFrameRouterTest, ReliableOverflowRejectsAndDoesNotAdvanceS
 
   EXPECT_FALSE(overflow.accepted);
   EXPECT_TRUE(overflow.overflow);
+  EXPECT_EQ(overflow.delivery, Delivery::ReliableFifo);
   EXPECT_EQ(overflow.seq, 2u);
   EXPECT_FALSE(overflow.error.empty());
   auto first = router.pop(Lane::Realtime);

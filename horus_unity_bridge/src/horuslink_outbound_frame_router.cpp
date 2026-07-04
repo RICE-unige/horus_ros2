@@ -82,6 +82,7 @@ OutboundFrameRouteResult OutboundFrameRouter::enqueue_payload(
   result.replaced = enqueue_result.replaced;
   result.overflow = enqueue_result.overflow;
   result.lane = channel->lane;
+  result.delivery = channel->delivery;
   result.channel_id = channel->channel_id;
   result.seq = next_sequence_for(channel->channel_id);
   result.realtime_depth = realtime_queue_.size();
@@ -149,6 +150,7 @@ OutboundFrameRouteResult OutboundFrameRouter::make_error_result(
   OutboundFrameRouteResult result;
   if (channel != nullptr) {
     result.lane = channel->lane;
+    result.delivery = channel->delivery;
     result.channel_id = channel->channel_id;
     result.seq = next_sequence_for(channel->channel_id);
   }

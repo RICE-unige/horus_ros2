@@ -178,6 +178,7 @@ public:
 
 private:
   rclcpp::Node * node_;
+  rclcpp::CallbackGroup::SharedPtr subscriber_callback_group_;
 
   // Generic publisher/subscriber holders
   struct GenericPublisherInfo

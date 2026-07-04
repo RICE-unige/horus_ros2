@@ -23,6 +23,7 @@
 #include "horus_unity_bridge/horuslink_session.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -58,6 +59,10 @@ public:
     size_t bulk_queue_depth = 1024;
     uint32_t keepalive_ms = 1000;
     bool tcp_nodelay = true;
+    bool tcp_keepalive = true;
+    int socket_send_timeout_ms = 500;
+    int pending_socket_timeout_ms = 5000;
+    int pending_socket_pair_max_skew_ms = 1500;
   };
 
   using FrameCallback = std::function<void(
@@ -163,6 +168,7 @@ private:
     std::string ip;
     uint64_t session_id = 0;
     HelloMessage hello;
+    std::chrono::steady_clock::time_point accepted_at{};
   };
 
   struct Connection
@@ -226,10 +232,12 @@ private:
   bool handle_topic_table_request(const std::shared_ptr<Connection> & connection);
   bool send_frame(const std::shared_ptr<Connection> & connection, Lane lane, const Frame & frame);
   bool drain_lane(const std::shared_ptr<Connection> & connection, Lane lane);
+  static bool should_retry_reliable_overflow(const OutboundFrameRouteResult & result);
   void disconnect_connection(int connection_id);
   void prune_disconnected_connections();
   std::shared_ptr<Connection> find_connection(int connection_id) const;
   void configure_socket(int socket_fd) const;
+  void prune_pending_sockets_locked(std::chrono::steady_clock::time_point now);
   static void close_pending_sockets(std::vector<AcceptedSocket> & sockets);
 
   static void close_fd(int & fd);

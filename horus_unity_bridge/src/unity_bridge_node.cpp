@@ -113,6 +113,26 @@ void UnityBridgeNode::load_parameters()
     static_cast<int>(horuslink_config_.keepalive_ms));
   horuslink_config_.keepalive_ms = static_cast<uint32_t>(
     configured_horuslink_keepalive_ms < 0 ? 0 : configured_horuslink_keepalive_ms);
+  horuslink_config_.tcp_keepalive =
+    router_->declare_parameter<bool>("horuslink_tcp_keepalive", horuslink_config_.tcp_keepalive);
+  const int configured_horuslink_send_timeout_ms = static_cast<int>(
+    router_->declare_parameter<int>(
+      "horuslink_socket_send_timeout_ms",
+      horuslink_config_.socket_send_timeout_ms));
+  horuslink_config_.socket_send_timeout_ms =
+    std::max(1, configured_horuslink_send_timeout_ms);
+  const int configured_pending_socket_timeout_ms = static_cast<int>(
+    router_->declare_parameter<int>(
+      "horuslink_pending_socket_timeout_ms",
+      horuslink_config_.pending_socket_timeout_ms));
+  horuslink_config_.pending_socket_timeout_ms =
+    std::max(0, configured_pending_socket_timeout_ms);
+  const int configured_pending_socket_pair_max_skew_ms = static_cast<int>(
+    router_->declare_parameter<int>(
+      "horuslink_pending_socket_pair_max_skew_ms",
+      horuslink_config_.pending_socket_pair_max_skew_ms));
+  horuslink_config_.pending_socket_pair_max_skew_ms =
+    std::max(0, configured_pending_socket_pair_max_skew_ms);
 
   const auto configured_worker_threads = router_->declare_parameter<int>("worker_threads", 4);
   worker_threads_ = std::max<int>(1, static_cast<int>(configured_worker_threads));
