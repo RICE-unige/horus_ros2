@@ -55,10 +55,16 @@ int main(int argc, char ** argv)
     std::cout << "\n========================================" << std::endl;
     std::cout << "  HORUS Unity Bridge" << std::endl;
     std::cout << "========================================" << std::endl;
-    std::cout << "Bridge is running on "
+    std::cout << "Transport: " << node.transport_protocol_name() << std::endl;
+    std::cout << "Realtime lane: "
               << node.bind_address()
               << ":"
               << node.port()
+              << std::endl;
+    std::cout << "Bulk lane:     "
+              << node.bind_address()
+              << ":"
+              << node.horuslink_bulk_port()
               << std::endl;
     std::cout << "Press Ctrl+C to stop" << std::endl;
     std::cout << "========================================\n" << std::endl;

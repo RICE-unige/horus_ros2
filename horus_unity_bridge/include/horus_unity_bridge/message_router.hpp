@@ -17,8 +17,8 @@
 
 #pragma once
 
-#include "connection_manager.hpp"
-#include "protocol_handler.hpp"
+#include "horus_unity_bridge/horuslink_channel_table.hpp"
+#include "horus_unity_bridge/horuslink_control_messages.hpp"
 #include "topic_manager.hpp"
 #include "service_manager.hpp"
 #include "control_lease_manager.hpp"
@@ -31,6 +31,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+#include <vector>
 
 #ifdef ENABLE_WEBRTC
 #include "horus_unity_bridge/webrtc_manager.hpp"
@@ -64,14 +65,14 @@ class MessageRouter : public rclcpp::Node
 {
 public:
   using SendCallback = std::function<bool(
-        int client_fd,
+        int connection_id,
         const std::string &,
-        const std::vector<uint8_t> &,
-        OutboundMessagePolicy)>;
-  using BroadcastCallback = std::function<void(
-        const std::string &,
-        const std::vector<uint8_t> &,
-        OutboundMessagePolicy)>;
+        const std::vector<uint8_t> &)>;
+  using HorusLinkServiceResponseCallback = std::function<bool(
+        int connection_id,
+        const std::string & service_name,
+        uint32_t corr_id,
+        const std::vector<uint8_t> & response)>;
 
   explicit MessageRouter(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   ~MessageRouter();
@@ -84,24 +85,85 @@ public:
     send_callback_ = std::move(callback);
   }
 
-  void set_broadcast_callback(BroadcastCallback callback)
+  void set_horuslink_service_response_callback(HorusLinkServiceResponseCallback callback)
   {
-    broadcast_callback_ = std::move(callback);
+    horuslink_service_response_callback_ = std::move(callback);
   }
 
   /**
-   * @brief Route an incoming message from Unity
-   *
-   * @param client_fd Client that sent the message
-   * @param message Protocol message
-   * @return true if message was handled successfully
+   * @brief Build the HorusLink topic discovery table from the current ROS graph.
    */
-  bool route_message(int client_fd, const ProtocolMessage & message);
+  std::vector<horuslink::TopicEntry> get_horuslink_topic_table();
 
   /**
-   * @brief Handle system commands from Unity
+   * @brief Register a HorusLink topic subscription after channel negotiation.
    */
-  bool handle_system_command(int client_fd, const ProtocolMessage & message);
+  bool register_horuslink_subscriber(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Replay cached retained-state payloads to a client after its channel is active.
+   *
+   * Called once a HorusLink subscribe has been acknowledged (channel active) so that a
+   * late-joining or reconnecting client is deterministically re-synced with the latched
+   * registration / multi-operator replay / static-TF state, without disturbing already
+   * connected clients. A no-op for topics that carry no cached retained state.
+   */
+  void replay_retained_payloads(int connection_id, const std::string & topic);
+
+  /**
+   * @brief Register a HorusLink publisher after channel negotiation.
+   */
+  bool register_horuslink_publisher(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Register a HorusLink ROS service client after channel negotiation.
+   */
+  bool register_horuslink_ros_service(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Unregister a HorusLink topic subscription after channel close.
+   */
+  bool unregister_horuslink_subscriber(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Unregister a HorusLink publisher after channel close.
+   */
+  bool unregister_horuslink_publisher(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Unregister a HorusLink ROS service client after channel close.
+   */
+  bool unregister_horuslink_ros_service(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel);
+
+  /**
+   * @brief Route a HorusLink data frame to a ROS topic.
+   */
+  bool route_horuslink_data_frame(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel,
+    const std::vector<uint8_t> & payload,
+    uint8_t frame_flags);
+
+  /**
+   * @brief Route a HorusLink service request frame to a ROS service.
+   */
+  bool route_horuslink_service_request(
+    int connection_id,
+    const horuslink::ChannelDescriptor & channel,
+    uint32_t corr_id,
+    const std::vector<uint8_t> & request);
 
   /**
    * @brief Get topic manager
@@ -112,11 +174,6 @@ public:
    * @brief Get service manager
    */
   ServiceManager & get_service_manager() {return *service_manager_;}
-
-  /**
-   * @brief Send handshake payload to a client
-   */
-  void send_handshake(int client_fd);
 
   /**
    * @brief Get routing statistics
@@ -169,7 +226,7 @@ private:
     std::chrono::steady_clock::time_point last_rtp_progress_time{};
     std::chrono::steady_clock::time_point last_keyframe_request_time{};
     std::chrono::steady_clock::time_point last_telemetry_log_time{};
-    bool warned_unsupported_encoding = false;
+    bool waned_unsupported_encoding = false;
   };
 
   bool webrtc_enabled_ = false;
@@ -203,13 +260,13 @@ private:
   bool convert_to_rgb(
     const sensor_msgs::msg::Image & msg,
     std::vector<uint8_t> & output,
-    bool & warned_flag);
+    bool & waned_flag);
   bool decompress_to_rgb(
     const sensor_msgs::msg::CompressedImage & msg,
     std::vector<uint8_t> & output,
     int & width,
     int & height,
-    bool & warned_flag);
+    bool & waned_flag);
   void remove_webrtc_session(const std::string & session_id);
   void shutdown_webrtc_sessions();
   void cleanup_stale_webrtc_sessions();
@@ -218,53 +275,19 @@ private:
 
   // Callbacks
   SendCallback send_callback_;
-  BroadcastCallback broadcast_callback_;
+  HorusLinkServiceResponseCallback horuslink_service_response_callback_;
 
   // Statistics
   Statistics stats_;
 
-  // System command handlers
-  void handle_subscribe_command(int client_fd, const std::string & params);
-  void handle_publish_command(int client_fd, const std::string & params);
-  void handle_remove_subscriber_command(int client_fd, const std::string & params);
-  void handle_remove_publisher_command(int client_fd, const std::string & params);
-  void handle_remove_ros_service_command(int client_fd, const std::string & params);
-  void handle_remove_unity_service_command(int client_fd, const std::string & params);
-  void handle_ros_service_command(int client_fd, const std::string & params);
-  void handle_unity_service_command(int client_fd, const std::string & params);
-  void handle_request_command(int client_fd, const std::string & params);
-  void handle_response_command(int client_fd, const std::string & params);
-  void handle_topic_list_command(int client_fd);
-  void handle_handshake_command(int client_fd);
-
-  // Service request/response tracking
-  struct PendingServiceState
-  {
-    uint32_t pending_request_id = 0;
-    uint32_t pending_response_id = 0;
-  };
-  std::unordered_map<int, PendingServiceState> pending_service_state_;
-  mutable std::mutex pending_service_state_mutex_;
-  // Map service request IDs to client FDs for routing responses
-  std::unordered_map<uint32_t, int> service_response_client_;
+  // Map HorusLink service correlation IDs to requesting connections for responses
+  std::unordered_map<uint32_t, int> service_response_connection_by_corr_id_;
+  std::unordered_map<uint32_t, std::string> service_response_topic_by_corr_id_;
   std::mutex service_response_mutex_;
-  std::mutex send_mutex_; // Protects socket writes for atomicity
   bool log_protocol_messages_ = true;
 
-  // Utility
-  void send_error_to_client(int client_fd, const std::string & error_message);
-  void send_log_to_client(int client_fd, const std::string & level, const std::string & message);
-  PendingServiceState consume_pending_service_state(int client_fd);
-  static OutboundMessagePolicy classify_subscription_policy(
-    const std::string & topic,
-    const std::string & message_type);
-
-  bool parse_json_params(
-    const std::string & json_str,
-    std::unordered_map<std::string, std::string> & params);
-
 public:
-  void on_client_disconnected(int client_fd);
+  void on_client_disconnected(int connection_id);
 
 private:
   struct ClientResourceState
@@ -277,18 +300,16 @@ private:
   };
   std::unordered_map<int, ClientResourceState> client_resources_;
   std::mutex client_resources_mutex_;
-  void track_client_subscriber(int client_fd, const std::string & topic);
-  void track_client_publisher(int client_fd, const std::string & topic);
-  void track_client_ros_service(int client_fd, const std::string & service_name);
-  void track_client_unity_service(int client_fd, const std::string & service_name);
-  void track_client_webrtc_session(int client_fd, const std::string & session_id);
-  void untrack_client_webrtc_session(int client_fd, const std::string & session_id);
-  void untrack_client_subscriber(int client_fd, const std::string & topic);
-  void untrack_client_publisher(int client_fd, const std::string & topic);
-  void untrack_client_ros_service(int client_fd, const std::string & service_name);
-  void untrack_client_unity_service(int client_fd, const std::string & service_name);
-
-  friend class MessageRouterTestPeer;
+  void track_client_subscriber(int connection_id, const std::string & topic);
+  void track_client_publisher(int connection_id, const std::string & topic);
+  void track_client_ros_service(int connection_id, const std::string & service_name);
+  void track_client_unity_service(int connection_id, const std::string & service_name);
+  void track_client_webrtc_session(int connection_id, const std::string & session_id);
+  void untrack_client_webrtc_session(int connection_id, const std::string & session_id);
+  void untrack_client_subscriber(int connection_id, const std::string & topic);
+  void untrack_client_publisher(int connection_id, const std::string & topic);
+  void untrack_client_ros_service(int connection_id, const std::string & service_name);
+  void untrack_client_unity_service(int connection_id, const std::string & service_name);
 };
 
 } // namespace horus_unity_bridge

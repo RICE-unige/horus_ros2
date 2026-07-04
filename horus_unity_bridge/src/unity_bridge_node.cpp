@@ -19,10 +19,25 @@
 #include <algorithm>
 #include <iostream>
 #include <chrono>
-#include <sstream>
+#include <cctype>
 
 namespace horus_unity_bridge
 {
+
+namespace
+{
+
+std::string normalize_transport_protocol(std::string value)
+{
+  std::transform(
+    value.begin(),
+    value.end(),
+    value.begin(),
+    [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+  return value;
+}
+
+}  // namespace
 
 UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions & options)
 : node_options_(options),
@@ -39,8 +54,8 @@ UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions & options)
   // Load parameters
   load_parameters();
 
-  // Create connection manager
-  connection_manager_ = std::make_unique<ConnectionManager>(conn_config_);
+  horuslink_connection_manager_ =
+    std::make_unique<horuslink::HorusLinkConnectionManager>(horuslink_config_);
 
   // Setup callbacks
   setup_callbacks();
@@ -52,19 +67,10 @@ UnityBridgeNode::UnityBridgeNode(const rclcpp::NodeOptions & options)
   );
   executor_->add_node(router_);
 
-  if (!reserved_parameter_warnings_.empty()) {
-    std::ostringstream warning_stream;
-    warning_stream << "Reserved bridge parameters currently ignored: ";
-    for (size_t i = 0; i < reserved_parameter_warnings_.size(); ++i) {
-      if (i > 0) {
-        warning_stream << ", ";
-      }
-      warning_stream << reserved_parameter_warnings_[i];
-    }
-    RCLCPP_WARN(router_->get_logger(), "%s", warning_stream.str().c_str());
-  }
-
-  RCLCPP_INFO(router_->get_logger(), "Unity Bridge Node initialized");
+  RCLCPP_INFO(
+    router_->get_logger(),
+    "Unity Bridge Node initialized (transport=%s)",
+    transport_protocol_name_.c_str());
 }
 
 UnityBridgeNode::~UnityBridgeNode()
@@ -74,104 +80,153 @@ UnityBridgeNode::~UnityBridgeNode()
 
 void UnityBridgeNode::load_parameters()
 {
-  conn_config_.bind_address = router_->declare_parameter<std::string>("tcp_ip", "0.0.0.0");
-  conn_config_.port = static_cast<uint16_t>(router_->declare_parameter<int>("tcp_port", 10000));
-  conn_config_.max_connections = router_->declare_parameter<int>("max_connections", 10);
-  conn_config_.socket_buffer_size = static_cast<size_t>(
+  horuslink_config_.bind_address = router_->declare_parameter<std::string>("tcp_ip", "0.0.0.0");
+  horuslink_config_.realtime_port =
+    static_cast<uint16_t>(router_->declare_parameter<int>("tcp_port", 10000));
+  horuslink_config_.max_connections = router_->declare_parameter<int>("max_connections", 10);
+  horuslink_config_.socket_buffer_size = static_cast<size_t>(
     router_->declare_parameter<int>("socket_buffer_size", 65536));
-  conn_config_.message_queue_size = static_cast<size_t>(
-    router_->declare_parameter<int>("message_queue_size", 1000));
-  conn_config_.tcp_nodelay = router_->declare_parameter<bool>("tcp_nodelay", true);
-  conn_config_.connection_timeout_ms = router_->declare_parameter<int>("connection_timeout_ms",
-      5000);
+  horuslink_config_.tcp_nodelay = router_->declare_parameter<bool>("tcp_nodelay", true);
+
+  transport_protocol_name_ = normalize_transport_protocol(
+    router_->declare_parameter<std::string>("transport_protocol", "horuslink"));
+  if (transport_protocol_name_ == "horuslink") {
+    transport_protocol_ = TransportProtocol::HorusLink;
+  } else {
+    RCLCPP_WARN(
+      router_->get_logger(),
+      "Unknown transport_protocol '%s'; falling back to horuslink mode",
+      transport_protocol_name_.c_str());
+    transport_protocol_name_ = "horuslink";
+    transport_protocol_ = TransportProtocol::HorusLink;
+  }
+
+  horuslink_config_.bulk_port = static_cast<uint16_t>(
+    router_->declare_parameter<int>("horuslink_bulk_port", 10001));
+  const auto configured_horuslink_max_payload_size = router_->declare_parameter<int>(
+    "horuslink_max_payload_size",
+    static_cast<int>(horuslink_config_.max_payload_size));
+  horuslink_config_.max_payload_size = static_cast<size_t>(
+    configured_horuslink_max_payload_size < 1 ? 1 : configured_horuslink_max_payload_size);
+  const auto configured_horuslink_keepalive_ms = router_->declare_parameter<int>(
+    "horuslink_keepalive_ms",
+    static_cast<int>(horuslink_config_.keepalive_ms));
+  horuslink_config_.keepalive_ms = static_cast<uint32_t>(
+    configured_horuslink_keepalive_ms < 0 ? 0 : configured_horuslink_keepalive_ms);
+  horuslink_config_.tcp_keepalive =
+    router_->declare_parameter<bool>("horuslink_tcp_keepalive", horuslink_config_.tcp_keepalive);
+  const int configured_horuslink_send_timeout_ms = static_cast<int>(
+    router_->declare_parameter<int>(
+      "horuslink_socket_send_timeout_ms",
+      horuslink_config_.socket_send_timeout_ms));
+  horuslink_config_.socket_send_timeout_ms =
+    std::max(1, configured_horuslink_send_timeout_ms);
+  const int configured_pending_socket_timeout_ms = static_cast<int>(
+    router_->declare_parameter<int>(
+      "horuslink_pending_socket_timeout_ms",
+      horuslink_config_.pending_socket_timeout_ms));
+  horuslink_config_.pending_socket_timeout_ms =
+    std::max(0, configured_pending_socket_timeout_ms);
+  const int configured_pending_socket_pair_max_skew_ms = static_cast<int>(
+    router_->declare_parameter<int>(
+      "horuslink_pending_socket_pair_max_skew_ms",
+      horuslink_config_.pending_socket_pair_max_skew_ms));
+  horuslink_config_.pending_socket_pair_max_skew_ms =
+    std::max(0, configured_pending_socket_pair_max_skew_ms);
 
   const auto configured_worker_threads = router_->declare_parameter<int>("worker_threads", 4);
   worker_threads_ = std::max<int>(1, static_cast<int>(configured_worker_threads));
   log_protocol_messages_ = router_->declare_parameter<bool>("log_protocol_messages", true);
   router_->set_log_protocol_messages(log_protocol_messages_);
-
-  reserved_parameter_warnings_.clear();
-  auto add_reserved_warning = [this](const std::string & name) {
-      if (std::find(
-          reserved_parameter_warnings_.begin(),
-          reserved_parameter_warnings_.end(),
-          name) == reserved_parameter_warnings_.end())
-      {
-        reserved_parameter_warnings_.push_back(name);
-      }
-    };
-
-  router_->declare_parameter<int>("message_pool_size", 10000);
-  router_->declare_parameter<bool>("enable_zero_copy", true);
-  add_reserved_warning("message_pool_size");
-  add_reserved_warning("enable_zero_copy");
-
-  const std::string publisher_reliability = router_->declare_parameter<std::string>(
-    "default_publisher_qos.reliability", "reliable");
-  const std::string publisher_durability = router_->declare_parameter<std::string>(
-    "default_publisher_qos.durability", "volatile");
-  const std::string publisher_history = router_->declare_parameter<std::string>(
-    "default_publisher_qos.history", "keep_last");
-  const int publisher_depth = router_->declare_parameter<int>("default_publisher_qos.depth", 10);
-  (void)publisher_reliability;
-  (void)publisher_durability;
-  (void)publisher_history;
-  (void)publisher_depth;
-  add_reserved_warning("default_publisher_qos.*");
-
-  const std::string subscriber_reliability = router_->declare_parameter<std::string>(
-    "default_subscriber_qos.reliability", "reliable");
-  const std::string subscriber_durability = router_->declare_parameter<std::string>(
-    "default_subscriber_qos.durability", "volatile");
-  const std::string subscriber_history = router_->declare_parameter<std::string>(
-    "default_subscriber_qos.history", "keep_last");
-  const int subscriber_depth = router_->declare_parameter<int>("default_subscriber_qos.depth", 10);
-  (void)subscriber_reliability;
-  (void)subscriber_durability;
-  (void)subscriber_history;
-  (void)subscriber_depth;
-  add_reserved_warning("default_subscriber_qos.*");
 }
 
 void UnityBridgeNode::setup_callbacks()
 {
-  // Message from Unity -> Router
-  connection_manager_->set_message_callback(
-    [this](int fd, const ProtocolMessage & msg) {
-      handle_message_from_unity(fd, msg);
-    }
-  );
+  setup_horuslink_callbacks();
+}
 
-  // Router wants to send to Unity -> Connection Manager
+void UnityBridgeNode::setup_horuslink_callbacks()
+{
+  horuslink_connection_manager_->set_frame_callback(
+    [this](
+      int connection_id,
+      horuslink::Lane lane,
+      const horuslink::ChannelDescriptor & channel,
+      const horuslink::Frame & frame) {
+      handle_horuslink_frame(connection_id, lane, channel, frame);
+    });
+
+  horuslink_connection_manager_->set_subscribe_callback(
+    [this](
+      int connection_id,
+      const horuslink::ChannelDescriptor & channel,
+      std::string & error) {
+      return handle_horuslink_subscribe(connection_id, channel, error);
+    });
+
+  horuslink_connection_manager_->set_publisher_callback(
+    [this](
+      int connection_id,
+      const horuslink::ChannelDescriptor & channel,
+      std::string & error) {
+      return handle_horuslink_publisher(connection_id, channel, error);
+    });
+
+  horuslink_connection_manager_->set_service_client_callback(
+    [this](
+      int connection_id,
+      const horuslink::ChannelDescriptor & channel,
+      std::string & error) {
+      return handle_horuslink_ros_service(connection_id, channel, error);
+    });
+
+  horuslink_connection_manager_->set_channel_close_callback(
+    [this](
+      int connection_id,
+      horuslink::ChannelRegistrationKind registration_kind,
+      const horuslink::ChannelDescriptor & channel) {
+      handle_horuslink_channel_close(connection_id, registration_kind, channel);
+    });
+
+  horuslink_connection_manager_->set_topic_table_callback(
+    [this](int) {
+      return router_->get_horuslink_topic_table();
+    });
+
+  horuslink_connection_manager_->set_post_subscribe_callback(
+    [this](int connection_id, const std::string & topic) {
+      router_->replay_retained_payloads(connection_id, topic);
+    });
+
   router_->set_send_callback(
-    [this](int fd,
-    const std::string & dest,
-    const std::vector<uint8_t> & payload,
-    OutboundMessagePolicy policy) {
-      return connection_manager_->send_to_client(fd, dest, payload, policy);
-    }
-  );
+    [this](int connection_id,
+    const std::string & topic,
+    const std::vector<uint8_t> & payload) {
+      return horuslink_connection_manager_->send_to_topic(connection_id, topic, payload);
+    });
 
-  router_->set_broadcast_callback(
-    [this](const std::string & dest,
-    const std::vector<uint8_t> & payload,
-    OutboundMessagePolicy policy) {
-      connection_manager_->broadcast_message(dest, payload, policy);
-    }
-  );
+  router_->set_horuslink_service_response_callback(
+    [this](
+      int connection_id,
+      const std::string & service_name,
+      uint32_t corr_id,
+      const std::vector<uint8_t> & response) {
+      return horuslink_connection_manager_->send_service_response(
+        connection_id,
+        service_name,
+        corr_id,
+        response);
+    });
 
-  // Connection events
-  connection_manager_->set_connection_callback(
-    [this](int fd, const std::string & ip, uint16_t port) {
-      handle_client_connected(fd, ip, port);
-    }
-  );
+  horuslink_connection_manager_->set_connection_callback(
+    [this](int connection_id, const std::string & ip) {
+      handle_horuslink_client_connected(connection_id, ip);
+    });
 
-  connection_manager_->set_disconnection_callback(
-    [this](int fd, const std::string & ip, uint16_t port) {
-      handle_client_disconnected(fd, ip, port);
-    }
-  );
+  horuslink_connection_manager_->set_disconnection_callback(
+    [this](int connection_id, const std::string & ip) {
+      handle_horuslink_client_disconnected(connection_id, ip);
+    });
 }
 
 bool UnityBridgeNode::start()
@@ -180,8 +235,8 @@ bool UnityBridgeNode::start()
     return true;
   }
 
-  // Start connection manager
-  if (!connection_manager_->start()) {
+  const bool connection_started = horuslink_connection_manager_->start();
+  if (!connection_started) {
     RCLCPP_ERROR(router_->get_logger(), "Failed to start connection manager");
     return false;
   }
@@ -230,8 +285,9 @@ void UnityBridgeNode::stop()
     service_timer_->cancel();
   }
 
-  // Stop connection manager
-  connection_manager_->stop();
+  if (horuslink_connection_manager_) {
+    horuslink_connection_manager_->stop();
+  }
 
   // Stop ROS executor
   if (executor_) {
@@ -254,28 +310,122 @@ void UnityBridgeNode::run()
   }
 }
 
-void UnityBridgeNode::handle_message_from_unity(int client_fd, const ProtocolMessage & message)
+void UnityBridgeNode::handle_horuslink_client_connected(
+  int connection_id,
+  const std::string & ip)
 {
-  // Route message through the router
-  router_->route_message(client_fd, message);
+  RCLCPP_INFO(
+    router_->get_logger(),
+    "HorusLink client connected: %s (connection=%d)",
+    ip.c_str(),
+    connection_id);
 }
 
-void UnityBridgeNode::handle_client_connected(int client_fd, const std::string & ip, uint16_t port)
+void UnityBridgeNode::handle_horuslink_client_disconnected(
+  int connection_id,
+  const std::string & ip)
 {
-  RCLCPP_INFO(router_->get_logger(), "Unity client connected: %s:%u (fd=%d)",
-              ip.c_str(), port, client_fd);
-  router_->send_handshake(client_fd);
-}
-
-void UnityBridgeNode::handle_client_disconnected(
-  int client_fd, const std::string & ip,
-  uint16_t port)
-{
-  RCLCPP_INFO(router_->get_logger(), "Unity client disconnected: %s:%u (fd=%d)",
-              ip.c_str(), port, client_fd);
+  RCLCPP_INFO(
+    router_->get_logger(),
+    "HorusLink client disconnected: %s (connection=%d)",
+    ip.c_str(),
+    connection_id);
   if (router_) {
-    router_->on_client_disconnected(client_fd);
+    router_->on_client_disconnected(connection_id);
   }
+}
+
+bool UnityBridgeNode::handle_horuslink_subscribe(
+  int connection_id,
+  const horuslink::ChannelDescriptor & channel,
+  std::string & error)
+{
+  if (!router_->register_horuslink_subscriber(connection_id, channel)) {
+    error = "failed to register ROS subscriber";
+    return false;
+  }
+
+  return true;
+}
+
+bool UnityBridgeNode::handle_horuslink_publisher(
+  int connection_id,
+  const horuslink::ChannelDescriptor & channel,
+  std::string & error)
+{
+  if (!router_->register_horuslink_publisher(connection_id, channel)) {
+    error = "failed to register ROS publisher";
+    return false;
+  }
+
+  return true;
+}
+
+bool UnityBridgeNode::handle_horuslink_ros_service(
+  int connection_id,
+  const horuslink::ChannelDescriptor & channel,
+  std::string & error)
+{
+  if (!router_->register_horuslink_ros_service(connection_id, channel)) {
+    error = "failed to register ROS service";
+    return false;
+  }
+
+  return true;
+}
+
+void UnityBridgeNode::handle_horuslink_channel_close(
+  int connection_id,
+  horuslink::ChannelRegistrationKind registration_kind,
+  const horuslink::ChannelDescriptor & channel)
+{
+  bool success = false;
+  switch (registration_kind) {
+    case horuslink::ChannelRegistrationKind::Subscriber:
+      success = router_->unregister_horuslink_subscriber(connection_id, channel);
+      break;
+    case horuslink::ChannelRegistrationKind::Publisher:
+      success = router_->unregister_horuslink_publisher(connection_id, channel);
+      break;
+    case horuslink::ChannelRegistrationKind::ServiceClient:
+      success = router_->unregister_horuslink_ros_service(connection_id, channel);
+      break;
+  }
+
+  if (!success) {
+    RCLCPP_WARN(
+      router_->get_logger(),
+      "HorusLink channel close cleanup ignored: connection=%d channel=%u topic=%s",
+      connection_id,
+      channel.channel_id,
+      channel.topic.c_str());
+  }
+}
+
+void UnityBridgeNode::handle_horuslink_frame(
+  int connection_id,
+  horuslink::Lane,
+  const horuslink::ChannelDescriptor & channel,
+  const horuslink::Frame & frame)
+{
+  if (frame.header.msg_type == horuslink::MessageType::ServiceRequest) {
+    router_->route_horuslink_service_request(
+      connection_id,
+      channel,
+      frame.header.corr_id,
+      frame.payload);
+    return;
+  }
+
+  if (frame.header.msg_type != horuslink::MessageType::Data) {
+    return;
+  }
+
+  router_->route_horuslink_data_frame(
+    connection_id,
+    channel,
+    frame.payload,
+    frame.header.flags);
 }
 
 void UnityBridgeNode::stats_timer_callback()
@@ -285,18 +435,15 @@ void UnityBridgeNode::stats_timer_callback()
 
 void UnityBridgeNode::print_statistics() const
 {
-  auto conn_stats = connection_manager_->get_statistics();
   auto router_stats = router_->get_statistics();
   auto topic_stats = router_->get_topic_manager().get_statistics();
   auto service_stats = router_->get_service_manager().get_statistics();
 
   RCLCPP_INFO(router_->get_logger(), "=== Unity Bridge Statistics ===");
-  RCLCPP_INFO(router_->get_logger(), "Connections: %lu active, %lu total",
-              conn_stats.active_connections, conn_stats.total_connections);
-  RCLCPP_INFO(router_->get_logger(), "Messages: %lu sent, %lu received",
-              conn_stats.messages_sent, conn_stats.messages_received);
-  RCLCPP_INFO(router_->get_logger(), "Bytes: %lu sent, %lu received",
-              conn_stats.bytes_sent, conn_stats.bytes_received);
+  RCLCPP_INFO(
+    router_->get_logger(),
+    "Transport: HorusLink, Connections: %lu active",
+    horuslink_connection_manager_ ? horuslink_connection_manager_->connection_count() : 0u);
   RCLCPP_INFO(router_->get_logger(), "Topics: %lu publishers, %lu subscribers",
               topic_stats.active_publishers, topic_stats.active_subscribers);
   RCLCPP_INFO(router_->get_logger(), "Router: %lu routed, %lu published, %lu commands",
@@ -307,9 +454,8 @@ void UnityBridgeNode::print_statistics() const
               service_stats.ros_services_called, service_stats.unity_services_called,
               service_stats.responses_sent, service_stats.timeouts, service_stats.errors);
 
-  if (conn_stats.connection_errors > 0 || router_stats.routing_errors > 0) {
-    RCLCPP_WARN(router_->get_logger(), "Errors: %lu connection, %lu routing",
-                conn_stats.connection_errors, router_stats.routing_errors);
+  if (router_stats.routing_errors > 0) {
+    RCLCPP_WARN(router_->get_logger(), "Errors: %lu routing", router_stats.routing_errors);
   }
 }
 

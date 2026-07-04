@@ -29,6 +29,7 @@ find_package(rosidl_typesupport_introspection_cpp REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(example_interfaces REQUIRED)
 find_package(PkgConfig QUIET)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 # Find nlohmann_json (header-only library)
 find_package(nlohmann_json 3.2.0 QUIET)
@@ -174,9 +175,15 @@ endif()
 # Source files
 set(BRIDGE_CORE_SOURCES
   src/unity_bridge_node.cpp
-  src/protocol_handler.cpp
+  src/horuslink_channel_table.cpp
+  src/horuslink_connection_manager.cpp
+  src/horuslink_control_messages.cpp
+  src/horuslink_light_codecs.cpp
+  src/horuslink_outbound_frame_router.cpp
+  src/horuslink_outbound_lane_queue.cpp
+  src/horuslink_protocol.cpp
+  src/horuslink_session.cpp
   src/bridge_metrics.cpp
-  src/connection_manager.cpp
   src/message_router.cpp
   src/control_lease_manager.cpp
   src/topic_manager.cpp
@@ -245,6 +252,14 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(DIRECTORY tools
+  DESTINATION share/${PROJECT_NAME}
+  FILE_PERMISSIONS
+    OWNER_READ OWNER_WRITE OWNER_EXECUTE
+    GROUP_READ GROUP_EXECUTE
+    WORLD_READ WORLD_EXECUTE
+)
+
 # Install header files
 install(DIRECTORY include/
   DESTINATION include
@@ -271,10 +286,21 @@ if(BUILD_TESTING)
   ament_uncrustify()
 
   ament_add_gtest(horus_unity_bridge_tests
+    test/test_horuslink_channel_table.cpp
+    test/test_horuslink_connection_manager.cpp
+    test/test_horuslink_control_messages.cpp
+    test/test_horuslink_light_codecs.cpp
+    test/test_horuslink_outbound_frame_router.cpp
+    test/test_horuslink_outbound_lane_queue.cpp
+    test/test_horuslink_protocol.cpp
+    test/test_horuslink_session.cpp
     test/test_unity_bridge.cpp
   )
   if(TARGET horus_unity_bridge_tests)
     target_compile_options(horus_unity_bridge_tests PRIVATE ${HORUS_UNITY_BRIDGE_COMPILE_OPTIONS})
+    target_compile_definitions(horus_unity_bridge_tests
+      PRIVATE HORUS_UNITY_BRIDGE_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     target_link_libraries(horus_unity_bridge_tests horus_unity_bridge_core)
     ament_target_dependencies(horus_unity_bridge_tests
       rclcpp
@@ -290,6 +316,14 @@ if(BUILD_TESTING)
       example_interfaces
     )
   endif()
+
+  add_test(
+    NAME horuslink_frame_inspector_py
+    COMMAND
+      ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/test_horuslink_frame_inspector.py
+      ${CMAKE_CURRENT_SOURCE_DIR}
+  )
 endif()
 
 ament_package()

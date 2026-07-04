@@ -21,6 +21,7 @@
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
 #include <rosidl_typesupport_introspection_cpp/message_introspection.hpp>
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
@@ -83,6 +84,30 @@ public:
     const rclcpp::QoS & qos = rclcpp::QoS(10));
 
   /**
+   * @brief Register a HorusLink subscriber that receives Unity-facing payload bytes.
+   *
+   * The DDS CDR encapsulation header is stripped at this edge so HorusLink frames
+   * carry the message body bytes instead of the full ROS serialized envelope.
+   */
+  bool register_horuslink_subscriber(
+    const std::string & topic,
+    const std::string & message_type,
+    int client_fd,
+    MessageCallback callback,
+    const rclcpp::QoS & qos = rclcpp::QoS(10));
+
+  /**
+   * @brief Fetch the cached retained-state payloads for a topic (Unity-facing bytes).
+   *
+   * Returns the latched registration / multi-operator replay / static-TF payloads that
+   * the shared ROS subscription has observed, in arrival order. Used to deterministically
+   * replay retained state to a newly-subscribed client after its channel becomes active,
+   * instead of destroying and recreating the shared ROS subscription (which raced the
+   * channel-active gate and re-delivered to already-synced clients).
+   */
+  std::vector<std::vector<uint8_t>> get_retained_payloads(const std::string & topic) const;
+
+  /**
    * @brief Publish a message from Unity to ROS
    *
    * @param topic Topic name
@@ -92,6 +117,17 @@ public:
   bool publish_message(
     const std::string & topic,
     const std::vector<uint8_t> & serialized_msg);
+
+  /**
+   * @brief Publish a HorusLink payload to ROS.
+   *
+   * HorusLink data frames carry the body bytes; this restores the CDR
+   * encapsulation header required by rclcpp generic publishers when needed.
+   */
+  bool publish_horuslink_message(
+    const std::string & topic,
+    const std::vector<uint8_t> & payload,
+    uint8_t frame_flags);
 
   /**
    * @brief Unregister a publisher
@@ -142,6 +178,7 @@ public:
 
 private:
   rclcpp::Node * node_;
+  rclcpp::CallbackGroup::SharedPtr subscriber_callback_group_;
 
   // Generic publisher/subscriber holders
   struct GenericPublisherInfo
@@ -162,6 +199,14 @@ private:
 
   std::unordered_map<std::string, GenericPublisherInfo> publishers_;
   std::unordered_map<std::string, GenericSubscriberInfo> subscribers_;
+
+  // Bridge-owned cache of latched retained-state payloads (Unity-facing bytes) per topic,
+  // populated by the shared subscription callback and replayed to late-joining/reconnecting
+  // clients once their channel is active. Guarded by subscribers_mutex_.
+  std::unordered_map<std::string, std::deque<std::vector<uint8_t>>> retained_payload_cache_;
+  // Running byte total per cached topic, used to bound the cache by size (chunk topics). Guarded
+  // by subscribers_mutex_.
+  std::unordered_map<std::string, size_t> retained_payload_cache_bytes_;
 
   mutable std::mutex publishers_mutex_;
   mutable std::mutex subscribers_mutex_;

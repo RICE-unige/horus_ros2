@@ -17,7 +17,17 @@
 
 #include "horus_unity_bridge/topic_manager.hpp"
 #include "horus_unity_bridge/bridge_metrics.hpp"
+#include "horus_unity_bridge/horuslink_light_codecs.hpp"
+#include "horus_unity_bridge/horuslink_protocol.hpp"
+#include "horus_unity_bridge/serialized_payload.hpp"
+#include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/serialization.hpp>
+#include <sensor_msgs/msg/joy.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
 #include <rosidl_typesupport_cpp/message_type_support.hpp>
 #include <dlfcn.h>
 #include <algorithm>
@@ -27,9 +37,109 @@
 namespace horus_unity_bridge
 {
 
+namespace
+{
+
+bool is_tf_static_topic(const std::string & topic)
+{
+  return topic.length() >= 9 && topic.substr(topic.length() - 9) == "tf_static";
+}
+
+bool is_tf_topic(const std::string & topic)
+{
+  return topic == "/tf" || (topic.length() >= 3 && topic.substr(topic.length() - 3) == "/tf");
+}
+
+bool is_robot_description_chunk_topic(const std::string & topic)
+{
+  return topic == "/horus/robot_description/chunk_begin" ||
+         topic == "/horus/robot_description/chunk_item" ||
+         topic == "/horus/robot_description/chunk_end" ||
+         topic.find("/horus/robot_description/replies/") == 0;
+}
+
+bool is_robot_description_chunk_item_topic(const std::string & topic)
+{
+  return topic == "/horus/robot_description/chunk_item" ||
+         (topic.find("/horus/robot_description/replies/") == 0 &&
+         topic.length() >= 10 &&
+         topic.substr(topic.length() - 10) == "chunk_item");
+}
+
+bool is_horus_retained_state_topic(const std::string & topic)
+{
+  return topic == "/horus/registration" ||
+         topic == "/horus/multi_operator/sdk_registry_replay_begin" ||
+         topic == "/horus/multi_operator/sdk_registry_replay_item" ||
+         topic == "/horus/multi_operator/sdk_registry_replay_end" ||
+         is_robot_description_chunk_topic(topic);
+}
+
+rclcpp::QoS horus_retained_state_qos(const std::string & topic)
+{
+  const size_t depth = is_robot_description_chunk_item_topic(topic) ? 2048u : 256u;
+  return rclcpp::QoS(rclcpp::KeepLast(depth))
+         .reliability(rclcpp::ReliabilityPolicy::Reliable)
+         .durability(rclcpp::DurabilityPolicy::TransientLocal);
+}
+
+// Per-topic bound on the bridge-side retained-payload cache. Registration / replay / static-TF
+// messages are small; robot-description chunk topics carry a full mesh split into many chunks,
+// so they get a larger window bounded primarily by bytes.
+struct RetainedCacheLimits
+{
+  size_t max_messages;
+  size_t max_bytes;
+};
+
+RetainedCacheLimits retained_cache_limits_for(const std::string & topic)
+{
+  if (is_robot_description_chunk_item_topic(topic)) {
+    return RetainedCacheLimits{4096u, 128u * 1024u * 1024u};
+  }
+  if (is_robot_description_chunk_topic(topic)) {
+    return RetainedCacheLimits{1024u, 8u * 1024u * 1024u};
+  }
+  return RetainedCacheLimits{512u, 16u * 1024u * 1024u};
+}
+
+// Retained-state topics whose latched payloads are cached and deterministically replayed to a
+// newly-subscribed client after its channel is active. This includes the robot-description chunk
+// topics: a late joiner that subscribes while another operator is already connected does NOT get
+// DDS transient-local re-delivery (the shared ROS subscription already exists), so without this
+// replay it would depend entirely on a timing-sensitive live request/response and render robot
+// interaction boxes with no bodies. Replaying the cached chunk sequence lets the joiner reassemble
+// the payload and cache it by description_id (Unity applies it when the robot spawns).
+bool is_cacheable_retained_topic(const std::string & topic)
+{
+  return is_tf_static_topic(topic) ||
+         topic == "/horus/registration" ||
+         topic == "/horus/multi_operator/sdk_registry_replay_begin" ||
+         topic == "/horus/multi_operator/sdk_registry_replay_item" ||
+         topic == "/horus/multi_operator/sdk_registry_replay_end" ||
+         topic == "/horus/robot_description/chunk_begin" ||
+         topic == "/horus/robot_description/chunk_item" ||
+         topic == "/horus/robot_description/chunk_end";
+}
+
+template<typename MessageT>
+std::vector<uint8_t> serialize_ros_message(MessageT message)
+{
+  rclcpp::SerializedMessage serialized;
+  rclcpp::Serialization<MessageT> serializer;
+  serializer.serialize_message(&message, &serialized);
+
+  const auto & rcl_msg = serialized.get_rcl_serialized_message();
+  return std::vector<uint8_t>(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
+}
+
+}  // namespace
+
 TopicManager::TopicManager(rclcpp::Node * node)
 : node_(node)
 {
+  subscriber_callback_group_ =
+    node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
   stats_ = TopicStatistics{};
 }
 
@@ -96,25 +206,19 @@ bool TopicManager::register_subscriber(
 
   // Check if already registered
   auto it = subscribers_.find(topic);
-  std::unordered_map<int, MessageCallback> preserved_callbacks;
   if (it != subscribers_.end()) {
-    // FIX: Update callback for reconnecting clients
-    // For tf_static, re-create the subscription to re-deliver latched data.
-    if (topic.length() >= 9 && topic.substr(topic.length() - 9) == "tf_static") {
-      preserved_callbacks = it->second.client_callbacks;
-      subscribers_.erase(it);
-      if (stats_.active_subscribers > 0) {
-        stats_.active_subscribers--;
-      }
-      RCLCPP_INFO(node_->get_logger(), "Recreating subscriber for static TF on reconnect: %s",
-          topic.c_str());
-    } else {
-      it->second.client_callbacks[client_fd] = std::move(callback);
-      RCLCPP_INFO(node_->get_logger(),
-          "Updated subscriber callback: %s (client_fd=%d, total_clients=%zu)",
-                  topic.c_str(), client_fd, it->second.client_callbacks.size());
-      return true;
-    }
+    // A shared ROS subscription already exists for this topic. Add (or refresh) this
+    // client's callback without disturbing existing subscribers. Late-joiner and reconnect
+    // re-delivery of retained state is handled deterministically by the bridge-side retained
+    // cache replay (get_retained_payloads / MessageRouter::replay_retained_payloads) once the
+    // client's channel is active -- not by destroying and recreating the ROS subscription,
+    // which raced the channel-active gate (dropping the re-delivered latched samples) and
+    // re-delivered to already-synced clients.
+    it->second.client_callbacks[client_fd] = std::move(callback);
+    RCLCPP_INFO(node_->get_logger(),
+        "Updated subscriber callback: %s (client_fd=%d, total_clients=%zu)",
+                topic.c_str(), client_fd, it->second.client_callbacks.size());
+    return true;
   }
 
   try {
@@ -127,9 +231,24 @@ bool TopicManager::register_subscriber(
     const bool is_webrtc_signal_topic =
       topic.find("webrtc") != std::string::npos &&
       topic.find("server_signal") != std::string::npos;
-    if (topic.length() >= 9 && topic.substr(topic.length() - 9) == "tf_static") {
+    if (is_tf_static_topic(topic)) {
       final_qos.transient_local();
       RCLCPP_INFO(node_->get_logger(), "Forcing Transient Local QoS for static TF topic: %s",
+          topic.c_str());
+    } else if (is_tf_topic(topic)) {
+      // Dynamic TF is often published with sensor-data/best-effort QoS. A reliable
+      // subscriber is not compatible with best-effort publishers, so use a volatile
+      // best-effort subscriber for the bridge and let Unity consume the latest stream.
+      final_qos = rclcpp::QoS(rclcpp::KeepLast(100))
+        .reliability(rclcpp::ReliabilityPolicy::BestEffort)
+        .durability(rclcpp::DurabilityPolicy::Volatile);
+      RCLCPP_INFO(node_->get_logger(),
+          "Forcing dynamic TF QoS (best_effort+volatile) for topic: %s",
+          topic.c_str());
+    } else if (is_horus_retained_state_topic(topic)) {
+      final_qos = horus_retained_state_qos(topic);
+      RCLCPP_INFO(node_->get_logger(),
+          "Forcing retained-state QoS (reliable+transient_local) for topic: %s",
           topic.c_str());
     } else if (is_webrtc_signal_topic) {
       // Match exact QoS of webrtc_signal_pub_ in message_router.cpp:
@@ -141,6 +260,19 @@ bool TopicManager::register_subscriber(
           "Forcing matching WebRTC signal QoS (reliable+volatile) for topic: %s", topic.c_str());
     }
 
+    // Retained/transient-local samples can be delivered as soon as the ROS
+    // subscription is created. Store the client callback first so latched
+    // registration and robot-description data cannot arrive into an empty
+    // callback table during reconnect.
+    GenericSubscriberInfo info;
+    info.message_type = normalized_type;
+    info.client_callbacks[client_fd] = std::move(callback);
+    info.type_support = nullptr;  // Not needed for subscription
+    subscribers_[topic] = std::move(info);
+
+    rclcpp::SubscriptionOptions subscription_options;
+    subscription_options.callback_group = subscriber_callback_group_;
+
     auto sub = node_->create_generic_subscription(
       topic,
       normalized_type,
@@ -149,9 +281,8 @@ bool TopicManager::register_subscriber(
         // Convert serialized message to vector
         const auto & rcl_msg = msg->get_rcl_serialized_message();
 
-        // PATCH: Strip CDR Header (4 bytes) for StringMsg on Registration Topic
-        // Unity ROS-TCP-Connector expects [Len][Bytes], but ROS 2 CDR is [Header][Len][Bytes]
-        // Check for registration topic more loosely to avoid mismatch issues
+        // Keep the shared callback in DDS CDR form. HorusLink-specific subscribers
+        // strip the CDR encapsulation at the Unity-facing edge.
         bool is_reg = (topic.find("registration") != std::string::npos);
 
         if (protocol_logging_enabled_ && is_reg) {
@@ -163,12 +294,30 @@ bool TopicManager::register_subscriber(
           RCLCPP_DEBUG(node_->get_logger(), "%s", ss.str().c_str());
         }
 
-        // Send the raw message (ROS 2 CDR formatted)
-        // Unity ROS-TCP-Connector in ROS2 mode expects this header and will skip it.
-        // If Unity is in ROS1 mode, it will misinterpret it (ArgumentOutOfRangeException).
+        // Send the raw ROS 2 CDR bytes to shared bridge consumers. HorusLink
+        // subscribers wrap this callback and forward only the body bytes.
 
         std::vector<uint8_t> data;
         data.assign(rcl_msg.buffer, rcl_msg.buffer + rcl_msg.buffer_length);
+
+        // Cache latched retained-state payloads (Unity-facing bytes) so a late-joining or
+        // reconnecting client can be re-synced deterministically after its channel is active.
+        if (is_cacheable_retained_topic(topic)) {
+          std::vector<uint8_t> cache_payload = detail::strip_cdr_header(data);
+          const size_t payload_bytes = cache_payload.size();
+          const auto limits = retained_cache_limits_for(topic);
+          std::lock_guard<std::mutex> cache_lock(subscribers_mutex_);
+          auto & cached = retained_payload_cache_[topic];
+          auto & cached_bytes = retained_payload_cache_bytes_[topic];
+          cached.push_back(std::move(cache_payload));
+          cached_bytes += payload_bytes;
+          while (cached.size() > limits.max_messages ||
+          (cached_bytes > limits.max_bytes && cached.size() > 1))
+          {
+            cached_bytes -= cached.front().size();
+            cached.pop_front();
+          }
+        }
 
         std::vector<std::pair<int, MessageCallback>> callbacks;
         {
@@ -195,6 +344,18 @@ bool TopicManager::register_subscriber(
             static_cast<std::uint64_t>(callbacks.size()));
         }
 
+        // Chunk begin/end are rare per-response boundary messages; logging their fanout count
+        // makes "SDK responded but which clients got it" answerable from the bridge log alone.
+        if (topic == "/horus/robot_description/chunk_begin" ||
+        topic == "/horus/robot_description/chunk_end")
+        {
+          RCLCPP_INFO(
+            node_->get_logger(),
+            "Robot-description fanout: %s -> %zu client(s)",
+            topic.c_str(),
+            callbacks.size());
+        }
+
         for (const auto & callback_pair : callbacks) {
           callback_pair.second(topic, data);
           if (BridgeMetrics::instance().enabled()) {
@@ -210,20 +371,11 @@ bool TopicManager::register_subscriber(
         }
 
         stats_.messages_received++;
-      }
+      },
+      subscription_options
     );
 
-    // Store subscriber info
-    GenericSubscriberInfo info;
-    info.subscription = sub;
-    info.message_type = normalized_type;
-    if (!preserved_callbacks.empty()) {
-      info.client_callbacks = std::move(preserved_callbacks);
-    }
-    info.client_callbacks[client_fd] = std::move(callback);
-    info.type_support = nullptr;  // Not needed for subscription
-
-    subscribers_[topic] = info;
+    subscribers_[topic].subscription = sub;
     stats_.active_subscribers++;
 
     RCLCPP_INFO(node_->get_logger(), "Registered subscriber: %s [%s]",
@@ -239,10 +391,42 @@ bool TopicManager::register_subscriber(
 
     return true;
   } catch (const std::exception & e) {
+    subscribers_.erase(topic);
     RCLCPP_ERROR(node_->get_logger(), "Failed to register subscriber %s: %s",
                  topic.c_str(), e.what());
     return false;
   }
+}
+
+bool TopicManager::register_horuslink_subscriber(
+  const std::string & topic,
+  const std::string & message_type,
+  int client_fd,
+  MessageCallback callback,
+  const rclcpp::QoS & qos)
+{
+  return register_subscriber(
+    topic,
+    message_type,
+    client_fd,
+    [callback = std::move(callback)](
+      const std::string & callback_topic,
+      const std::vector<uint8_t> & data) {
+      const auto payload = detail::strip_cdr_header(data);
+      callback(callback_topic, payload);
+    },
+    qos);
+}
+
+std::vector<std::vector<uint8_t>> TopicManager::get_retained_payloads(
+  const std::string & topic) const
+{
+  std::lock_guard<std::mutex> lock(subscribers_mutex_);
+  auto it = retained_payload_cache_.find(topic);
+  if (it == retained_payload_cache_.end()) {
+    return {};
+  }
+  return std::vector<std::vector<uint8_t>>(it->second.begin(), it->second.end());
 }
 
 bool TopicManager::publish_message(
@@ -311,6 +495,194 @@ bool TopicManager::publish_message(
     stats_.publish_errors++;
     return false;
   }
+}
+
+bool TopicManager::publish_horuslink_message(
+  const std::string & topic,
+  const std::vector<uint8_t> & payload,
+  uint8_t frame_flags)
+{
+  const bool is_light_codec = (frame_flags & horuslink::FrameFlags::LightCodec) != 0;
+
+  std::string message_type;
+  {
+    std::lock_guard<std::mutex> lock(publishers_mutex_);
+    auto it = publishers_.find(topic);
+    if (it != publishers_.end()) {
+      message_type = it->second.message_type;
+    }
+  }
+
+  if (!is_light_codec) {
+    const auto serialized_msg = detail::add_cdr_header(payload);
+    return publish_message(topic, serialized_msg);
+  }
+
+  if (message_type == "geometry_msgs/msg/Twist") {
+    const auto decoded = horuslink::decode_twist(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink Twist payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    geometry_msgs::msg::Twist twist_msg;
+    twist_msg.linear.x = decoded->linear.x;
+    twist_msg.linear.y = decoded->linear.y;
+    twist_msg.linear.z = decoded->linear.z;
+    twist_msg.angular.x = decoded->angular.x;
+    twist_msg.angular.y = decoded->angular.y;
+    twist_msg.angular.z = decoded->angular.z;
+    return publish_message(topic, serialize_ros_message(twist_msg));
+  }
+
+  if (message_type == "geometry_msgs/msg/Pose") {
+    const auto decoded = horuslink::decode_pose(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink Pose payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    geometry_msgs::msg::Pose pose_msg;
+    pose_msg.position.x = decoded->position.x;
+    pose_msg.position.y = decoded->position.y;
+    pose_msg.position.z = decoded->position.z;
+    pose_msg.orientation.x = decoded->orientation.x;
+    pose_msg.orientation.y = decoded->orientation.y;
+    pose_msg.orientation.z = decoded->orientation.z;
+    pose_msg.orientation.w = decoded->orientation.w;
+    return publish_message(topic, serialize_ros_message(pose_msg));
+  }
+
+  if (message_type == "geometry_msgs/msg/PoseStamped") {
+    const auto decoded = horuslink::decode_pose_stamped(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink PoseStamped payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    geometry_msgs::msg::PoseStamped pose_msg;
+    pose_msg.header.stamp.sec = static_cast<int32_t>(decoded->seconds);
+    pose_msg.header.stamp.nanosec = decoded->nanoseconds;
+    pose_msg.header.frame_id = decoded->frame_id;
+    pose_msg.pose.position.x = decoded->pose.position.x;
+    pose_msg.pose.position.y = decoded->pose.position.y;
+    pose_msg.pose.position.z = decoded->pose.position.z;
+    pose_msg.pose.orientation.x = decoded->pose.orientation.x;
+    pose_msg.pose.orientation.y = decoded->pose.orientation.y;
+    pose_msg.pose.orientation.z = decoded->pose.orientation.z;
+    pose_msg.pose.orientation.w = decoded->pose.orientation.w;
+    return publish_message(topic, serialize_ros_message(pose_msg));
+  }
+
+  if (message_type == "sensor_msgs/msg/Joy") {
+    const auto decoded = horuslink::decode_joy(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink Joy payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    sensor_msgs::msg::Joy joy_msg;
+    joy_msg.axes = decoded->axes;
+    joy_msg.buttons = decoded->buttons;
+    return publish_message(topic, serialize_ros_message(joy_msg));
+  }
+
+  if (message_type == "nav_msgs/msg/Path") {
+    const auto decoded = horuslink::decode_path(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink Path payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    nav_msgs::msg::Path path_msg;
+    path_msg.header.stamp.sec = static_cast<int32_t>(decoded->seconds);
+    path_msg.header.stamp.nanosec = decoded->nanoseconds;
+    path_msg.header.frame_id = decoded->frame_id;
+    path_msg.poses.reserve(decoded->poses.size());
+    for (const auto & pose : decoded->poses) {
+      geometry_msgs::msg::PoseStamped pose_msg;
+      pose_msg.header.stamp.sec = static_cast<int32_t>(pose.seconds);
+      pose_msg.header.stamp.nanosec = pose.nanoseconds;
+      pose_msg.header.frame_id = pose.frame_id;
+      pose_msg.pose.position.x = pose.pose.position.x;
+      pose_msg.pose.position.y = pose.pose.position.y;
+      pose_msg.pose.position.z = pose.pose.position.z;
+      pose_msg.pose.orientation.x = pose.pose.orientation.x;
+      pose_msg.pose.orientation.y = pose.pose.orientation.y;
+      pose_msg.pose.orientation.z = pose.pose.orientation.z;
+      pose_msg.pose.orientation.w = pose.pose.orientation.w;
+      path_msg.poses.push_back(std::move(pose_msg));
+    }
+
+    return publish_message(topic, serialize_ros_message(path_msg));
+  }
+
+  if (message_type == "tf2_msgs/msg/TFMessage") {
+    const auto decoded = horuslink::decode_tf_message(payload.data(), payload.size());
+    if (!decoded.has_value()) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Rejected malformed HorusLink TFMessage payload on %s (%zu bytes)",
+        topic.c_str(),
+        payload.size());
+      stats_.publish_errors++;
+      return false;
+    }
+
+    tf2_msgs::msg::TFMessage tf_msg;
+    tf_msg.transforms.reserve(decoded->size());
+    for (const auto & transform : *decoded) {
+      geometry_msgs::msg::TransformStamped stamped;
+      stamped.header.stamp.sec = static_cast<int32_t>(transform.seconds);
+      stamped.header.stamp.nanosec = transform.nanoseconds;
+      stamped.header.frame_id = transform.parent_frame_id;
+      stamped.child_frame_id = transform.child_frame_id;
+      stamped.transform.translation.x = transform.translation.x;
+      stamped.transform.translation.y = transform.translation.y;
+      stamped.transform.translation.z = transform.translation.z;
+      stamped.transform.rotation.x = transform.rotation.x;
+      stamped.transform.rotation.y = transform.rotation.y;
+      stamped.transform.rotation.z = transform.rotation.z;
+      stamped.transform.rotation.w = transform.rotation.w;
+      tf_msg.transforms.push_back(std::move(stamped));
+    }
+
+    return publish_message(topic, serialize_ros_message(tf_msg));
+  }
+
+  RCLCPP_WARN(
+    node_->get_logger(),
+    "Rejected unsupported HorusLink light-codec payload on %s [%s] (%zu bytes)",
+    topic.c_str(),
+    message_type.c_str(),
+    payload.size());
+  stats_.publish_errors++;
+  return false;
 }
 
 bool TopicManager::unregister_publisher(const std::string & topic, int client_fd)
@@ -393,6 +765,10 @@ bool TopicManager::unregister_subscriber(const std::string & topic, int client_f
   }
 
   subscribers_.erase(it);
+  if (!is_cacheable_retained_topic(topic)) {
+    retained_payload_cache_.erase(topic);
+    retained_payload_cache_bytes_.erase(topic);
+  }
   if (stats_.active_subscribers > 0) {
     stats_.active_subscribers--;
   }
@@ -429,6 +805,10 @@ size_t TopicManager::unregister_all_client_subscribers(int client_fd)
 
   for (const auto & topic : topics_to_erase) {
     subscribers_.erase(topic);
+    if (!is_cacheable_retained_topic(topic)) {
+      retained_payload_cache_.erase(topic);
+      retained_payload_cache_bytes_.erase(topic);
+    }
     if (stats_.active_subscribers > 0) {
       stats_.active_subscribers--;
     }
