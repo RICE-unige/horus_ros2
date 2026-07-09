@@ -57,6 +57,15 @@ WebRTC signaling topics:
 - `/horus/webrtc/client_signal`
 - `/horus/webrtc/server_signal`
 
+Field-teammate / HoloLens integration:
+- HoloLens devices do not connect to `horus_unity_bridge` directly.
+- The offboard field-teammate relay connects to the HoloLens, then publishes
+  normal ROS 2 TF, status, confidence, FPV, and guidance topics.
+- `horus_sdk` registers those topics through the field-teammate payload, and
+  the bridge routes them like any other registered sensor/task stream.
+- No HoloLens-specific TCP listener or HorusLink client is required in this
+  repository for the local/core study path.
+
 ### HorusLink Transport
 
 The bridge default transport is HorusLink, a dual-lane framed protocol (`transport_protocol: "horuslink"` in `bridge_config.yaml`):
