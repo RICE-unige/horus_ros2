@@ -64,10 +64,10 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
   if (webrtc_enabled_) {
     auto webrtc_signal_pub_qos = rclcpp::QoS(rclcpp::KeepLast(100))
       .reliability(rclcpp::ReliabilityPolicy::Reliable)
-      .durability(rclcpp::DurabilityPolicy::Volatile);
+      .durability(rclcpp::DurabilityPolicy::TransientLocal);
     auto webrtc_signal_sub_qos = rclcpp::QoS(rclcpp::KeepLast(100))
       .reliability(rclcpp::ReliabilityPolicy::Reliable)
-      .durability(rclcpp::DurabilityPolicy::Volatile);
+      .durability(rclcpp::DurabilityPolicy::TransientLocal);
     webrtc_signal_pub_ = this->create_publisher<std_msgs::msg::String>(
       webrtc_server_signal_topic_, webrtc_signal_pub_qos);
     webrtc_signal_sub_ = this->create_subscription<std_msgs::msg::String>(
