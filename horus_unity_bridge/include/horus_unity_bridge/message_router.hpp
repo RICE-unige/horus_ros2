@@ -222,8 +222,8 @@ private:
     uint64_t dropped_queue_frames = 0;
     std::chrono::steady_clock::time_point last_incoming_frame_time{};
     std::chrono::steady_clock::time_point last_push_time{};
-    uint64_t last_seen_rtp_packets = 0;
-    std::chrono::steady_clock::time_point last_rtp_progress_time{};
+    uint64_t last_seen_encoded_units = 0;
+    std::chrono::steady_clock::time_point last_encoded_progress_time{};
     std::chrono::steady_clock::time_point last_keyframe_request_time{};
     std::chrono::steady_clock::time_point last_telemetry_log_time{};
     bool waned_unsupported_encoding = false;

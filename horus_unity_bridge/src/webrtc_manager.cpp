@@ -24,6 +24,7 @@
 #include <cctype>
 #include <unordered_set>
 #include <utility>
+#include <gst/video/video-event.h>
 
 namespace
 {
@@ -59,7 +60,27 @@ WebRTCManager::WebRTCManager()
 
 WebRTCManager::~WebRTCManager()
 {
+  shutting_down_.store(true);
+  if (appsink_ && appsink_signal_handler_id_ != 0) {
+    g_signal_handler_disconnect(appsink_, appsink_signal_handler_id_);
+    appsink_signal_handler_id_ = 0;
+  }
   stop_pipeline();
+  {
+    std::lock_guard<std::mutex> lock(sample_callback_mutex_);
+  }
+
+  if (video_track_) {
+    video_track_->onOpen([]() {});
+    video_track_->onClosed([]() {});
+  }
+  if (peer_connection_) {
+    peer_connection_->close();
+    peer_connection_.reset();
+  }
+  video_track_.reset();
+  sr_reporter_.reset();
+  rtp_config_.reset();
 
   if (appsrc_) {
     gst_object_unref(GST_OBJECT(appsrc_));
@@ -74,15 +95,12 @@ WebRTCManager::~WebRTCManager()
     pipeline_ = nullptr;
   }
 
-  if (peer_connection_) {
-    peer_connection_->close();
-    peer_connection_.reset();
-  }
   initialized_ = false;
 }
 
 bool WebRTCManager::initialize(const Settings & settings)
 {
+  shutting_down_.store(false);
   settings_ = settings;
 
   try {
@@ -500,20 +518,6 @@ bool WebRTCManager::apply_video_payload_type(int payload_type)
               << video_payload_type_ << " to " << payload_type << std::endl;
   }
   video_payload_type_ = payload_type;
-
-  if (!pipeline_) {
-    return true;
-  }
-
-  GstElement * payloader = gst_bin_get_by_name(GST_BIN(pipeline_), "mypayloader");
-  if (!payloader) {
-    std::cerr << "Failed to locate rtph264pay element 'mypayloader' while applying payload type "
-              << video_payload_type_ << std::endl;
-    return false;
-  }
-
-  g_object_set(payloader, "pt", video_payload_type_, nullptr);
-  gst_object_unref(payloader);
   return true;
 }
 
@@ -546,13 +550,19 @@ bool WebRTCManager::configure_video_track_for_offer(const OfferVideoNegotiation 
   }
 
   negotiated_video_mid_ = negotiation.mid;
-  rtp_packets_sent_.store(0);
-  rtp_bytes_sent_.store(0);
-  first_rtp_logged_.store(false);
-  {
-    std::lock_guard<std::mutex> lock(rtp_metrics_mutex_);
-    first_rtp_sent_timestamp_ = std::chrono::steady_clock::time_point{};
-  }
+  encoded_units_sent_.store(0);
+  encoded_bytes_sent_.store(0);
+  first_encoded_unit_logged_.store(false);
+
+  rtp_config_ = std::make_shared<rtc::RtpPacketizationConfig>(
+    video_ssrc_, "horus-video", static_cast<uint8_t>(video_payload_type_),
+    rtc::H264RtpPacketizer::defaultClockRate);
+  auto packetizer = std::make_shared<rtc::H264RtpPacketizer>(
+    rtc::NalUnit::Separator::StartSequence, rtp_config_);
+  sr_reporter_ = std::make_shared<rtc::RtcpSrReporter>(rtp_config_);
+  packetizer->addToChain(sr_reporter_);
+  packetizer->addToChain(std::make_shared<rtc::RtcpNackResponder>());
+  video_track_->setMediaHandler(packetizer);
 
   video_track_->onOpen([this]() {
       video_track_open_.store(true);
@@ -707,15 +717,17 @@ bool WebRTCManager::setup_gstreamer_pipeline()
 
   auto build_pipeline = [this](const std::string & encoder_stage) {
       std::ostringstream builder;
-      builder << "appsrc name=mysource format=time is-live=true do-timestamp=true ! ";
+      builder << "appsrc name=mysource format=time is-live=true do-timestamp=true "
+              << "block=false max-buffers=2 leaky-type=downstream ! ";
+      builder << "queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 "
+              << "leaky=downstream ! ";
       builder << "videoconvert ! ";
       builder << encoder_stage << " ! ";
-      // Force constrained-baseline profile via caps to ensure Unity/mobile compatibility
-      // This works for any H264 encoder (x264enc, nvh264enc, etc.)
+      // libdatachannel owns RTP packetization. Feed it Annex-B access units
+      // with SPS/PPS repeated at each IDR for late-starting mobile decoders.
       builder << "video/x-h264,profile=constrained-baseline ! ";
-      builder << "h264parse ! ";
-      builder << "rtph264pay name=mypayloader config-interval=1 pt=" << video_payload_type_;
-      builder << " ssrc=" << video_ssrc_ << " mtu=1200 ! ";
+      builder << "h264parse config-interval=-1 disable-passthrough=true ! ";
+      builder << "video/x-h264,stream-format=byte-stream,alignment=au ! ";
       builder << "appsink name=mysink emit-signals=true sync=false";
       return builder.str();
     };
@@ -755,7 +767,12 @@ bool WebRTCManager::setup_gstreamer_pipeline()
       };
 
     // If a specific encoder was requested, try it first.
-    const std::string requested_encoder = settings_.encoder;
+    std::string requested_encoder = settings_.encoder;
+    if (requested_encoder == "nvenc") {
+      requested_encoder = "nvcudah264enc";
+    } else if (requested_encoder == "x264") {
+      requested_encoder = "x264enc";
+    }
     if (!requested_encoder.empty() && requested_encoder != "auto") {
       const bool simple_factory_name =
         requested_encoder.find(' ') == std::string::npos &&
@@ -780,6 +797,12 @@ bool WebRTCManager::setup_gstreamer_pipeline()
           std::ostringstream s;
           s << "openh264enc bitrate=" << bitrate_bps;
           requested_stage = s.str();
+        } else if (requested_encoder == "nvcudah264enc") {
+          std::ostringstream s;
+          s << "nvcudah264enc preset=p2 tune=ultra-low-latency rate-control=cbr bitrate="
+            << bitrate_kbps << " gop-size=" << framerate
+            << " b-frames=0 rc-lookahead=0 repeat-sequence-header=true";
+          requested_stage = s.str();
         } else if (requested_encoder == "nvh264enc") {
           requested_stage = "nvh264enc preset=low-latency-hp";
         } else {
@@ -793,6 +816,13 @@ bool WebRTCManager::setup_gstreamer_pipeline()
     }
 
     // Hardware + software fallback chain.
+    if (has_factory("nvcudah264enc")) {
+      std::ostringstream stage;
+      stage << "nvcudah264enc preset=p2 tune=ultra-low-latency rate-control=cbr bitrate="
+            << bitrate_kbps << " gop-size=" << framerate
+            << " b-frames=0 rc-lookahead=0 repeat-sequence-header=true";
+      add_candidate("nvcudah264enc", stage.str());
+    }
     if (has_factory("nvh264enc")) {
       add_candidate("nvh264enc", "nvh264enc preset=low-latency-hp");
     }
@@ -861,13 +891,9 @@ bool WebRTCManager::setup_gstreamer_pipeline()
     return false;
   }
 
-  if (!apply_video_payload_type(video_payload_type_)) {
-    std::cerr << "Failed to apply negotiated RTP payload type to GStreamer payloader" << std::endl;
-    return false;
-  }
-
   // Configure appsink callback
-  g_signal_connect(appsink_, "new-sample", G_CALLBACK(on_new_sample), this);
+  appsink_signal_handler_id_ =
+    g_signal_connect(appsink_, "new-sample", G_CALLBACK(on_new_sample), this);
   return true;
 }
 
@@ -885,6 +911,7 @@ void WebRTCManager::stop_pipeline()
   std::lock_guard<std::mutex> lock(pipeline_mutex_);
   if (pipeline_) {
     gst_element_set_state(pipeline_, GST_STATE_NULL);
+    gst_element_get_state(pipeline_, nullptr, nullptr, 2 * GST_SECOND);
     pipeline_started_ = false;
   }
 }
@@ -932,20 +959,14 @@ void WebRTCManager::push_frame(
   if (ret != GST_FLOW_OK) {
     std::cerr << "Failed to push frame to GStreamer pipeline: " << ret << std::endl;
   }
-
-  static int frame_count = 0;
-  if (++frame_count % 30 == 0) {
-    std::cout << "Pushed " << frame_count << " frames to GStreamer pipeline" << std::endl;
-  }
 }
 
 GstFlowReturn WebRTCManager::on_new_sample(GstElement * sink, gpointer user_data)
 {
   WebRTCManager * manager = static_cast<WebRTCManager *>(user_data);
-
-  static int sample_count = 0;
-  if (++sample_count % 30 == 0) {
-    std::cout << "Pulled " << sample_count << " samples from GStreamer pipeline" << std::endl;
+  std::lock_guard<std::mutex> callback_lock(manager->sample_callback_mutex_);
+  if (manager->shutting_down_.load()) {
+    return GST_FLOW_FLUSHING;
   }
 
   GstSample * sample;
@@ -963,12 +984,18 @@ GstFlowReturn WebRTCManager::on_new_sample(GstElement * sink, gpointer user_data
       }
       GstMapInfo info;
       if (gst_buffer_map(buffer, &info, GST_MAP_READ)) {
-        bool sent_packet = false;
+        bool sent_unit = false;
         try {
-          // libdatachannel expects RTP packets for media tracks.
+          // The track's H264 media handler packetizes this Annex-B access unit.
+          const uint64_t unit_index = manager->encoded_units_sent_.load();
+          const uint32_t frame_ticks = static_cast<uint32_t>(
+            rtc::H264RtpPacketizer::defaultClockRate /
+            static_cast<uint32_t>(std::max(1, manager->settings_.framerate)));
+          manager->rtp_config_->timestamp =
+            manager->rtp_config_->startTimestamp +
+            static_cast<uint32_t>(unit_index * frame_ticks);
           auto * data_ptr = reinterpret_cast<const std::byte *>(info.data);
-          manager->video_track_->send(data_ptr, info.size);
-          sent_packet = true;
+          sent_unit = manager->video_track_->send(data_ptr, info.size);
         } catch (const std::exception & e) {
           const auto now = std::chrono::steady_clock::now();
           if (now - manager->last_track_closed_log_time_ > std::chrono::seconds(2)) {
@@ -980,41 +1007,15 @@ GstFlowReturn WebRTCManager::on_new_sample(GstElement * sink, gpointer user_data
           }
         }
 
-        if (sent_packet) {
-          const uint64_t packets_sent = manager->rtp_packets_sent_.fetch_add(1) + 1;
-          const uint64_t bytes_sent = manager->rtp_bytes_sent_.fetch_add(info.size) + info.size;
-
-          if (!manager->first_rtp_logged_.exchange(true)) {
-            const auto now = std::chrono::steady_clock::now();
-            {
-              std::lock_guard<std::mutex> lock(manager->rtp_metrics_mutex_);
-              manager->first_rtp_sent_timestamp_ = now;
-            }
-
-            if (info.size >= 12) {
-              const auto payload_type = static_cast<int>(info.data[1] & 0x7F);
-              const auto sequence = static_cast<uint16_t>(
-                (static_cast<uint16_t>(info.data[2]) << 8) |
-                static_cast<uint16_t>(info.data[3]));
-              const auto ssrc = static_cast<uint32_t>(
-                (static_cast<uint32_t>(info.data[8]) << 24) |
-                (static_cast<uint32_t>(info.data[9]) << 16) |
-                (static_cast<uint32_t>(info.data[10]) << 8) |
-                static_cast<uint32_t>(info.data[11]));
-              std::cout << "First RTP packet sent: mid='" << manager->negotiated_video_mid_
-                        << "' pt=" << payload_type
-                        << " ssrc=" << ssrc
-                        << " seq=" << sequence
-                        << " expected_pt=" << manager->video_payload_type_ << std::endl;
-            } else {
-              std::cout << "First RTP packet sent: packet too short for header decode (size="
-                        << info.size << ")" << std::endl;
-            }
-          }
-
-          if (packets_sent % 30 == 0) {
-            std::cout << "Sent " << packets_sent << " RTP packets ("
-                      << bytes_sent << " bytes total)" << std::endl;
+        if (sent_unit) {
+          manager->encoded_units_sent_.fetch_add(1);
+          manager->encoded_bytes_sent_.fetch_add(info.size);
+          if (!manager->first_encoded_unit_logged_.exchange(true)) {
+            std::cout << "First H264 access unit submitted: mid='"
+                      << manager->negotiated_video_mid_
+                      << "' pt=" << manager->video_payload_type_
+                      << " ssrc=" << manager->video_ssrc_
+                      << " bytes=" << info.size << std::endl;
           }
         }
         gst_buffer_unmap(buffer, &info);
@@ -1034,23 +1035,21 @@ void WebRTCManager::request_keyframe()
 
   std::cout << "Requesting IDR keyframe from encoder..." << std::endl;
 
-  GstStructure * s = gst_structure_new_empty("GstForceKeyUnit");
-  gst_structure_set(s, "all-headers", G_TYPE_BOOLEAN, TRUE, nullptr);
-
-  GstEvent * event = gst_event_new_custom(GST_EVENT_CUSTOM_UPSTREAM, s);
+  GstEvent * event = gst_video_event_new_upstream_force_key_unit(
+    GST_CLOCK_TIME_NONE, TRUE, 0);
   if (!gst_element_send_event(appsink_, event)) {
     std::cerr << "Failed to send keyframe request event" << std::endl;
   }
 }
 
-uint64_t WebRTCManager::get_rtp_packets_sent() const
+uint64_t WebRTCManager::get_encoded_units_sent() const
 {
-  return rtp_packets_sent_.load();
+  return encoded_units_sent_.load();
 }
 
-uint64_t WebRTCManager::get_rtp_bytes_sent() const
+uint64_t WebRTCManager::get_encoded_bytes_sent() const
 {
-  return rtp_bytes_sent_.load();
+  return encoded_bytes_sent_.load();
 }
 
 bool WebRTCManager::is_peer_connected() const

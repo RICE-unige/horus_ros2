@@ -760,7 +760,7 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json & payload)
   session->last_activity = session->session_start_time;
   session->last_incoming_frame_time = session->last_activity;
   session->last_push_time = session->last_activity;
-  session->last_rtp_progress_time = session->last_activity;
+  session->last_encoded_progress_time = session->last_activity;
   session->last_keyframe_request_time = session->last_activity;
   session->last_telemetry_log_time = session->last_activity;
   session->manager = std::make_shared<WebRTCManager>();
@@ -821,8 +821,10 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json & payload)
       settings.stun_servers = webrtc_default_stun_servers_;
     }
   }
-  settings.bitrate_kbps = std::max(100, get_int("bitrate_kbps", settings.bitrate_kbps));
-  settings.framerate = std::max(1, get_int("framerate", settings.framerate));
+  settings.bitrate_kbps = std::clamp(
+    get_int("bitrate_kbps", settings.bitrate_kbps), 100, 100000);
+  settings.framerate = std::clamp(
+    get_int("framerate", settings.framerate), 1, 60);
 
   RCLCPP_INFO(
     get_logger(),
@@ -1037,7 +1039,7 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> &
 {
   const auto kWarmupWindow = std::chrono::milliseconds(2000);
   const auto kIncomingActivityWindow = std::chrono::milliseconds(2500);
-  const auto kRtpStallThreshold = std::chrono::milliseconds(2500);
+  const auto kEncodedStallThreshold = std::chrono::milliseconds(2500);
   const auto kKeyframeCooldown = std::chrono::milliseconds(3000);
   const auto kTelemetryLogInterval = std::chrono::seconds(5);
 
@@ -1092,8 +1094,8 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> &
     uint64_t incoming_frames = 0;
     uint64_t pushed_frames = 0;
     uint64_t dropped_frames = 0;
-    uint64_t rtp_packets = 0;
-    uint64_t rtp_bytes = 0;
+    uint64_t encoded_units = 0;
+    uint64_t encoded_bytes = 0;
     bool peer_connected = false;
     bool track_open = false;
 
@@ -1105,15 +1107,15 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> &
       }
 
       if (session->manager) {
-        rtp_packets = session->manager->get_rtp_packets_sent();
-        rtp_bytes = session->manager->get_rtp_bytes_sent();
+        encoded_units = session->manager->get_encoded_units_sent();
+        encoded_bytes = session->manager->get_encoded_bytes_sent();
         peer_connected = session->manager->is_peer_connected();
         track_open = session->manager->is_video_track_open();
       }
 
-      if (rtp_packets > session->last_seen_rtp_packets) {
-        session->last_seen_rtp_packets = rtp_packets;
-        session->last_rtp_progress_time = now;
+      if (encoded_units > session->last_seen_encoded_units) {
+        session->last_seen_encoded_units = encoded_units;
+        session->last_encoded_progress_time = now;
       }
 
       const bool warmupElapsed =
@@ -1122,14 +1124,14 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> &
       const bool has_recent_incoming =
         session->last_incoming_frame_time.time_since_epoch().count() > 0 &&
         (now - session->last_incoming_frame_time) < kIncomingActivityWindow;
-      const bool rtp_stalled =
+      const bool encoded_output_stalled =
         warmupElapsed &&
         peer_connected &&
         track_open &&
         has_recent_incoming &&
-        session->last_rtp_progress_time.time_since_epoch().count() > 0 &&
-        (now - session->last_rtp_progress_time) > kRtpStallThreshold;
-      if (rtp_stalled &&
+        session->last_encoded_progress_time.time_since_epoch().count() > 0 &&
+        (now - session->last_encoded_progress_time) > kEncodedStallThreshold;
+      if (encoded_output_stalled &&
         (now - session->last_keyframe_request_time) > kKeyframeCooldown)
       {
         session->last_keyframe_request_time = now;
@@ -1151,30 +1153,30 @@ void MessageRouter::process_webrtc_frames(const std::shared_ptr<WebRtcSession> &
       RCLCPP_WARN(
         get_logger(),
         "WebRTC session '%s' stall detected (incoming=%" PRIu64
-        " pushed=%" PRIu64 " dropped=%" PRIu64 " rtp_packets=%" PRIu64
+        " pushed=%" PRIu64 " dropped=%" PRIu64 " encoded_units=%" PRIu64
         "). Requested keyframe (cooldown=%" PRId64
         "ms, stall_threshold=%" PRId64 "ms).",
         session->session_id.c_str(),
         incoming_frames,
         pushed_frames,
         dropped_frames,
-        rtp_packets,
+        encoded_units,
         static_cast<int64_t>(kKeyframeCooldown.count()),
-        static_cast<int64_t>(kRtpStallThreshold.count()));
+        static_cast<int64_t>(kEncodedStallThreshold.count()));
     }
 
     if (should_log_telemetry) {
       RCLCPP_INFO(
         get_logger(),
         "WebRTC session '%s' telemetry: incoming=%" PRIu64
-        " pushed=%" PRIu64 " dropped=%" PRIu64 " rtp_packets=%" PRIu64
-        " rtp_bytes=%" PRIu64 " peer=%s track=%s",
+        " pushed=%" PRIu64 " dropped=%" PRIu64 " encoded_units=%" PRIu64
+        " encoded_bytes=%" PRIu64 " peer=%s track=%s",
         session->session_id.c_str(),
         incoming_frames,
         pushed_frames,
         dropped_frames,
-        rtp_packets,
-        rtp_bytes,
+        encoded_units,
+        encoded_bytes,
         peer_connected ? "connected" : "disconnected",
         track_open ? "open" : "closed");
     }
@@ -1316,20 +1318,22 @@ void MessageRouter::remove_webrtc_session(const std::string & session_id)
       pushed_frames = session->pushed_frames;
       dropped_frames = session->dropped_queue_frames;
     }
-    uint64_t rtp_packets = session->manager ? session->manager->get_rtp_packets_sent() : 0;
-    uint64_t rtp_bytes = session->manager ? session->manager->get_rtp_bytes_sent() : 0;
+    uint64_t encoded_units =
+      session->manager ? session->manager->get_encoded_units_sent() : 0;
+    uint64_t encoded_bytes =
+      session->manager ? session->manager->get_encoded_bytes_sent() : 0;
     RCLCPP_INFO(
       get_logger(),
       "Stopping WebRTC session '%s' topic='%s' telemetry: incoming=%" PRIu64
-      " pushed=%" PRIu64 " dropped=%" PRIu64 " rtp_packets=%" PRIu64
-      " rtp_bytes=%" PRIu64,
+      " pushed=%" PRIu64 " dropped=%" PRIu64 " encoded_units=%" PRIu64
+      " encoded_bytes=%" PRIu64,
       session->session_id.c_str(),
       session->stream_topic.c_str(),
       incoming_frames,
       pushed_frames,
       dropped_frames,
-      rtp_packets,
-      rtp_bytes);
+      encoded_units,
+      encoded_bytes);
 
     session->running = false;
     session->frame_queue_cv.notify_all();

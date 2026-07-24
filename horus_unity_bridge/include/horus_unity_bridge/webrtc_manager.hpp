@@ -32,6 +32,8 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
+#include <rtc/h264rtppacketizer.hpp>
+#include <rtc/rtcpsrreporter.hpp>
 
 namespace horus_unity_bridge
 {
@@ -75,8 +77,8 @@ public:
   // Request a keyframe from the encoder (useful for packet loss recovery)
   void request_keyframe();
 
-  uint64_t get_rtp_packets_sent() const;
-  uint64_t get_rtp_bytes_sent() const;
+  uint64_t get_encoded_units_sent() const;
+  uint64_t get_encoded_bytes_sent() const;
   bool is_peer_connected() const;
   bool is_video_track_open() const;
 
@@ -97,21 +99,24 @@ private:
   std::shared_ptr<rtc::PeerConnection> peer_connection_;
   std::shared_ptr<rtc::Track> video_track_;
   std::shared_ptr<rtc::DataChannel> data_channel_;
+  std::shared_ptr<rtc::RtpPacketizationConfig> rtp_config_;
+  std::shared_ptr<rtc::RtcpSrReporter> sr_reporter_;
 
   // GStreamer pipeline
   GstElement * pipeline_ = nullptr;
   GstElement * appsrc_ = nullptr;
   GstElement * appsink_ = nullptr;
+  gulong appsink_signal_handler_id_ = 0;
   std::atomic<bool> pipeline_started_{false};
+  std::atomic<bool> shutting_down_{false};
   std::mutex frame_mutex_;
+  std::mutex sample_callback_mutex_;
   std::atomic<bool> peer_connected_{false};
   std::atomic<bool> video_track_open_{false};
-  std::atomic<uint64_t> rtp_packets_sent_{0};
-  std::atomic<uint64_t> rtp_bytes_sent_{0};
-  std::atomic<bool> first_rtp_logged_{false};
-  std::chrono::steady_clock::time_point first_rtp_sent_timestamp_{};
+  std::atomic<uint64_t> encoded_units_sent_{0};
+  std::atomic<uint64_t> encoded_bytes_sent_{0};
+  std::atomic<bool> first_encoded_unit_logged_{false};
   std::chrono::steady_clock::time_point last_track_closed_log_time_{};
-  std::mutex rtp_metrics_mutex_;
 
   // Caps caching to avoid redundant GStreamer calls
   int last_width_ = 0;
