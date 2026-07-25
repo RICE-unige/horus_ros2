@@ -268,14 +268,15 @@ bool TopicManager::register_subscriber(
           "Forcing retained-state QoS (reliable+transient_local) for topic: %s",
           topic.c_str());
     } else if (is_webrtc_signal_topic) {
-      // Match exact QoS of webrtc_signal_pub_ in message_router.cpp. Retaining
-      // answers closes the discovery race between subscriber activation and
-      // ICE completion; clients filter replayed signals by session_id.
+      // The client subscribes before publishing its offer. Request volatile
+      // durability so a new session cannot receive cached answers or ICE from
+      // an older session. MessageRouter's transient-local publisher remains
+      // QoS-compatible and protects publication during DDS discovery.
       final_qos = rclcpp::QoS(rclcpp::KeepLast(100))
         .reliability(rclcpp::ReliabilityPolicy::Reliable)
-        .durability(rclcpp::DurabilityPolicy::TransientLocal);
+        .durability(rclcpp::DurabilityPolicy::Volatile);
       RCLCPP_INFO(node_->get_logger(),
-          "Forcing WebRTC signal QoS (reliable+transient_local) for topic: %s", topic.c_str());
+          "Forcing WebRTC signal QoS (reliable+volatile) for topic: %s", topic.c_str());
     }
 
     // Retained/transient-local samples can be delivered as soon as the ROS

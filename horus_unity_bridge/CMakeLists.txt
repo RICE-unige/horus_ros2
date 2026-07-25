@@ -293,6 +293,7 @@ if(BUILD_TESTING)
     test/test_horuslink_outbound_frame_router.cpp
     test/test_horuslink_outbound_lane_queue.cpp
     test/test_horuslink_protocol.cpp
+    test/test_remote_render_auxiliary.cpp
     test/test_horuslink_session.cpp
     test/test_unity_bridge.cpp
   )

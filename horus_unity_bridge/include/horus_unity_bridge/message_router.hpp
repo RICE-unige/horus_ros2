@@ -206,10 +206,12 @@ private:
     std::string session_id;
     int owner_client_fd = -1;
     std::string stream_topic;
+    std::string auxiliary_topic;
     std::string image_type;
     std::shared_ptr<WebRTCManager> manager;
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr raw_sub;
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_sub;
+    rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr auxiliary_sub;
     std::deque<FrameVariant> frame_queue;
     std::mutex frame_queue_mutex;
     std::condition_variable frame_queue_cv;
@@ -220,6 +222,9 @@ private:
     uint64_t incoming_frames = 0;
     uint64_t pushed_frames = 0;
     uint64_t dropped_queue_frames = 0;
+    std::atomic<uint64_t> incoming_auxiliary_frames{0};
+    std::atomic<uint64_t> sent_auxiliary_frames{0};
+    std::atomic<uint64_t> dropped_auxiliary_frames{0};
     std::chrono::steady_clock::time_point last_incoming_frame_time{};
     std::chrono::steady_clock::time_point last_push_time{};
     uint64_t last_seen_encoded_units = 0;

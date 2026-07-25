@@ -67,7 +67,7 @@ MessageRouter::MessageRouter(const rclcpp::NodeOptions & options)
       .durability(rclcpp::DurabilityPolicy::TransientLocal);
     auto webrtc_signal_sub_qos = rclcpp::QoS(rclcpp::KeepLast(100))
       .reliability(rclcpp::ReliabilityPolicy::Reliable)
-      .durability(rclcpp::DurabilityPolicy::TransientLocal);
+      .durability(rclcpp::DurabilityPolicy::Volatile);
     webrtc_signal_pub_ = this->create_publisher<std_msgs::msg::String>(
       webrtc_server_signal_topic_, webrtc_signal_pub_qos);
     webrtc_signal_sub_ = this->create_subscription<std_msgs::msg::String>(
@@ -721,6 +721,7 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json & payload)
   const std::string session_id = payload.value("session_id", "");
   const std::string sdp = payload.value("sdp", "");
   const std::string stream_topic = payload.value("stream_topic", "");
+  const std::string auxiliary_topic = payload.value("auxiliary_topic", "");
   std::string image_type = payload.value("image_type", "");
   std::transform(image_type.begin(), image_type.end(), image_type.begin(), [](unsigned char c) {
       return static_cast<char>(std::tolower(c));
@@ -755,6 +756,7 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json & payload)
     }
   }
   session->stream_topic = stream_topic;
+  session->auxiliary_topic = auxiliary_topic;
   session->image_type = image_type;
   session->session_start_time = std::chrono::steady_clock::now();
   session->last_activity = session->session_start_time;
@@ -858,7 +860,10 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json & payload)
       publish_webrtc_signal(out);
     });
 
-  auto qos = rclcpp::SensorDataQoS();
+  auto qos = rclcpp::QoS(rclcpp::KeepLast(1))
+    .best_effort()
+    .durability_volatile();
+  session->running = true;
   const bool compressed =
     image_type == "compressed" ||
     stream_topic.find("/compressed") != std::string::npos;
@@ -877,8 +882,26 @@ void MessageRouter::handle_webrtc_offer(const nlohmann::json & payload)
         enqueue_webrtc_raw_frame(session, image_msg);
       });
   }
+  if (!auxiliary_topic.empty()) {
+    session->auxiliary_sub =
+      create_subscription<sensor_msgs::msg::CompressedImage>(
+      auxiliary_topic,
+      qos,
+      [session](const sensor_msgs::msg::CompressedImage::SharedPtr auxiliary_msg) {
+        if (!session->running.load() || !auxiliary_msg) {
+          return;
+        }
+        session->incoming_auxiliary_frames.fetch_add(1);
+        if (session->manager &&
+        session->manager->send_auxiliary_data(auxiliary_msg->data))
+        {
+          session->sent_auxiliary_frames.fetch_add(1);
+        } else {
+          session->dropped_auxiliary_frames.fetch_add(1);
+        }
+      });
+  }
 
-  session->running = true;
   session->worker_thread = std::thread(&MessageRouter::process_webrtc_frames, this, session);
 
   {
@@ -1322,27 +1345,34 @@ void MessageRouter::remove_webrtc_session(const std::string & session_id)
       session->manager ? session->manager->get_encoded_units_sent() : 0;
     uint64_t encoded_bytes =
       session->manager ? session->manager->get_encoded_bytes_sent() : 0;
+    const uint64_t incoming_auxiliary = session->incoming_auxiliary_frames.load();
+    const uint64_t sent_auxiliary = session->sent_auxiliary_frames.load();
+    const uint64_t dropped_auxiliary = session->dropped_auxiliary_frames.load();
     RCLCPP_INFO(
       get_logger(),
       "Stopping WebRTC session '%s' topic='%s' telemetry: incoming=%" PRIu64
       " pushed=%" PRIu64 " dropped=%" PRIu64 " encoded_units=%" PRIu64
-      " encoded_bytes=%" PRIu64,
+      " encoded_bytes=%" PRIu64 " auxiliary_in=%" PRIu64
+      " auxiliary_sent=%" PRIu64 " auxiliary_dropped=%" PRIu64,
       session->session_id.c_str(),
       session->stream_topic.c_str(),
       incoming_frames,
       pushed_frames,
       dropped_frames,
       encoded_units,
-      encoded_bytes);
+      encoded_bytes,
+      incoming_auxiliary,
+      sent_auxiliary,
+      dropped_auxiliary);
 
     session->running = false;
+    session->auxiliary_sub.reset();
     session->frame_queue_cv.notify_all();
     if (session->worker_thread.joinable()) {
       session->worker_thread.join();
     }
     session->raw_sub.reset();
     session->compressed_sub.reset();
-    session->manager.reset();
   }
 }
 

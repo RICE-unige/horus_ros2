@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/webrtc_manager.hpp"
+#include "horus_unity_bridge/remote_render_auxiliary.hpp"
 #include <iostream>
 #include <sstream>
 #include <algorithm>
@@ -73,6 +74,17 @@ WebRTCManager::~WebRTCManager()
   if (video_track_) {
     video_track_->onOpen([]() {});
     video_track_->onClosed([]() {});
+  }
+  {
+    std::lock_guard<std::mutex> lock(data_channel_mutex_);
+    if (data_channel_) {
+      data_channel_->onOpen([]() {});
+      data_channel_->onClosed([]() {});
+      data_channel_->onError([](std::string) {});
+      data_channel_->close();
+      data_channel_.reset();
+    }
+    data_channel_open_.store(false);
   }
   if (peer_connection_) {
     peer_connection_->close();
@@ -315,9 +327,59 @@ void WebRTCManager::create_peer_connection()
   peer_connection_->onSignalingStateChange([](rtc::PeerConnection::SignalingState state) {
       std::cout << "WebRTC Signaling State: " << state << std::endl;
   });
+  peer_connection_->onDataChannel([this](std::shared_ptr<rtc::DataChannel> channel) {
+      if (!channel || channel->label() != "horus.remote-render.v1") {
+        if (channel) {
+          std::cerr << "Ignoring unsupported WebRTC data channel '"
+                    << channel->label() << "'" << std::endl;
+          channel->close();
+        }
+        return;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(data_channel_mutex_);
+        if (data_channel_) {
+          data_channel_->onOpen([]() {});
+          data_channel_->onClosed([]() {});
+          data_channel_->onError([](std::string) {});
+          data_channel_->close();
+        }
+        data_channel_ = channel;
+        data_channel_open_.store(channel->isOpen());
+      }
+
+      const std::weak_ptr<rtc::DataChannel> weak_channel = channel;
+      channel->onOpen([this, weak_channel]() {
+        const auto opened_channel = weak_channel.lock();
+        std::lock_guard<std::mutex> lock(data_channel_mutex_);
+        if (opened_channel && data_channel_ == opened_channel) {
+          data_channel_open_.store(true);
+          std::cout << "Remote-render auxiliary data channel opened" << std::endl;
+        }
+      });
+      channel->onClosed([this, weak_channel]() {
+        const auto closed_channel = weak_channel.lock();
+        std::lock_guard<std::mutex> lock(data_channel_mutex_);
+        if (closed_channel && data_channel_ == closed_channel) {
+          data_channel_open_.store(false);
+          std::cout << "Remote-render auxiliary data channel closed" << std::endl;
+        }
+      });
+      channel->onError([this, weak_channel](std::string error) {
+        const auto failed_channel = weak_channel.lock();
+        std::lock_guard<std::mutex> lock(data_channel_mutex_);
+        if (failed_channel && data_channel_ == failed_channel) {
+          data_channel_open_.store(false);
+          std::cerr << "Remote-render auxiliary data channel error: "
+                    << error << std::endl;
+        }
+      });
+  });
 
   video_track_.reset();
   video_track_open_.store(false);
+  data_channel_open_.store(false);
 }
 
 std::string WebRTCManager::trim_copy(const std::string & value)
@@ -553,6 +615,9 @@ bool WebRTCManager::configure_video_track_for_offer(const OfferVideoNegotiation 
   encoded_units_sent_.store(0);
   encoded_bytes_sent_.store(0);
   first_encoded_unit_logged_.store(false);
+  has_first_frame_pts_ = false;
+  first_frame_pts_ns_ = 0;
+  last_frame_timestamp_ticks_ = 0;
 
   rtp_config_ = std::make_shared<rtc::RtpPacketizationConfig>(
     video_ssrc_, "horus-video", static_cast<uint8_t>(video_payload_type_),
@@ -715,13 +780,27 @@ bool WebRTCManager::setup_gstreamer_pipeline()
       return true;
     };
 
-  auto build_pipeline = [this](const std::string & encoder_stage) {
+  // RGB -> NV12/I420 conversion is a full-frame pass per frame. Keep it on the
+  // GPU when the encoder already lives there, so the CPU only moves bytes.
+  auto converter_for = [&has_factory](const std::string & encoder_stage) -> std::string {
+      // Only nvcudah264enc is documented to consume memory:CUDAMemory
+      // directly. Pipeline candidates are only validated by gst_parse_launch,
+      // which does not negotiate caps, so a wrong pairing would parse and then
+      // fail silently at PLAYING - keep this pairing conservative.
+      const bool cuda_encoder = encoder_stage.rfind("nvcudah264enc", 0) == 0;
+      if (cuda_encoder && has_factory("cudaupload") && has_factory("cudaconvert")) {
+        return "cudaupload ! cudaconvert";
+      }
+      return "videoconvert n-threads=4";
+    };
+
+  auto build_pipeline = [this, &converter_for](const std::string & encoder_stage) {
       std::ostringstream builder;
       builder << "appsrc name=mysource format=time is-live=true do-timestamp=true "
               << "block=false max-buffers=2 leaky-type=downstream ! ";
       builder << "queue max-size-buffers=2 max-size-bytes=0 max-size-time=0 "
               << "leaky=downstream ! ";
-      builder << "videoconvert ! ";
+      builder << converter_for(encoder_stage) << " ! ";
       builder << encoder_stage << " ! ";
       // libdatachannel owns RTP packetization. Feed it Annex-B access units
       // with SPS/PPS repeated at each IDR for late-starting mobile decoders.
@@ -753,6 +832,11 @@ bool WebRTCManager::setup_gstreamer_pipeline()
     const int bitrate_kbps = std::max(1, settings_.bitrate_kbps);
     const int framerate = std::max(1, settings_.framerate);
     const int bitrate_bps = bitrate_kbps * 1000;
+    // An IDR costs several times a P-frame, so a one-second GOP puts a
+    // periodic spike on the link that shows up as a regular hitch on the
+    // headset. Receivers get an IDR on track open and whenever the stall
+    // detector asks for one, so the periodic interval can be long.
+    const int keyframe_interval = framerate * 5;
 
     std::vector<std::pair<std::string, std::string>> encoder_candidates;
     auto add_candidate = [&encoder_candidates](
@@ -791,7 +875,7 @@ bool WebRTCManager::setup_gstreamer_pipeline()
           // We don't set profile here because x264enc might not have the property;
           // we enforce it via caps in build_pipeline instead.
           s << "x264enc tune=zerolatency speed-preset=ultrafast bitrate="
-            << bitrate_kbps << " key-int-max=" << framerate;
+            << bitrate_kbps << " key-int-max=" << keyframe_interval;
           requested_stage = s.str();
         } else if (requested_encoder == "openh264enc") {
           std::ostringstream s;
@@ -800,7 +884,7 @@ bool WebRTCManager::setup_gstreamer_pipeline()
         } else if (requested_encoder == "nvcudah264enc") {
           std::ostringstream s;
           s << "nvcudah264enc preset=p2 tune=ultra-low-latency rate-control=cbr bitrate="
-            << bitrate_kbps << " gop-size=" << framerate
+            << bitrate_kbps << " gop-size=" << keyframe_interval
             << " b-frames=0 rc-lookahead=0 repeat-sequence-header=true";
           requested_stage = s.str();
         } else if (requested_encoder == "nvh264enc") {
@@ -819,7 +903,7 @@ bool WebRTCManager::setup_gstreamer_pipeline()
     if (has_factory("nvcudah264enc")) {
       std::ostringstream stage;
       stage << "nvcudah264enc preset=p2 tune=ultra-low-latency rate-control=cbr bitrate="
-            << bitrate_kbps << " gop-size=" << framerate
+            << bitrate_kbps << " gop-size=" << keyframe_interval
             << " b-frames=0 rc-lookahead=0 repeat-sequence-header=true";
       add_candidate("nvcudah264enc", stage.str());
     }
@@ -840,7 +924,7 @@ bool WebRTCManager::setup_gstreamer_pipeline()
     if (has_factory("x264enc")) {
       std::ostringstream stage;
       stage << "x264enc tune=zerolatency speed-preset=ultrafast bitrate=" << bitrate_kbps
-            << " key-int-max=" << framerate;
+            << " key-int-max=" << keyframe_interval;
       add_candidate("x264enc", stage.str());
     }
     if (has_factory("avenc_h264")) {
@@ -961,6 +1045,95 @@ void WebRTCManager::push_frame(
   }
 }
 
+bool WebRTCManager::send_auxiliary_data(const std::vector<uint8_t> & data)
+{
+  if (data.empty() || shutting_down_.load() || !data_channel_open_.load()) {
+    auxiliary_units_dropped_.fetch_add(1);
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(data_channel_mutex_);
+  if (!data_channel_ || !data_channel_->isOpen()) {
+    data_channel_open_.store(false);
+    auxiliary_units_dropped_.fetch_add(1);
+    return false;
+  }
+
+  std::vector<std::vector<uint8_t>> messages;
+  try {
+    messages = remote_render::chunk_auxiliary_payload(
+      data,
+      data_channel_->maxMessageSize());
+  } catch (const std::exception & exception) {
+    auxiliary_units_dropped_.fetch_add(1);
+    std::cerr << "Failed to packetize remote-render auxiliary frame: "
+              << exception.what() << std::endl;
+    return false;
+  }
+
+  // Keep latency bounded. A complete depth frame is more useful than a partial
+  // one, so reject the frame before sending its first chunk when SCTP already
+  // has too much queued data. The next viewer pose supersedes this frame.
+  constexpr size_t maximum_buffered_bytes = 2U * 1024U * 1024U;
+  if (data_channel_->bufferedAmount() + data.size() > maximum_buffered_bytes) {
+    auxiliary_units_dropped_.fetch_add(1);
+    return false;
+  }
+
+  try {
+    for (const auto & message : messages) {
+      if (!data_channel_->send(
+          reinterpret_cast<const rtc::byte *>(message.data()), message.size()))
+      {
+        auxiliary_units_dropped_.fetch_add(1);
+        return false;
+      }
+    }
+  } catch (const std::exception & exception) {
+    auxiliary_units_dropped_.fetch_add(1);
+    std::cerr << "Failed to send remote-render auxiliary frame: "
+              << exception.what() << std::endl;
+    return false;
+  }
+
+  auxiliary_units_sent_.fetch_add(1);
+  auxiliary_bytes_sent_.fetch_add(data.size());
+  return true;
+}
+
+uint32_t WebRTCManager::resolve_frame_timestamp_ticks(GstBuffer * buffer)
+{
+  constexpr uint64_t kClockRate = rtc::H264RtpPacketizer::defaultClockRate;
+  constexpr uint64_t kNanosecondsPerSecond = 1000000000ULL;
+
+  GstClockTime pts = buffer ? GST_BUFFER_PTS(buffer) : GST_CLOCK_TIME_NONE;
+  if (!GST_CLOCK_TIME_IS_VALID(pts) && buffer) {
+    pts = GST_BUFFER_DTS(buffer);
+  }
+
+  if (!GST_CLOCK_TIME_IS_VALID(pts)) {
+    // No usable capture time (should not happen with do-timestamp=true on a
+    // live appsrc). Advance by one nominal frame so the stream keeps moving
+    // forward monotonically instead of stalling on a repeated timestamp.
+    const uint32_t nominal_ticks = static_cast<uint32_t>(
+      kClockRate / static_cast<uint64_t>(std::max(1, settings_.framerate)));
+    last_frame_timestamp_ticks_ += nominal_ticks;
+    return last_frame_timestamp_ticks_;
+  }
+
+  if (!has_first_frame_pts_) {
+    first_frame_pts_ns_ = static_cast<uint64_t>(pts);
+    has_first_frame_pts_ = true;
+  }
+
+  const uint64_t elapsed_ns = static_cast<uint64_t>(pts) >= first_frame_pts_ns_ ?
+    static_cast<uint64_t>(pts) - first_frame_pts_ns_ :
+    0ULL;
+  last_frame_timestamp_ticks_ =
+    static_cast<uint32_t>((elapsed_ns * kClockRate) / kNanosecondsPerSecond);
+  return last_frame_timestamp_ticks_;
+}
+
 GstFlowReturn WebRTCManager::on_new_sample(GstElement * sink, gpointer user_data)
 {
   WebRTCManager * manager = static_cast<WebRTCManager *>(user_data);
@@ -987,13 +1160,15 @@ GstFlowReturn WebRTCManager::on_new_sample(GstElement * sink, gpointer user_data
         bool sent_unit = false;
         try {
           // The track's H264 media handler packetizes this Annex-B access unit.
-          const uint64_t unit_index = manager->encoded_units_sent_.load();
-          const uint32_t frame_ticks = static_cast<uint32_t>(
-            rtc::H264RtpPacketizer::defaultClockRate /
-            static_cast<uint32_t>(std::max(1, manager->settings_.framerate)));
+          // The RTP timestamp must describe when the frame was actually
+          // captured. Frames here are produced on demand by the remote-render
+          // agent (one per viewer pose), so the cadence is variable; stamping
+          // them as a constant settings_.framerate stream makes the receiver's
+          // render-time estimator drift against the wall clock, which shows up
+          // as stutter and steadily growing latency on the headset.
           manager->rtp_config_->timestamp =
             manager->rtp_config_->startTimestamp +
-            static_cast<uint32_t>(unit_index * frame_ticks);
+            manager->resolve_frame_timestamp_ticks(buffer);
           auto * data_ptr = reinterpret_cast<const std::byte *>(info.data);
           sent_unit = manager->video_track_->send(data_ptr, info.size);
         } catch (const std::exception & e) {

@@ -74,6 +74,9 @@ public:
     const std::vector<uint8_t> & data, int width, int height,
     const std::string & format);
 
+  // Send synchronized remote-render metadata/depth over the negotiated data channel.
+  bool send_auxiliary_data(const std::vector<uint8_t> & data);
+
   // Request a keyframe from the encoder (useful for packet loss recovery)
   void request_keyframe();
 
@@ -89,6 +92,11 @@ private:
     std::vector<int> h264_payload_types;
     int preferred_payload_type = -1;
   };
+
+  // Convert an encoded buffer's presentation time into 90 kHz RTP ticks
+  // relative to the first frame of this session. Falls back to a nominal
+  // per-frame advance only when the buffer carries no usable timestamp.
+  uint32_t resolve_frame_timestamp_ticks(GstBuffer * buffer);
 
   Settings settings_;
   bool initialized_ = false;
@@ -113,9 +121,16 @@ private:
   std::mutex sample_callback_mutex_;
   std::atomic<bool> peer_connected_{false};
   std::atomic<bool> video_track_open_{false};
+  std::atomic<bool> data_channel_open_{false};
   std::atomic<uint64_t> encoded_units_sent_{0};
   std::atomic<uint64_t> encoded_bytes_sent_{0};
+  std::atomic<uint64_t> auxiliary_units_sent_{0};
+  std::atomic<uint64_t> auxiliary_bytes_sent_{0};
+  std::atomic<uint64_t> auxiliary_units_dropped_{0};
   std::atomic<bool> first_encoded_unit_logged_{false};
+  uint64_t first_frame_pts_ns_ = 0;
+  bool has_first_frame_pts_ = false;
+  uint32_t last_frame_timestamp_ticks_ = 0;
   std::chrono::steady_clock::time_point last_track_closed_log_time_{};
 
   // Caps caching to avoid redundant GStreamer calls
@@ -125,6 +140,7 @@ private:
 
   SignalingCallback signaling_callback_;
   std::mutex signaling_mutex_;
+  std::mutex data_channel_mutex_;
   std::mutex pending_description_mutex_;
   bool has_pending_local_description_ = false;
   std::string pending_local_description_type_;
