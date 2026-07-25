@@ -40,7 +40,8 @@ This package handles:
   retained-payload cache and replay
 - `TopicManager`: ROS 2 topic registry, QoS handling, and CDR/HorusLink payload conversion
 - `ServiceManager`: ROS/Unity service proxy handling
-- `WebRTCManager` (optional): offer/candidate handling, SDP/ICE flow, RTP sender pipeline
+- `WebRTCManager` (optional): offer/candidate handling, SDP/ICE flow, H.264 RTP
+  sender pipeline, and bounded remote-render auxiliary data channel
 
 ## Dependency Matrix
 
@@ -146,6 +147,23 @@ Important keys:
 > [!TIP]
 > This gate avoids the common "session appears connected but white panel" condition caused by negotiation mismatch.
 
+### Experimental remote-render RGB-D sessions
+
+Remote-render sessions use the regular H.264 video track for color and the
+`horus.remote-render.v1` data channel for matching metric depth, source pose,
+and projection metadata. This carrier is retained for further development;
+the SDK defaults to its validated ROS-compressed RGB-D carrier. The bridge:
+
+- subscribes to both source topics with best-effort, keep-last-one QoS;
+- fragments large depth frames into messages below the negotiated SCTP limit;
+- drops a complete stale depth frame before transmission when the data-channel
+  queue is already full;
+- keeps color RTP timestamps tied to actual GStreamer presentation time instead
+  of assuming a constant source cadence.
+
+The Quest pairs color and depth by frame sequence. Missing or incomplete depth
+chunks therefore discard one remote frame without corrupting the next frame.
+
 ## Diagnostics Decoding Guide
 
 For HorusLink wire captures, use the checked-in frame inspector:
@@ -164,7 +182,8 @@ Bridge telemetry includes:
 - negotiated video MID,
 - selected H264 payload type,
 - first outbound RTP packet header (`pt`, `ssrc`, `seq`),
-- periodic RTP counters.
+- periodic RTP counters,
+- remote-render auxiliary input, sent, and dropped frame counters.
 
 Interpretation:
 - MID/PT mismatch risk -> inspect offer parse + selected PT logs.
@@ -179,6 +198,7 @@ Interpretation:
 | ICE checking -> closed | Transport path | candidate reachability / network topology |
 | Connected but white panel | Decode/PT mismatch | negotiated MID/PT + inbound RTP stats |
 | Frames stall after start | Media pipeline/runtime load | RTP counters + publisher/input rate |
+| Color arrives but no spatial map | auxiliary depth path | data-channel open state + auxiliary sent/dropped counters |
 
 ## Deployment Checklist
 
