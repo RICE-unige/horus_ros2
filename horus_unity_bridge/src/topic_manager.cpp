@@ -162,8 +162,24 @@ bool TopicManager::register_publisher(
     // Normalize message type
     std::string normalized_type = normalize_message_type(message_type);
 
+    rclcpp::QoS final_qos = qos;
+    const bool is_webrtc_client_signal_topic =
+      topic.find("client_signal") != std::string::npos &&
+      (topic.find("webrtc") != std::string::npos ||
+      topic.find("remote_render") != std::string::npos);
+    if (is_webrtc_client_signal_topic) {
+      // The first offer can otherwise race DDS discovery between this generic
+      // publisher and MessageRouter's internal WebRTC subscription.
+      final_qos = rclcpp::QoS(rclcpp::KeepLast(100))
+        .reliability(rclcpp::ReliabilityPolicy::Reliable)
+        .durability(rclcpp::DurabilityPolicy::TransientLocal);
+      RCLCPP_INFO(node_->get_logger(),
+          "Forcing WebRTC client signal QoS (reliable+transient_local) for topic: %s",
+          topic.c_str());
+    }
+
     // Create generic publisher
-    auto publisher = node_->create_generic_publisher(topic, normalized_type, qos);
+    auto publisher = node_->create_generic_publisher(topic, normalized_type, final_qos);
 
     // Store publisher info
     GenericPublisherInfo info;
@@ -229,8 +245,9 @@ bool TopicManager::register_subscriber(
     // PATCH: Force Transient Local QoS for tf_static topics
     rclcpp::QoS final_qos = qos;
     const bool is_webrtc_signal_topic =
-      topic.find("webrtc") != std::string::npos &&
-      topic.find("server_signal") != std::string::npos;
+      topic.find("server_signal") != std::string::npos &&
+      (topic.find("webrtc") != std::string::npos ||
+      topic.find("remote_render") != std::string::npos);
     if (is_tf_static_topic(topic)) {
       final_qos.transient_local();
       RCLCPP_INFO(node_->get_logger(), "Forcing Transient Local QoS for static TF topic: %s",
@@ -251,13 +268,15 @@ bool TopicManager::register_subscriber(
           "Forcing retained-state QoS (reliable+transient_local) for topic: %s",
           topic.c_str());
     } else if (is_webrtc_signal_topic) {
-      // Match exact QoS of webrtc_signal_pub_ in message_router.cpp:
-      // KeepLast(100), Reliable, Volatile
+      // The client subscribes before publishing its offer. Request volatile
+      // durability so a new session cannot receive cached answers or ICE from
+      // an older session. MessageRouter's transient-local publisher remains
+      // QoS-compatible and protects publication during DDS discovery.
       final_qos = rclcpp::QoS(rclcpp::KeepLast(100))
         .reliability(rclcpp::ReliabilityPolicy::Reliable)
         .durability(rclcpp::DurabilityPolicy::Volatile);
       RCLCPP_INFO(node_->get_logger(),
-          "Forcing matching WebRTC signal QoS (reliable+volatile) for topic: %s", topic.c_str());
+          "Forcing WebRTC signal QoS (reliable+volatile) for topic: %s", topic.c_str());
     }
 
     // Retained/transient-local samples can be delivered as soon as the ROS
