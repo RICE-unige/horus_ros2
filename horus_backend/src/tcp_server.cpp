@@ -8,6 +8,8 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <poll.h>
+#include <chrono>
 
 #include <algorithm>
 #include <cerrno>
@@ -29,35 +31,46 @@ TcpServer::~TcpServer() {stop();}
 
 void TcpServer::start()
 {
+  std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
   if (running_) {
     return;
   }
 
   if (!create_socket() || !bind_socket() || !listen_socket()) {
+    close_socket();
     throw std::runtime_error("Failed to start TCP server");
   }
 
   running_ = true;
-  server_thread_ = std::thread(&TcpServer::server_loop, this);
+  try {
+    server_thread_ = std::thread(&TcpServer::server_loop, this);
+  } catch (...) {
+    running_ = false;
+    close_socket();
+    throw;
+  }
 
   std::cout << "TCP Server started on port " << port_ << std::endl;
 }
 
 void TcpServer::stop()
 {
+  std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
   if (!running_.exchange(false)) {
     close_socket();
     return;
   }
 
-  close_socket();
-  shutdown_client_sockets();
+  // Wake accept before joining; do not close/reuse its descriptor under the thread.
+  shutdown(server_socket_, SHUT_RDWR);
 
   if (server_thread_.joinable()) {
     server_thread_.join();
   }
+  close_socket();
+  shutdown_client_sockets();
 
-  std::vector<std::thread> client_threads;
+  std::vector<std::unique_ptr<ClientWorker>> client_threads;
   {
     std::lock_guard<std::mutex> lock(clients_mutex_);
     client_threads.swap(client_threads_);
@@ -65,10 +78,8 @@ void TcpServer::stop()
   }
 
   for (auto & client_thread : client_threads) {
-    if (client_thread.joinable() &&
-      client_thread.get_id() != std::this_thread::get_id())
-    {
-      client_thread.join();
+    if (client_thread->thread.joinable()) {
+      client_thread->thread.join();
     }
   }
 
@@ -79,7 +90,8 @@ bool TcpServer::is_running() const {return running_;}
 
 void TcpServer::set_message_callback(MessageCallback callback)
 {
-  message_callback_ = callback;
+  std::lock_guard<std::mutex> lock(callback_mutex_);
+  message_callback_ = std::move(callback);
 }
 
 bool TcpServer::create_socket()
@@ -112,6 +124,10 @@ bool TcpServer::bind_socket()
   if (bind(server_socket_, (struct sockaddr *)&address, sizeof(address)) < 0) {
     std::cerr << "Failed to bind socket to port " << port_ << std::endl;
     return false;
+  }
+  socklen_t size = sizeof(address);
+  if (getsockname(server_socket_, reinterpret_cast<sockaddr *>(&address), &size) == 0) {
+    port_ = ntohs(address.sin_port);
   }
 
   return true;
@@ -152,11 +168,30 @@ void TcpServer::unregister_client_socket(int client_socket)
   client_sockets_.erase(
     std::remove(client_sockets_.begin(), client_sockets_.end(), client_socket),
     client_sockets_.end());
+  close(client_socket);
+}
+
+void TcpServer::reap_finished_clients()
+{
+  std::lock_guard<std::mutex> lock(clients_mutex_);
+  for (auto it = client_threads_.begin(); it != client_threads_.end(); ) {
+    if ((*it)->done.load()) {
+      (*it)->thread.join();
+      it = client_threads_.erase(it);
+    } else {
+      ++it;
+    }
+  }
 }
 
 void TcpServer::server_loop()
 {
   while (running_) {
+    reap_finished_clients();
+    pollfd listener{server_socket_, POLLIN, 0};
+    if (poll(&listener, 1, 200) <= 0 || !(listener.revents & POLLIN)) {
+      continue;
+    }
     struct sockaddr_in address;
     socklen_t addrlen = sizeof(address);
 
@@ -168,6 +203,10 @@ void TcpServer::server_loop()
       }
       continue;
     }
+    if (!running_) {
+      close(client_socket);
+      break;
+    }
 
     std::cout << "Client connected from " << inet_ntoa(address.sin_addr)
               << std::endl;
@@ -175,9 +214,47 @@ void TcpServer::server_loop()
     {
       std::lock_guard<std::mutex> lock(clients_mutex_);
       client_sockets_.push_back(client_socket);
-      client_threads_.emplace_back(&TcpServer::handle_client, this, client_socket);
+      auto worker = std::make_unique<ClientWorker>();
+      auto * state = worker.get();
+      client_threads_.push_back(std::move(worker));
+      try {
+        state->thread = std::thread([this, client_socket, state]() {
+          try {
+            handle_client(client_socket);
+          } catch (const std::exception & e) {
+            std::cerr << "TCP client failed: " << e.what() << std::endl;
+          } catch (...) {
+            std::cerr << "TCP client failed" << std::endl;
+          }
+          unregister_client_socket(client_socket);
+          state->done = true;
+        });
+      } catch (...) {
+        client_threads_.pop_back();
+        client_sockets_.pop_back();
+        close(client_socket);
+      }
     }
   }
+}
+
+bool TcpServer::send_response(int client_socket, const std::string & response)
+{
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  size_t offset = 0;
+  while (running_ && offset < response.size() && std::chrono::steady_clock::now() < deadline) {
+    const auto sent = send(
+      client_socket, response.data() + offset, response.size() - offset, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (sent > 0) {
+      offset += static_cast<size_t>(sent);
+    } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+      pollfd writable{client_socket, POLLOUT, 0};
+      poll(&writable, 1, 50);
+    } else {
+      return false;
+    }
+  }
+  return offset == response.size();
 }
 
 void TcpServer::handle_client(int client_socket)
@@ -205,12 +282,12 @@ void TcpServer::handle_client(int client_socket)
     pending_message.append(buffer, static_cast<std::size_t>(bytes_read));
     if (pending_message.size() > kMaxBufferedMessageBytes) {
       const std::string response = "{\"status\":\"error\",\"message\":\"message too large\"}\n";
-      send(client_socket, response.c_str(), response.length(), 0);
+      send_response(client_socket, response);
       break;
     }
 
     std::size_t newline_pos = std::string::npos;
-    while ((newline_pos = pending_message.find('\n')) != std::string::npos) {
+    while (running_ && (newline_pos = pending_message.find('\n')) != std::string::npos) {
       std::string message = pending_message.substr(0, newline_pos);
       if (!message.empty() && message.back() == '\r') {
         message.pop_back();
@@ -221,28 +298,33 @@ void TcpServer::handle_client(int client_socket)
       }
 
       const std::string response = process_message(message) + "\n";
-      send(client_socket, response.c_str(), response.length(), 0);
+      if (!send_response(client_socket, response)) {
+        return;
+      }
     }
   }
 
-  if (!pending_message.empty() && pending_message.size() <= kMaxBufferedMessageBytes) {
-    const std::string response = process_message(pending_message) + "\n";
-    send(client_socket, response.c_str(), response.length(), 0);
-  }
-
-  close(client_socket);
-  unregister_client_socket(client_socket);
+  // An unterminated frame is incomplete, including at EOF and during shutdown.
   std::cout << "Client disconnected" << std::endl;
 }
 
 std::string TcpServer::process_message(const std::string & message)
 {
-  if (message_callback_) {
-    return message_callback_(message);
+  MessageCallback callback;
+  {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    callback = message_callback_;
+  }
+  if (callback) {
+    try {
+      return callback(message);
+    } catch (...) {
+      return "{\"status\":\"error\",\"message\":\"request processing failed\"}";
+    }
   }
 
   // Default response
-  return "{\"status\": \"ok\", \"message\": \"Message received\"}";
+  return "{\"status\":\"unsupported\",\"message\":\"No request handler configured\"}";
 }
 
 }  // namespace horus_backend

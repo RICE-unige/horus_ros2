@@ -30,7 +30,7 @@ bool ChannelDescriptor::operator==(const ChannelDescriptor & other) const
          type_name == other.type_name &&
          lane == other.lane &&
          delivery == other.delivery &&
-         state == other.state;
+         state == other.state && live_map == other.live_map;
 }
 
 bool ChannelTable::begin_subscribe(
@@ -38,7 +38,8 @@ bool ChannelTable::begin_subscribe(
   std::string topic,
   std::string type_name,
   Lane lane,
-  Delivery delivery)
+  Delivery delivery,
+  bool live_map)
 {
   if (topic.empty() || type_name.empty()) {
     return false;
@@ -58,7 +59,8 @@ bool ChannelTable::begin_subscribe(
     type_name,
     lane,
     delivery,
-    ChannelState::PendingSubscribe
+    ChannelState::PendingSubscribe,
+    live_map
   };
   if (topic_to_channel_.find(channels_[channel_id].topic) == topic_to_channel_.end()) {
     topic_to_channel_[channels_[channel_id].topic] = channel_id;

@@ -2,7 +2,8 @@
 #include <example_interfaces/srv/add_two_ints.hpp>
 #include <chrono>
 
-int main(int argc, char** argv) {
+int main(int argc, char ** argv)
+{
   rclcpp::init(argc, argv);
   auto node = std::make_shared<rclcpp::Node>("test_service_client");
 

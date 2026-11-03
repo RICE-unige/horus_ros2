@@ -99,13 +99,13 @@ Recommended navigation visualization topics:
 
 Recommended global 3D map topics:
 - `/map_3d` (`sensor_msgs/PointCloud2`, global pointcloud map stream)
-- `/map_3d_mesh` (`visualization_msgs/Marker`, single `TRIANGLE_LIST` mesh stream, recommended Quest mesh path in current stable workflow)
+- `/map_3d_mesh` (`visualization_msgs/Marker`, `TRIANGLE_LIST` mesh stream; use stable namespace/ID pairs for chunked maps)
 - `/map_3d_octomap_mesh` (`visualization_msgs/Marker`, `TRIANGLE_LIST` mesh stream for octomap mode)
 - `/map_3d_octomap` (`octomap_msgs/Octomap`, optional native octomap metadata/topic for interoperability)
 
 > [!NOTE]
 > Mesh conversion flow for `/map_3d -> /map_3d_mesh` is orchestrated by `horus_sdk` tooling (`tools/voxblox_mesh_to_horus_marker.py` for the Voxblox/Cow & Lady workflow, or `tools/ply_to_horus_mesh_marker.py` for the ROS 2-native PLY fallback), with SDK-side map registration via `mesh_map_registration.py` / `pointcloud_map_registration.py` / `occupancy_map_registration.py` / `octomap_registration.py`, and snapshot-first defaults for Quest stability.
-> Marker-array transport flags remain accepted in SDK for compatibility but are currently coerced to marker-only runtime behavior with warning logs.
+> The Quest mesh runtime currently uses `Marker`, not `MarkerArray`. Publish incremental `TRIANGLE_LIST` markers with stable chunk namespace/ID pairs; a new chunk must not delete unrelated chunks. Do not register a `MarkerArray` publisher as a `Marker` topic. Use marker delete actions when a chunk is removed.
 > Replay-time bounded republish bursts are used so late joiners receive map data during SDK registry replay windows.
 
 Recommended robot-description transport topics:
@@ -147,9 +147,10 @@ Recommended setup:
 
 ```bash
 git clone https://github.com/RICE-unige/horus_ros2.git ~/horus_ws/src/horus_ros2
-cd ~/horus_ws/src/horus_ros2
-rosdep install --from-paths . -y --ignore-src
-colcon build --symlink-install --packages-select horus_unity_bridge
+source /opt/ros/jazzy/setup.bash
+cd ~/horus_ws
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --symlink-install --packages-up-to horus_backend horus_unity_bridge
 source install/setup.bash
 ```
 
@@ -186,6 +187,32 @@ The backend node exposes an optional Nav2 action adapter path for `goal_pose` / 
 > - `default_robot_type` (default `generic`) - default robot type applied to registered robots.
 
 ## :toolbox: Operational Guidance
+
+### Backend command and goal behavior
+
+The legacy `/horus/execute_command` service has no plugin command executor and
+returns `success=false` with an unsupported-endpoint explanation. It does not
+claim that motion occurred. Use the robot's explicitly registered ROS topic,
+service or action interfaces. The backend TCP port is diagnostic only, not a
+robot command endpoint: requests and responses are newline-delimited, incomplete
+frames are discarded, and its echo is labelled `unsupported`.
+`/horus/robot_status_feedback` is forwarded to `/horus/robot_status`.
+
+The Nav2 adapter tracks goal generations. A cancel arriving before acceptance is
+retained and sent once the goal handle arrives; `goal_cancelled` is published
+only after Nav2 returns a canceled result. Late results from a replaced goal do
+not clear its successor. Unregistering requests cancellation of the adapter's own goals. Current
+goal feedback is available as `nav2_msgs/action/NavigateToPose_Feedback` on
+`<configured status topic>/feedback`; terminal status strings remain compatible.
+This validates routing/lifecycle behavior, not a physical robot's stopping distance.
+An unresponsive action server is not confirmation that a goal stopped. In-flight
+acceptance/result loss and bounded pending-acceptance retention still need further
+work; the adapter retains a pending acceptance so a late accepted goal can be
+cancelled. It must not be used as the robot's deadman or emergency-stop mechanism.
+
+To explicitly build without the optional adapter, use
+`--cmake-args -DHORUS_BACKEND_ENABLE_NAV2=OFF`. Missing Nav2 dependencies also
+disable it automatically; they do not prevent the other backend code from building.
 
 ### Signaling and QoS
 - WebRTC signaling uses reliable/volatile semantics for timely negotiation.

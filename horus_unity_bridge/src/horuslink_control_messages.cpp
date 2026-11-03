@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/horuslink_control_messages.hpp"
+#include "horus_unity_bridge/input_timing.hpp"
 
 #include <limits>
 #include <stdexcept>
@@ -264,7 +265,7 @@ bool HelloMessage::operator==(const HelloMessage & other) const
          max_payload_bytes == other.max_payload_bytes &&
          keepalive_ms == other.keepalive_ms &&
          lane == other.lane &&
-         session_id == other.session_id;
+         session_id == other.session_id && features == other.features;
 }
 
 bool SubscribeRequest::operator==(const SubscribeRequest & other) const
@@ -273,7 +274,7 @@ bool SubscribeRequest::operator==(const SubscribeRequest & other) const
          topic == other.topic &&
          type_name == other.type_name &&
          lane == other.lane &&
-         delivery == other.delivery;
+         delivery == other.delivery && live_map == other.live_map;
 }
 
 bool PublisherRequest::operator==(const PublisherRequest & other) const
@@ -317,7 +318,7 @@ bool TopicEntry::operator==(const TopicEntry & other) const
 
 std::vector<uint8_t> encode_hello(const HelloMessage & message)
 {
-  return encode_tlvs({
+  std::vector<TlvRecord> records{
       byte_record(control_tlv::kKind, static_cast<uint8_t>(ControlMessageKind::Hello)),
       u16_record(control_tlv::kProtocolVersion, control_tlv::kProtocolVersionValue),
       byte_record(control_tlv::kRole, static_cast<uint8_t>(message.role)),
@@ -325,7 +326,9 @@ std::vector<uint8_t> encode_hello(const HelloMessage & message)
       u32_record(control_tlv::kKeepalive, message.keepalive_ms),
       byte_record(control_tlv::kLane, static_cast<uint8_t>(message.lane)),
       u64_record(control_tlv::kSessionId, message.session_id)
-    });
+    };
+  if (message.features) {records.push_back(u32_record(kFeaturesTlv, message.features));}
+  return encode_tlvs(records);
 }
 
 std::optional<HelloMessage> decode_hello(const uint8_t * data, size_t size)
@@ -347,21 +350,23 @@ std::optional<HelloMessage> decode_hello(const uint8_t * data, size_t size)
 
   uint8_t lane = static_cast<uint8_t>(Lane::Realtime);
   uint64_t session_id = 0;
+  uint32_t features = 0;
   (void)get_byte(*records, control_tlv::kLane, lane);
   (void)get_u64(*records, control_tlv::kSessionId, session_id);
+  (void)get_u32(*records, kFeaturesTlv, features);
 
   return HelloMessage{
     static_cast<EndpointRole>(role),
     max_payload_bytes,
     keepalive_ms,
     static_cast<Lane>(lane),
-    session_id};
+    session_id, features};
 }
 
 std::vector<uint8_t> encode_subscribe_request(const SubscribeRequest & request)
 {
   validate_topic_fields(request.topic, request.type_name);
-  return encode_tlvs({
+  std::vector<TlvRecord> records{
       byte_record(control_tlv::kKind, static_cast<uint8_t>(ControlMessageKind::SubscribeRequest)),
       u16_record(control_tlv::kProtocolVersion, control_tlv::kProtocolVersionValue),
       u16_record(control_tlv::kChannelId, request.channel_id),
@@ -369,7 +374,9 @@ std::vector<uint8_t> encode_subscribe_request(const SubscribeRequest & request)
       string_record(control_tlv::kTypeName, request.type_name),
       byte_record(control_tlv::kLane, static_cast<uint8_t>(request.lane)),
       byte_record(control_tlv::kDelivery, static_cast<uint8_t>(request.delivery))
-    });
+    };
+  if (request.live_map) records.push_back(byte_record(control_tlv::kLiveMap, 1));
+  return encode_tlvs(records);
 }
 
 std::optional<SubscribeRequest> decode_subscribe_request(const uint8_t * data, size_t size)
@@ -393,6 +400,15 @@ std::optional<SubscribeRequest> decode_subscribe_request(const uint8_t * data, s
 
   request.lane = static_cast<Lane>(lane);
   request.delivery = static_cast<Delivery>(delivery);
+  uint8_t live_map = 0;
+  for (const auto & record : *records) {
+    if (record.type == control_tlv::kLiveMap &&
+      (!get_byte(*records, control_tlv::kLiveMap, live_map) || live_map > 1))
+    {
+      return std::nullopt;
+    }
+  }
+  request.live_map = live_map == 1;
   return request;
 }
 

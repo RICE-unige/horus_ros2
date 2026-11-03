@@ -139,4 +139,67 @@ TEST(HorusLinkOutboundLaneQueueTest, ReplaceLatestOverflowIsRejectedWhenQueueHas
   EXPECT_EQ(second->header.seq, 2u);
 }
 
+TEST(HorusLinkOutboundLaneQueueTest, ByteLimitCountsReplacementsPopAndClear)
+{
+  const size_t unit = FrameHeader::kSize + 1;
+  OutboundLaneQueue queue(100, 2 * unit);
+  ASSERT_TRUE(queue.enqueue(make_frame(1, true, 3)).accepted);
+  ASSERT_TRUE(queue.enqueue(make_frame(2, false, 4)).accepted);
+  EXPECT_EQ(queue.bytes(), 2 * unit);
+  EXPECT_FALSE(queue.enqueue(make_frame(3, false, 5)).accepted);
+  auto larger = make_frame(4, true, 3);
+  larger.payload.resize(2);
+  EXPECT_FALSE(queue.enqueue(std::move(larger)).accepted);
+  EXPECT_EQ(queue.bytes(), 2 * unit);
+  ASSERT_TRUE(queue.enqueue(make_frame(5, true, 3)).accepted);
+  EXPECT_EQ(queue.pop()->header.seq, 5u);
+  EXPECT_EQ(queue.bytes(), unit);
+  queue.clear();
+  EXPECT_EQ(queue.bytes(), 0u);
+}
+
+TEST(HorusLinkOutboundLaneQueueTest, SingleOversizedFrameIsBoundedToAnEmptyQueue)
+{
+  OutboundLaneQueue queue(100, 64);
+  auto large = make_frame(1);
+  large.payload.resize(128);
+  ASSERT_TRUE(queue.enqueue(std::move(large)).accepted);
+  EXPECT_EQ(queue.bytes(), FrameHeader::kSize + 128);
+  EXPECT_FALSE(queue.enqueue(make_frame(2)).accepted);
+  EXPECT_EQ(queue.pop()->header.seq, 1u);
+  EXPECT_EQ(queue.bytes(), 0u);
+  EXPECT_TRUE(queue.enqueue(make_frame(2)).accepted);
+}
+
+TEST(HorusLinkOutboundLaneQueueTest, CameraGetsTurnBetweenReliableMapBurstsWithoutLosingGeometry)
+{
+  OutboundLaneQueue queue(100, 1024 * 1024, true);
+  for (uint32_t seq = 1; seq <= 12; ++seq) {
+    ASSERT_TRUE(queue.enqueue(make_frame(seq, false, 3)).accepted);
+  }
+  ASSERT_TRUE(queue.enqueue(make_frame(50, true, 4)).accepted);
+  ASSERT_TRUE(queue.enqueue(make_frame(51, true, 4)).accepted);
+  for (uint32_t seq = 1; seq <= 4; ++seq) {
+    EXPECT_EQ(queue.pop()->header.seq, seq);
+                                                                                   }
+  EXPECT_EQ(queue.pop()->header.seq, 51u);
+  for (uint32_t seq = 5; seq <= 12; ++seq) {
+    EXPECT_EQ(queue.pop()->header.seq, seq);
+                                                                                    }
+  EXPECT_TRUE(queue.empty());
+  EXPECT_EQ(queue.bytes(), 0u);
+}
+
+TEST(HorusLinkOutboundLaneQueueTest, ClosingChannelReleasesOnlyItsQueuedData)
+{
+  OutboundLaneQueue queue(100);
+  ASSERT_TRUE(queue.enqueue(make_frame(1, false, 3)).accepted);
+  ASSERT_TRUE(queue.enqueue(make_frame(2, false, 4)).accepted);
+  ASSERT_TRUE(queue.enqueue(make_frame(3, false, 3)).accepted);
+  queue.remove_channel(3);
+  EXPECT_EQ(queue.bytes(), FrameHeader::kSize + 1);
+  EXPECT_EQ(queue.pop()->header.channel_id, 4);
+  EXPECT_EQ(queue.bytes(), 0u);
+}
+
 }  // namespace horus_unity_bridge::horuslink

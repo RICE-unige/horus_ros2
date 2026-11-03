@@ -59,6 +59,7 @@ struct HelloMessage
   uint32_t keepalive_ms = 0;
   Lane lane = Lane::Realtime;
   uint64_t session_id = 0;
+  uint32_t features = 0;
 
   bool operator==(const HelloMessage & other) const;
 };
@@ -70,6 +71,7 @@ struct SubscribeRequest
   std::string type_name;
   Lane lane = Lane::Realtime;
   Delivery delivery = Delivery::ReliableFifo;
+  bool live_map = false;
 
   bool operator==(const SubscribeRequest & other) const;
 };
@@ -139,6 +141,7 @@ constexpr uint16_t kSubscribeStatus = 11;
 constexpr uint16_t kError = 12;
 constexpr uint16_t kSessionId = 13;
 constexpr uint16_t kTopicEntry = 20;
+constexpr uint16_t kLiveMap = 21;
 constexpr uint16_t kProtocolVersionValue = 1;
 }  // namespace control_tlv
 

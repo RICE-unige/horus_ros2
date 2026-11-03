@@ -104,6 +104,34 @@ TEST(HorusLinkOutboundFrameRouterTest, RoutesBulkReplaceLatestPayloadsToBulkQueu
   EXPECT_FALSE(router.pop(Lane::Realtime).has_value());
 }
 
+TEST(HorusLinkOutboundFrameRouterTest, PartialTfNeverReplacesAnotherEdgeEvenForOlderClients)
+{
+  for (const auto & type : {"tf2_msgs/msg/TFMessage", "tf2_msgs/TFMessage"}) {
+    ChannelTable table;
+    ASSERT_TRUE(table.begin_subscribe(5, "/robot/custom_transforms", type,
+      Lane::Realtime, Delivery::ReplaceLatest));
+    ASSERT_TRUE(table.confirm_subscribe_ack(5));
+    OutboundFrameRouter router(3, 4);
+    for (uint8_t edge = 0; edge < 3; ++edge) {
+      auto result = router.enqueue_data(table, "/robot/custom_transforms", &edge, 1);
+      ASSERT_TRUE(result.accepted);
+      EXPECT_FALSE(result.replaced);
+      EXPECT_EQ(result.delivery, Delivery::ReliableFifo);
+    }
+    const uint8_t extra = 4;
+    auto full = router.enqueue_data(table, "/robot/custom_transforms", &extra, 1);
+    EXPECT_FALSE(full.accepted);
+    EXPECT_TRUE(full.overflow);
+    EXPECT_EQ(full.delivery, Delivery::ReliableFifo);
+    for (uint8_t edge = 0; edge < 3; ++edge) {
+      auto routed = router.pop(Lane::Realtime);
+      ASSERT_TRUE(routed);
+      EXPECT_EQ(routed->frame.header.flags, FrameFlags::RawOpaque);
+      EXPECT_EQ(routed->frame.payload, std::vector<uint8_t>{edge});
+    }
+  }
+}
+
 TEST(HorusLinkOutboundFrameRouterTest, ReplaceLatestKeepsOneQueuedFramePerChannel)
 {
   ChannelTable table;

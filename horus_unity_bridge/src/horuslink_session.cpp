@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/horuslink_session.hpp"
+#include "horus_unity_bridge/input_timing.hpp"
 
 namespace horus_unity_bridge::horuslink
 {
@@ -29,6 +30,16 @@ std::vector<Frame> Session::handle_frame(const Frame & frame, Lane lane)
 {
   if (frame.header.msg_type == MessageType::Control) {
     return handle_control_frame(frame);
+  }
+
+  if (frame.header.msg_type == MessageType::Keepalive && frame.header.channel_id == 0 &&
+    is_clock_probe(frame.payload) && read_timing_u64(frame.payload.data() + 12) == 0)
+  {
+    Frame response = frame;
+    response.header.seq = next_sequence();
+    response.header.length = response.payload.size();
+    write_timing_u64(response.payload.data() + 12, input_clock_ms());
+    return {std::move(response)};
   }
 
   if (frame.header.msg_type == MessageType::Keepalive &&
@@ -140,7 +151,8 @@ std::vector<Frame> Session::handle_control_frame(const Frame & frame)
     topic,
     type_name,
     lane,
-    delivery);
+    delivery,
+    subscribe_request.has_value() && subscribe_request->live_map);
   if (accepted) {
     channel_table_.confirm_subscribe_ack(channel_id);
   }

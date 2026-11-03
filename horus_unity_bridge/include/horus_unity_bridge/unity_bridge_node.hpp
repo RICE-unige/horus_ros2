@@ -104,6 +104,7 @@ private:
 
   // State
   std::atomic<bool> running_;
+  std::atomic<bool> spin_thread_exited_{false};
   std::thread spin_thread_;
 
   // Private methods

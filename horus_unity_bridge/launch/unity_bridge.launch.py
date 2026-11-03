@@ -16,6 +16,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -30,10 +32,11 @@ def generate_launch_description():
         executable='horus_unity_bridge_node',
         name='horus_unity_bridge',
         output='screen',
-        parameters=[config_file] if os.path.exists(config_file) else [],
+        parameters=[LaunchConfiguration('config_file')],
         arguments=['--ros-args', '--log-level', 'info']
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument('config_file', default_value=config_file),
         unity_bridge_node
     ])

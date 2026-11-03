@@ -56,6 +56,7 @@ struct ChannelDescriptor
   Lane lane = Lane::Realtime;
   Delivery delivery = Delivery::ReliableFifo;
   ChannelState state = ChannelState::Empty;
+  bool live_map = false;
 
   bool operator==(const ChannelDescriptor & other) const;
 };
@@ -68,7 +69,8 @@ public:
     std::string topic,
     std::string type_name,
     Lane lane,
-    Delivery delivery);
+    Delivery delivery,
+    bool live_map = false);
 
   bool confirm_subscribe_ack(uint16_t channel_id);
   bool can_accept_data_frame(const FrameHeader & header, Lane lane) const;

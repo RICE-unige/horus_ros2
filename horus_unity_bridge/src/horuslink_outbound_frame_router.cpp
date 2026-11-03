@@ -23,9 +23,10 @@
 namespace horus_unity_bridge::horuslink
 {
 
-OutboundFrameRouter::OutboundFrameRouter(size_t realtime_depth, size_t bulk_depth)
-: realtime_queue_(realtime_depth),
-  bulk_queue_(bulk_depth)
+OutboundFrameRouter::OutboundFrameRouter(
+  size_t realtime_depth, size_t bulk_depth, size_t realtime_bytes, size_t bulk_bytes)
+: realtime_queue_(realtime_depth, realtime_bytes),
+  bulk_queue_(bulk_depth, bulk_bytes, true)
 {
 }
 
@@ -46,6 +47,21 @@ OutboundFrameRouteResult OutboundFrameRouter::enqueue_payload(
   const uint8_t * payload,
   size_t size)
 {
+  if (size > std::numeric_limits<uint32_t>::max() || (size > 0 && payload == nullptr)) {
+    return make_error_result(nullptr, "invalid payload size or pointer");
+  }
+  std::vector<uint8_t> owned;
+  if (size > 0) {
+    owned.assign(payload, payload + size);
+  }
+  return enqueue_owned_payload(channel_table, topic, message_type, corr_id, std::move(owned));
+}
+
+OutboundFrameRouteResult OutboundFrameRouter::enqueue_owned_payload(
+  const ChannelTable & channel_table, const std::string & topic,
+  MessageType message_type, uint32_t corr_id, std::vector<uint8_t> payload)
+{
+  const size_t size = payload.size();
   const auto channel = channel_table.get_by_topic(topic);
   if (!channel.has_value()) {
     return make_error_result(nullptr, "topic is not subscribed");
@@ -59,20 +75,22 @@ OutboundFrameRouteResult OutboundFrameRouter::enqueue_payload(
   if (size > std::numeric_limits<uint32_t>::max()) {
     return make_error_result(&*channel, "payload exceeds HorusLink uint32 length");
   }
-  if (payload == nullptr && size > 0) {
-    return make_error_result(&*channel, "payload pointer is null");
-  }
 
   Frame frame;
   frame.header.channel_id = channel->channel_id;
   frame.header.msg_type = message_type;
-  frame.header.flags = flags_for_delivery(channel->delivery);
+  // TFMessage is a delta containing only some edges, not a complete tree.
+  // Replacing it by topic loses other publishers' robot/camera/joint updates.
+  // Clear the wire flag as well, so older clients cannot coalesce these deltas.
+  const bool partial_tf = message_type == MessageType::Data &&
+    (channel->type_name == "tf2_msgs/msg/TFMessage" ||
+    channel->type_name == "tf2_msgs/TFMessage");
+  const Delivery delivery = partial_tf ? Delivery::ReliableFifo : channel->delivery;
+  frame.header.flags = flags_for_delivery(delivery);
   frame.header.seq = next_sequence_for(channel->channel_id);
   frame.header.corr_id = corr_id;
   frame.header.length = static_cast<uint32_t>(size);
-  if (size > 0) {
-    frame.payload.assign(payload, payload + size);
-  }
+  frame.payload = std::move(payload);
 
   auto & queue = queue_for(channel->lane);
   auto enqueue_result = queue.enqueue(std::move(frame));
@@ -82,7 +100,7 @@ OutboundFrameRouteResult OutboundFrameRouter::enqueue_payload(
   result.replaced = enqueue_result.replaced;
   result.overflow = enqueue_result.overflow;
   result.lane = channel->lane;
-  result.delivery = channel->delivery;
+  result.delivery = delivery;
   result.channel_id = channel->channel_id;
   result.seq = next_sequence_for(channel->channel_id);
   result.realtime_depth = realtime_queue_.size();
@@ -111,6 +129,13 @@ void OutboundFrameRouter::clear()
 {
   realtime_queue_.clear();
   bulk_queue_.clear();
+}
+
+void OutboundFrameRouter::remove_channel(uint16_t channel_id)
+{
+  realtime_queue_.remove_channel(channel_id);
+  bulk_queue_.remove_channel(channel_id);
+  next_sequence_by_channel_.erase(channel_id);
 }
 
 OutboundLaneQueue & OutboundFrameRouter::queue_for(Lane lane)

@@ -23,7 +23,9 @@
 #include "horus_unity_bridge/horuslink_session.hpp"
 
 #include <atomic>
+#include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -57,12 +59,34 @@ public:
     size_t max_payload_size = 512u * 1024u * 1024u;
     size_t realtime_queue_depth = 1024;
     size_t bulk_queue_depth = 1024;
+    size_t realtime_queue_bytes = 8u * 1024u * 1024u;
+    size_t bulk_queue_bytes = 64u * 1024u * 1024u;
     uint32_t keepalive_ms = 1000;
     bool tcp_nodelay = true;
     bool tcp_keepalive = true;
     int socket_send_timeout_ms = 500;
     int pending_socket_timeout_ms = 5000;
     int pending_socket_pair_max_skew_ms = 1500;
+  };
+
+  struct LaneStatistics
+  {
+    size_t queued_frames = 0;
+    size_t queued_bytes = 0;
+    size_t peak_queued_bytes = 0;
+    uint64_t frames_accepted = 0;
+    uint64_t frames_replaced = 0;
+    uint64_t frames_rejected = 0;
+    uint64_t frames_sent = 0;
+    uint64_t bytes_sent = 0;
+    uint64_t max_send_microseconds = 0;
+    bool write_in_progress = false;
+  };
+  struct ConnectionStatistics
+  {
+    int connection_id = 0;
+    LaneStatistics realtime;
+    LaneStatistics bulk;
   };
 
   using FrameCallback = std::function<void(
@@ -101,6 +125,7 @@ public:
   bool start();
   void stop();
 
+  // Success means accepted for asynchronous delivery, not acknowledged by the peer.
   bool send_to_topic(
     int connection_id,
     const std::string & topic,
@@ -160,6 +185,7 @@ public:
   size_t connection_count() const;
   uint16_t realtime_port() const;
   uint16_t bulk_port() const;
+  std::vector<ConnectionStatistics> statistics() const;
 
 private:
   struct AcceptedSocket
@@ -180,7 +206,9 @@ private:
       std::string remote_ip,
       size_t max_payload_size,
       size_t realtime_queue_depth,
-      size_t bulk_queue_depth);
+      size_t bulk_queue_depth,
+      size_t realtime_queue_bytes,
+      size_t bulk_queue_bytes);
     ~Connection();
 
     int id = 0;
@@ -196,8 +224,13 @@ private:
     std::mutex mutex;
     std::mutex realtime_send_mutex;
     std::mutex bulk_send_mutex;
+    std::condition_variable realtime_ready;
+    std::condition_variable bulk_ready;
+    std::array<LaneStatistics, 2> lane_statistics{};
     std::thread realtime_thread;
     std::thread bulk_thread;
+    std::thread realtime_writer_thread;
+    std::thread bulk_writer_thread;
     std::thread keepalive_thread;
   };
 
@@ -231,8 +264,12 @@ private:
     const ChannelCloseRequest & request);
   bool handle_topic_table_request(const std::shared_ptr<Connection> & connection);
   bool send_frame(const std::shared_ptr<Connection> & connection, Lane lane, const Frame & frame);
-  bool drain_lane(const std::shared_ptr<Connection> & connection, Lane lane);
-  static bool should_retry_reliable_overflow(const OutboundFrameRouteResult & result);
+  bool enqueue_payload(
+    int connection_id, const std::string & topic, MessageType type, uint32_t corr_id,
+    const uint8_t * payload, size_t size);
+  void write_loop(std::shared_ptr<Connection> connection, Lane lane);
+  static void stop_connection(const std::shared_ptr<Connection> & connection);
+  static void join_connection(const std::shared_ptr<Connection> & connection);
   void disconnect_connection(int connection_id);
   void prune_disconnected_connections();
   std::shared_ptr<Connection> find_connection(int connection_id) const;
@@ -242,7 +279,7 @@ private:
 
   static void close_fd(int & fd);
   static bool set_nonblocking(int fd);
-  static bool send_all(int fd, const uint8_t * data, size_t size);
+  static bool send_all(int fd, const uint8_t * data, size_t size, int flags = 0);
 
   Config config_;
   int realtime_server_fd_ = -1;

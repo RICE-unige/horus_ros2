@@ -58,18 +58,16 @@ set(
 set(HORUS_LIBDATACHANNEL_TARGET "")
 if(ENABLE_WEBRTC)
   if(NOT PkgConfig_FOUND)
-    message(WARNING "PkgConfig not found. Disabling WebRTC support.")
-    set(ENABLE_WEBRTC OFF)
+    message(FATAL_ERROR "ENABLE_WEBRTC=ON requires PkgConfig.")
   else()
-    pkg_check_modules(GST QUIET gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
+    pkg_check_modules(GST QUIET gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0 gstreamer-rtp-1.0
+      gstreamer-webrtc-1.0 gstreamer-sdp-1.0)
     if(NOT GST_FOUND)
-      message(WARNING "GStreamer development packages not found. Disabling WebRTC support.")
-      set(ENABLE_WEBRTC OFF)
+      message(FATAL_ERROR "ENABLE_WEBRTC=ON requires GStreamer development packages.")
     else()
       find_package(OpenCV QUIET COMPONENTS core imgcodecs imgproc)
       if(NOT OpenCV_FOUND)
-        message(WARNING "OpenCV not found. Disabling WebRTC support.")
-        set(ENABLE_WEBRTC OFF)
+        message(FATAL_ERROR "ENABLE_WEBRTC=ON requires OpenCV core, imgcodecs and imgproc.")
       else()
         find_package(LibDataChannel CONFIG QUIET)
         if(TARGET LibDataChannel::LibDataChannelStatic)
@@ -130,19 +128,24 @@ if(ENABLE_WEBRTC)
                 message(FATAL_ERROR "Fetched libdatachannel submodule ${submodule_path} at ${actual_sha}, expected ${expected_sha}")
               endif()
             endforeach()
-            # ament's symlink-install mode wraps install() globally. Keep the
-            # vendored dependency build-only so third-party install rules do not
-            # enter this ROS package's install script.
-            function(install)
-            endfunction()
+            # Ament's install(FILES) override ignores CMAKE_SKIP_INSTALL_RULES.
+            # Divert its generated commands as well, otherwise an incomplete
+            # LibDataChannel package is installed and breaks the next configure.
+            set(HORUS_BRIDGE_SKIP_INSTALL_RULES ${CMAKE_SKIP_INSTALL_RULES})
+            set(HORUS_BRIDGE_SYMLINK_INSTALL_SCRIPT
+              "${AMENT_CMAKE_SYMLINK_INSTALL_INSTALL_SCRIPT}")
+            set(AMENT_CMAKE_SYMLINK_INSTALL_INSTALL_SCRIPT
+              "${CMAKE_CURRENT_BINARY_DIR}/vendored_install_unused.cmake")
+            file(WRITE "${AMENT_CMAKE_SYMLINK_INSTALL_INSTALL_SCRIPT}" "")
+            set(CMAKE_SKIP_INSTALL_RULES ON)
             add_subdirectory(
               ${libdatachannel_SOURCE_DIR}
               ${libdatachannel_BINARY_DIR}
               EXCLUDE_FROM_ALL
             )
-            if(AMENT_CMAKE_SYMLINK_INSTALL)
-              include("${ament_cmake_core_DIR}/symlink_install/install.cmake")
-            endif()
+            set(CMAKE_SKIP_INSTALL_RULES ${HORUS_BRIDGE_SKIP_INSTALL_RULES})
+            set(AMENT_CMAKE_SYMLINK_INSTALL_INSTALL_SCRIPT
+              "${HORUS_BRIDGE_SYMLINK_INSTALL_SCRIPT}")
           endif()
           set(BUILD_TESTING ${HORUS_BRIDGE_BUILD_TESTING} CACHE BOOL "Build package tests" FORCE)
           if(BUILD_TESTING AND DEFINED libdatachannel_BINARY_DIR)
@@ -191,7 +194,8 @@ set(BRIDGE_CORE_SOURCES
 )
 
 if(ENABLE_WEBRTC)
-  list(APPEND BRIDGE_CORE_SOURCES src/webrtc_manager.cpp)
+  list(APPEND BRIDGE_CORE_SOURCES src/webrtc_manager.cpp src/native_media_relay.cpp
+    src/control_link.cpp src/gst_bandwidth_pacer.cpp src/shared_camera_encoder.cpp)
 endif()
 
 # Unity bridge core library
@@ -242,14 +246,34 @@ install(TARGETS horus_unity_bridge_node horus_unity_bridge_core
   DESTINATION lib/${PROJECT_NAME}
 )
 
+if(ENABLE_WEBRTC)
+  add_executable(horus_media_node src/media_main.cpp)
+  target_compile_options(horus_media_node PRIVATE ${HORUS_UNITY_BRIDGE_COMPILE_OPTIONS})
+  target_link_libraries(horus_media_node horus_unity_bridge_core)
+  install(TARGETS horus_media_node DESTINATION lib/${PROJECT_NAME})
+endif()
+
 # Install launch files
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
 
 # Install config files
+set(HORUS_WEBRTC_JSON false)
+if(ENABLE_WEBRTC)
+  set(HORUS_WEBRTC_JSON true)
+endif()
+configure_file(
+  config/build_capabilities.json.in
+  ${CMAKE_CURRENT_BINARY_DIR}/build_capabilities.json
+  @ONLY
+)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/build_capabilities.json
+  DESTINATION share/${PROJECT_NAME}
+)
 install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
+  PATTERN "*.in" EXCLUDE
 )
 
 install(DIRECTORY tools
@@ -286,6 +310,7 @@ if(BUILD_TESTING)
   ament_uncrustify()
 
   ament_add_gtest(horus_unity_bridge_tests
+    test/test_controller_hint_transport.cpp
     test/test_horuslink_channel_table.cpp
     test/test_horuslink_connection_manager.cpp
     test/test_horuslink_control_messages.cpp
@@ -294,6 +319,12 @@ if(BUILD_TESTING)
     test/test_horuslink_outbound_lane_queue.cpp
     test/test_horuslink_protocol.cpp
     test/test_remote_render_auxiliary.cpp
+    test/test_plaintext_rtcp_nack_responder.cpp
+    test/test_native_media_relay.cpp
+    test/test_control_link.cpp
+    test/test_media_budget.cpp
+    test/test_input_timing.cpp
+    test/test_gst_bandwidth_pacer.cpp
     test/test_horuslink_session.cpp
     test/test_unity_bridge.cpp
   )

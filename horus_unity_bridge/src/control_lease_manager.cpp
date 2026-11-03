@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/control_lease_manager.hpp"
+#include "horus_unity_bridge/serialized_payload.hpp"
 
 #include <cinttypes>
 
@@ -25,6 +26,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <random>
 
 namespace horus_unity_bridge
 {
@@ -34,7 +36,14 @@ namespace
 constexpr const char * kLeaseRequestTopic = "/horus/multi_operator/control_lease_request";
 constexpr const char * kControlTopicCatalogTopic = "/horus/multi_operator/control_topic_catalog";
 constexpr const char * kLeaseStateTopic = "/horus/multi_operator/control_lease_state";
+
+std::string new_authority_generation()
+{
+  std::random_device random;
+  return std::to_string(random()) + "-" + std::to_string(random()) + "-" +
+    std::to_string(random()) + "-" + std::to_string(random());
 }
+}  // namespace
 
 std::size_t ControlLeaseManager::DeniedRateLimitKeyHash::operator()(
   const DeniedRateLimitKey & value) const noexcept
@@ -132,18 +141,30 @@ bool ControlLeaseManager::authorize_command_publish(
   uint64_t now = now_ms();
   cleanup_expired_leases_locked(now, false);
 
+  // Teach inputs are fail-closed even before a catalog reaches the bridge.
+  const std::string teach_prefix = "/horus/teach/";
+  const std::string teach_suffix = "/input";
+  const bool teaching = topic.rfind(teach_prefix, 0) == 0 &&
+    topic.size() > teach_prefix.size() + teach_suffix.size() &&
+    topic.compare(topic.size() - teach_suffix.size(), teach_suffix.size(), teach_suffix) == 0;
   auto map_it = protected_topic_to_robot_.find(topic);
-  if (map_it == protected_topic_to_robot_.end()) {
+  if (!teaching && map_it == protected_topic_to_robot_.end()) {
     return true;
   }
 
-  const std::string & mapped_robot = map_it->second;
+  const std::string mapped_robot = teaching ?
+    topic.substr(teach_prefix.size(), topic.size() - teach_prefix.size() - teach_suffix.size()) :
+    map_it->second;
   if (robot_name != nullptr) {
     *robot_name = mapped_robot;
   }
 
   auto lease_it = leases_by_robot_.find(mapped_robot);
   if (lease_it == leases_by_robot_.end()) {
+    if (teaching) {
+      if (denied_reason != nullptr) {*denied_reason = "teaching_requires_lease";}
+      return false;
+    }
     return true;
   }
 
@@ -165,6 +186,8 @@ bool ControlLeaseManager::authorize_command_publish(
 void ControlLeaseManager::on_client_disconnected(int client_fd)
 {
   std::lock_guard<std::mutex> lock(mutex_);
+  catalogs_by_client_.erase(client_fd);
+  rebuild_catalog_locked();
 
   bool changed = false;
   for (auto it = leases_by_robot_.begin(); it != leases_by_robot_.end(); ) {
@@ -181,29 +204,77 @@ void ControlLeaseManager::on_client_disconnected(int client_fd)
   }
 }
 
+void ControlLeaseManager::set_snapshot_sink(
+  std::function<void(const std::string &)> sink, bool publish_ros)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  snapshot_sink_ = std::move(sink);
+  if (!publish_ros) {lease_state_pub_.reset();}
+}
+
+bool ControlLeaseManager::owns_active_remote_lease(int client_fd, const std::string & topic)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  cleanup_expired_leases_locked(now_ms(), true);
+  const auto robot = protected_topic_to_robot_.find(topic);
+  std::string name;
+  if (robot != protected_topic_to_robot_.end()) {name = robot->second;}
+  else if (topic.rfind("/horus/teach/", 0) == 0 && topic.size() > 19 &&
+    topic.compare(topic.size() - 6, 6, "/input") == 0)
+  {name = topic.substr(13, topic.size() - 19);}
+  if (name.empty()) {return false;}
+  const auto lease = leases_by_robot_.find(name);
+  return lease != leases_by_robot_.end() && lease->second.holder_client_fd == client_fd;
+}
+
+bool ControlLeaseManager::rebuild_catalog_locked()
+{
+  std::unordered_map<std::string, std::string> combined;
+  for (const auto & catalog : catalogs_by_client_) {
+    for (const auto & entry : catalog.second) {
+      auto found = combined.find(entry.first);
+      if (found != combined.end() && found->second != entry.second) {return false;}
+      combined[entry.first] = entry.second;
+    }
+  }
+  protected_topic_to_robot_ = std::move(combined);
+  return true;
+}
+
+std::vector<std::string> ControlLeaseManager::protected_topics()
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<std::string> result;
+  for (const auto & entry : protected_topic_to_robot_) {result.push_back(entry.first);}
+  std::sort(result.begin(), result.end());
+  return result;
+}
+
 bool ControlLeaseManager::handle_catalog_message_locked(
   int client_fd,
   const std::string & json_payload)
 {
-  (void)client_fd;
   nlohmann::json root = nlohmann::json::parse(json_payload, nullptr, false);
   if (root.is_discarded() || !root.is_object()) {
     return false;
   }
 
   const std::string role = root.value("role", "");
-  if (!(role == "host" || role == "single")) {
+  const bool merge_only = role == "private" || role == "joiner";
+  if (!(role == "host" || role == "single" || merge_only)) {
     return true; // Ignore non-authoritative catalog publishers.
   }
 
   const std::string op = root.value("op", "snapshot");
+  if (merge_only && op != "upsert") {return false;}
   const std::string session_id = root.value("session_id", "");
   if (!session_id.empty()) {
     current_session_id_ = session_id;
   }
 
   if (op == "clear") {
-    protected_topic_to_robot_.clear();
+    catalogs_by_client_.erase(client_fd);
+    rebuild_catalog_locked();
     publish_snapshot_locked("snapshot");
     return true;
   }
@@ -212,10 +283,21 @@ bool ControlLeaseManager::handle_catalog_message_locked(
     return false;
   }
 
-  auto add_topics_for_robot = [this](const std::string & robot_name,
+  const auto before = protected_topic_to_robot_;
+  const auto own = catalogs_by_client_.find(client_fd);
+  const auto own_before = own == catalogs_by_client_.end() ?
+    std::unordered_map<std::string, std::string>{} : own->second;
+  protected_topic_to_robot_ = own_before;
+  if (root.value("replace_client_catalog", false)) {protected_topic_to_robot_.clear();}
+  bool conflict = false;
+  auto add_topics_for_robot = [this, merge_only, &conflict](const std::string & robot_name,
     const nlohmann::json & robot_obj) {
-      auto add_topic = [this, &robot_name](const std::string & topic_value) {
+      auto add_topic = [this, &robot_name, merge_only, &conflict](const std::string & topic_value) {
           if (!topic_value.empty()) {
+            const auto existing = protected_topic_to_robot_.find(topic_value);
+            if (merge_only && existing != protected_topic_to_robot_.end() && existing->second != robot_name) {
+              conflict = true; return;
+            }
             protected_topic_to_robot_[topic_value] = robot_name;
           }
         };
@@ -270,7 +352,7 @@ bool ControlLeaseManager::handle_catalog_message_locked(
 
     if (op == "upsert" || op == "snapshot") {
       for (auto it = protected_topic_to_robot_.begin(); it != protected_topic_to_robot_.end(); ) {
-        if (it->second == robot_name) {
+        if (!merge_only && it->second == robot_name) {
           it = protected_topic_to_robot_.erase(it);
         } else {
           ++it;
@@ -280,6 +362,14 @@ bool ControlLeaseManager::handle_catalog_message_locked(
     }
   }
 
+  if (conflict) {protected_topic_to_robot_ = before; return false;}
+  catalogs_by_client_[client_fd] = protected_topic_to_robot_;
+  if (!rebuild_catalog_locked()) {
+    if (own_before.empty()) {catalogs_by_client_.erase(client_fd);}
+    else {catalogs_by_client_[client_fd] = own_before;}
+    protected_topic_to_robot_ = before;
+    return false;
+  }
   publish_snapshot_locked("snapshot");
   return true;
 }
@@ -362,6 +452,7 @@ ControlLeaseManager::LeaseRequestResult ControlLeaseManager::apply_acquire_reque
     lease.holder_role = role;
     lease.session_id = session_id;
     lease.acquired_at_ms = now;
+    lease.authority_generation = new_authority_generation();
     lease.last_heartbeat_ms = now;
     lease.panel_open = panel_open;
     lease.teleop_active = teleop_active;
@@ -377,6 +468,11 @@ ControlLeaseManager::LeaseRequestResult ControlLeaseManager::apply_acquire_reque
 
   RobotControlLease & lease = it->second;
   if (lease.holder_client_fd == client_fd) {
+    if ((!app_id.empty() && app_id != lease.holder_app_id) ||
+      (!session_id.empty() && session_id != lease.session_id))
+    {
+      lease.authority_generation = new_authority_generation();
+    }
     lease.holder_app_id = app_id.empty() ? lease.holder_app_id : app_id;
     lease.holder_role = role.empty() ? lease.holder_role : role;
     lease.session_id = session_id.empty() ? lease.session_id : session_id;
@@ -407,6 +503,7 @@ ControlLeaseManager::LeaseRequestResult ControlLeaseManager::apply_acquire_reque
   lease.holder_role = role;
   lease.session_id = session_id;
   lease.acquired_at_ms = now;
+  lease.authority_generation = new_authority_generation();
   lease.last_heartbeat_ms = now;
   lease.panel_open = panel_open;
   lease.teleop_active = teleop_active;
@@ -450,6 +547,11 @@ ControlLeaseManager::LeaseRequestResult ControlLeaseManager::apply_heartbeat_req
     return result;
   }
 
+  if ((!app_id.empty() && app_id != lease.holder_app_id) ||
+    (!session_id.empty() && session_id != lease.session_id))
+  {
+    lease.authority_generation = new_authority_generation();
+  }
   lease.holder_app_id = app_id.empty() ? lease.holder_app_id : app_id;
   lease.holder_role = role.empty() ? lease.holder_role : role;
   lease.session_id = session_id.empty() ? lease.session_id : session_id;
@@ -502,7 +604,7 @@ void ControlLeaseManager::publish_snapshot_locked(
   const std::string & denied_reason,
   const std::string & holder_app_id)
 {
-  if (!lease_state_pub_) {
+  if (!lease_state_pub_ && !snapshot_sink_) {
     return;
   }
 
@@ -539,13 +641,17 @@ void ControlLeaseManager::publish_snapshot_locked(
     item["task_active"] = lease.task_active;
     item["task_kind"] = lease.task_kind;
     item["lease_version"] = lease.lease_version;
+    item["authority_generation"] = lease.authority_generation;
+    const uint64_t age = now_ms() - lease.last_heartbeat_ms;
+    item["remaining_ms"] = age < lease_ttl_ms_ ? lease_ttl_ms_ - age : 0;
     leases.push_back(item);
   }
   root["leases"] = leases;
 
   std_msgs::msg::String msg;
   msg.data = root.dump();
-  lease_state_pub_->publish(msg);
+  if (snapshot_sink_) {snapshot_sink_(msg.data);}
+  if (lease_state_pub_) {lease_state_pub_->publish(msg);}
 }
 
 void ControlLeaseManager::publish_denied_locked(
@@ -619,15 +725,15 @@ bool ControlLeaseManager::try_decode_string_msg(
   std::string & out_data)
 {
   try {
-    rclcpp::SerializedMessage serialized(serialized_payload.size());
-    auto & rcl_msg = serialized.get_rcl_serialized_message();
-    if (serialized_payload.empty()) {
-      std_msgs::msg::String msg;
-      out_data = msg.data;
-      return true;
+    std::vector<uint8_t> normalized_payload;
+    const std::vector<uint8_t> * payload = &serialized_payload;
+    if (!detail::has_cdr_header(serialized_payload)) {
+      normalized_payload = detail::add_cdr_header(serialized_payload);
+      payload = &normalized_payload;
     }
-    std::memcpy(rcl_msg.buffer, serialized_payload.data(), serialized_payload.size());
-    rcl_msg.buffer_length = serialized_payload.size();
+
+    rclcpp::SerializedMessage serialized;
+    detail::fill_serialized_message(*payload, serialized);
 
     std_msgs::msg::String decoded;
     rclcpp::Serialization<std_msgs::msg::String> serializer;

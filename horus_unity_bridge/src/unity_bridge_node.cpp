@@ -20,6 +20,7 @@
 #include <iostream>
 #include <chrono>
 #include <cctype>
+#include <cinttypes>
 
 namespace horus_unity_bridge
 {
@@ -242,13 +243,27 @@ bool UnityBridgeNode::start()
   }
 
   running_ = true;
+  spin_thread_exited_ = false;
 
   // Start ROS executor in separate thread
   spin_thread_ = std::thread([this]() {
         RCLCPP_INFO(router_->get_logger(), "ROS executor thread started");
         executor_->spin();
+        spin_thread_exited_ = true;
         RCLCPP_INFO(router_->get_logger(), "ROS executor thread stopped");
   });
+
+  // cancel() must not run before spin() sets its internal spinning flag.
+  while (!executor_->is_spinning() && !spin_thread_exited_.load()) {
+    std::this_thread::yield();
+  }
+  if (spin_thread_exited_.load()) {
+    running_ = false;
+    horuslink_connection_manager_->stop();
+    spin_thread_.join();
+    RCLCPP_ERROR(router_->get_logger(), "ROS executor stopped during bridge startup");
+    return false;
+  }
 
   // Create statistics timer
   stats_timer_ = router_->create_wall_timer(
@@ -446,6 +461,23 @@ void UnityBridgeNode::print_statistics() const
     horuslink_connection_manager_ ? horuslink_connection_manager_->connection_count() : 0u);
   RCLCPP_INFO(router_->get_logger(), "Topics: %lu publishers, %lu subscribers",
               topic_stats.active_publishers, topic_stats.active_subscribers);
+  if (horuslink_connection_manager_) {
+    for (const auto & connection : horuslink_connection_manager_->statistics()) {
+      for (const auto & entry : {
+          std::make_pair("realtime", connection.realtime), std::make_pair("bulk", connection.bulk)})
+      {
+        const auto & lane = entry.second;
+        RCLCPP_INFO(router_->get_logger(),
+          "HorusLink client=%d lane=%s queued=%zu/%zuB peak=%zuB accepted=%" PRIu64 " "
+          "sent=%" PRIu64 "/%" PRIu64 "B replaced=%" PRIu64 " rejected=%" PRIu64
+          " max_write_us=%" PRIu64,
+          connection.connection_id, entry.first, lane.queued_frames, lane.queued_bytes,
+          lane.peak_queued_bytes, lane.frames_accepted, lane.frames_sent,
+          lane.bytes_sent, lane.frames_replaced, lane.frames_rejected,
+          lane.max_send_microseconds);
+      }
+    }
+  }
   RCLCPP_INFO(router_->get_logger(), "Router: %lu routed, %lu published, %lu commands",
               router_stats.messages_routed, router_stats.messages_published,
               router_stats.system_commands_processed);

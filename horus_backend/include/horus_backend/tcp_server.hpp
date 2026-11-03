@@ -25,6 +25,7 @@ public:
   void start();
   void stop();
   bool is_running() const;
+  int port() const {return port_;}
 
   void set_message_callback(MessageCallback callback);
 
@@ -33,13 +34,22 @@ private:
   int server_socket_;
   std::atomic<bool> running_;
   std::thread server_thread_;
+  std::mutex lifecycle_mutex_;
   std::mutex clients_mutex_;
-  std::vector<std::thread> client_threads_;
+  struct ClientWorker
+  {
+    std::thread thread;
+    std::atomic<bool> done{false};
+  };
+  std::vector<std::unique_ptr<ClientWorker>> client_threads_;
   std::vector<int> client_sockets_;
+  std::mutex callback_mutex_;
   MessageCallback message_callback_;
 
   void server_loop();
   void handle_client(int client_socket);
+  bool send_response(int client_socket, const std::string & response);
+  void reap_finished_clients();
   std::string process_message(const std::string & message);
 
   // Utility methods

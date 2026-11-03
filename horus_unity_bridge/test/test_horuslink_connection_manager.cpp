@@ -24,8 +24,10 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <dirent.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
@@ -491,6 +493,30 @@ TEST(HorusLinkConnectionManagerTest, SendsRealtimeKeepaliveAfterHandshake)
   EXPECT_TRUE(keepalive.payload.empty());
 }
 
+TEST(HorusLinkConnectionManagerTest, LiveMapPolicyReachesBridgeCallback)
+{
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
+  std::atomic<int> connected_id{0};
+  std::atomic<bool> live_map{false};
+  manager.set_connection_callback([&](int id, const std::string &) {connected_id = id;});
+  manager.set_subscribe_callback([&](int, const ChannelDescriptor & channel, std::string &) {
+    live_map = channel.live_map;
+    return true;
+  });
+  ASSERT_TRUE(manager.start());
+  auto realtime = connect_to(manager.realtime_port());
+  auto bulk = connect_to(manager.bulk_port());
+  send_client_hellos(realtime.get(), bulk.get());
+  ASSERT_TRUE(wait_until([&]() {return connected_id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
+  SubscribeRequest request{7, "/vendor/map/indexed", "std_msgs/msg/UInt8MultiArray",
+    Lane::Bulk, Delivery::ReliableFifo, true};
+  send_frame(realtime.get(), make_control_frame(encode_subscribe_request(request), 1));
+  recv_frame(realtime.get());
+  EXPECT_TRUE(live_map.load());
+}
+
 TEST(HorusLinkConnectionManagerTest, DeliversInboundBulkDataAfterSubscribeAck)
 {
   auto config = make_config();
@@ -681,8 +707,8 @@ TEST(HorusLinkConnectionManagerTest, RealtimeSendIsNotBlockedBySaturatedBulkLane
     });
   ASSERT_TRUE(wait_until([&bulk_send_started]() {return bulk_send_started.load();}));
   std::this_thread::sleep_for(std::chrono::milliseconds(100));
-  ASSERT_FALSE(bulk_send_returned.load())
-    << "bulk send did not saturate; the regression condition was not exercised";
+  EXPECT_TRUE(bulk_send_returned.load())
+    << "a ROS callback must only enqueue, even when the bulk peer stops reading";
 
   const std::vector<uint8_t> realtime_payload{0x01, 0x02, 0x03};
   std::atomic<bool> realtime_send_returned{false};
@@ -712,6 +738,212 @@ TEST(HorusLinkConnectionManagerTest, RealtimeSendIsNotBlockedBySaturatedBulkLane
   if (bulk_send_thread.joinable()) {
     bulk_send_thread.join();
   }
+}
+
+TEST(HorusLinkConnectionManagerTest, SlowBulkPeerDoesNotOccupyRosCallbackWorker)
+{
+  auto config = make_config();
+  config.keepalive_ms = 0;
+  config.socket_buffer_size = 4096;
+  HorusLinkConnectionManager manager(config);
+  std::atomic<int> id{0};
+  manager.set_connection_callback([&](int value, const std::string &) {id = value;});
+  ASSERT_TRUE(manager.start());
+  auto realtime = connect_to(manager.realtime_port());
+  auto bulk = connect_to(manager.bulk_port());
+  int small_buffer = 4096;
+  ASSERT_EQ(setsockopt(bulk.get(), SOL_SOCKET, SO_RCVBUF, &small_buffer, sizeof(small_buffer)), 0);
+  send_client_hellos(realtime.get(), bulk.get());
+  ASSERT_TRUE(wait_until([&]() {return id.load() != 0;}));
+  expect_bridge_hello(realtime.get(), config);
+  send_frame(realtime.get(), make_control_frame(encode_subscribe_request(
+    SubscribeRequest{3, "/tf", "tf2_msgs/msg/TFMessage", Lane::Realtime,
+        Delivery::ReplaceLatest})));
+  recv_frame(realtime.get());
+  send_frame(realtime.get(), make_control_frame(encode_subscribe_request(
+    SubscribeRequest{9, "/mesh", "visualization_msgs/msg/Marker", Lane::Bulk,
+        Delivery::ReliableFifo})));
+  recv_frame(realtime.get());
+
+  // One executor worker must be able to enqueue a map and immediately service TF.
+  // The peer deliberately never reads bulk data, so copying cannot mask a socket wait.
+  const std::vector<uint8_t> payload(2u * 1024u * 1024u, 0x7E);
+  const auto start = std::chrono::steady_clock::now();
+  const bool accepted = manager.send_to_topic(id.load(), "/mesh", payload);
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  EXPECT_TRUE(accepted);
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 100);
+  if (accepted && manager.send_to_topic(id.load(), "/tf", std::vector<uint8_t>{42})) {
+    const Frame frame = recv_frame(realtime.get());
+    EXPECT_EQ(frame.header.channel_id, 3u);
+    EXPECT_EQ(frame.payload, std::vector<uint8_t>{42});
+  }
+  manager.stop();
+}
+
+namespace
+{
+struct TestPeer
+{
+  SocketHandle realtime;
+  SocketHandle bulk;
+
+  TestPeer(
+    HorusLinkConnectionManager & manager, const HorusLinkConnectionManager::Config & config,
+    uint64_t session, bool slow = false)
+  : realtime(connect_to(manager.realtime_port())), bulk(connect_to(manager.bulk_port()))
+  {
+    if (slow) {
+      int size = 4096;
+      EXPECT_EQ(setsockopt(bulk.get(), SOL_SOCKET, SO_RCVBUF, &size, sizeof(size)), 0);
+    }
+    send_client_hellos(realtime.get(), bulk.get(), session);
+    expect_bridge_hello(realtime.get(), config);
+  }
+
+  void subscribe(uint16_t channel, const char * topic, Lane lane, Delivery delivery)
+  {
+    send_frame(realtime.get(), make_control_frame(encode_subscribe_request(
+      SubscribeRequest{channel, topic, "std_msgs/msg/String", lane, delivery})));
+    const auto frame = recv_frame(realtime.get());
+    const auto ack = decode_subscribe_ack(frame.payload.data(), frame.payload.size());
+    ASSERT_TRUE(ack.has_value());
+    ASSERT_EQ(ack->status, SubscribeStatus::Accepted);
+  }
+};
+}  // namespace
+
+TEST(HorusLinkConnectionManagerTest, ConcurrentReliableProducersRemainInSequenceOnWire)
+{
+  auto config = make_config();
+  config.keepalive_ms = 0;
+  config.bulk_queue_depth = 1024;
+  HorusLinkConnectionManager manager(config);
+  ASSERT_TRUE(manager.start());
+  TestPeer peer(manager, config, 100);
+  peer.subscribe(9, "/mesh", Lane::Bulk, Delivery::ReliableFifo);
+  constexpr int workers = 4;
+  constexpr int per_worker = 100;
+  std::vector<std::thread> producers;
+  std::atomic<int> accepted{0};
+  for (int w = 0; w < workers; ++w) {
+    producers.emplace_back([&, w]() {
+        for (int i = 0; i < per_worker; ++i) {
+          accepted += manager.send_to_topic(1, "/mesh",
+            std::vector<uint8_t>(1024, static_cast<uint8_t>(w)));
+        }
+    });
+  }
+  for (auto & producer : producers) {
+    producer.join();
+                                                     }
+  ASSERT_EQ(accepted.load(), workers * per_worker);
+  for (uint32_t sequence = 1; sequence <= workers * per_worker; ++sequence) {
+    const Frame frame = recv_frame(peer.bulk.get());
+    EXPECT_EQ(frame.header.seq, sequence);
+    EXPECT_EQ(frame.payload.size(), 1024u);
+  }
+  EXPECT_TRUE(wait_until([&]() {return manager.statistics().at(0).bulk.frames_sent == 400;}));
+  manager.stop();
+}
+
+TEST(HorusLinkConnectionManagerTest, SlowClientCannotBlockHealthyClientsOrRealtimeCallbacks)
+{
+  auto config = make_config();
+  config.keepalive_ms = 0;
+  config.socket_buffer_size = 4096;
+  config.socket_send_timeout_ms = 2000;
+  HorusLinkConnectionManager manager(config);
+  ASSERT_TRUE(manager.start());
+  TestPeer slow(manager, config, 100, true);
+  TestPeer healthy(manager, config, 101);
+  slow.subscribe(9, "/mesh", Lane::Bulk, Delivery::ReliableFifo);
+  slow.subscribe(3, "/tf", Lane::Realtime, Delivery::ReliableFifo);
+  healthy.subscribe(9, "/mesh", Lane::Bulk, Delivery::ReliableFifo);
+  ASSERT_TRUE(manager.send_to_topic(1, "/mesh", std::vector<uint8_t>(2 * 1024 * 1024, 1)));
+  std::vector<double> latency_ms;
+  for (int i = 0; i < 50; ++i) {
+    const auto start = std::chrono::steady_clock::now();
+    ASSERT_TRUE(manager.send_to_topic(1, "/tf", std::vector<uint8_t>{static_cast<uint8_t>(i)}));
+    EXPECT_EQ(recv_frame(slow.realtime.get()).payload.front(), i);
+    latency_ms.push_back(std::chrono::duration<double,
+      std::milli>(std::chrono::steady_clock::now() - start).count());
+  }
+  ASSERT_TRUE(manager.send_to_topic(2, "/mesh", std::vector<uint8_t>{42}));
+  EXPECT_EQ(recv_frame(healthy.bulk.get()).payload, std::vector<uint8_t>{42});
+  std::sort(latency_ms.begin(), latency_ms.end());
+  RecordProperty("realtime_loopback_p95_ms", latency_ms[47]);
+  RecordProperty("realtime_loopback_max_ms", latency_ms.back());
+  EXPECT_LT(latency_ms[47], 100.0);
+  manager.stop();
+}
+
+TEST(HorusLinkConnectionManagerTest,
+    ReliableOverflowDisconnectsOnlySlowSessionWithoutSilentChunkLoss)
+{
+  auto config = make_config();
+  config.keepalive_ms = 0;
+  config.socket_buffer_size = 4096;
+  config.socket_send_timeout_ms = 2000;
+  config.bulk_queue_bytes = 1024;
+  HorusLinkConnectionManager manager(config);
+  ASSERT_TRUE(manager.start());
+  TestPeer slow(manager, config, 100, true);
+  TestPeer healthy(manager, config, 101);
+  slow.subscribe(9, "/mesh", Lane::Bulk, Delivery::ReliableFifo);
+  healthy.subscribe(3, "/tf", Lane::Realtime, Delivery::ReliableFifo);
+  ASSERT_TRUE(manager.send_to_topic(1, "/mesh", std::vector<uint8_t>(2 * 1024 * 1024, 1)));
+  ASSERT_TRUE(wait_until([&]() {
+      const auto stats = manager.statistics();
+      for (const auto & entry : stats) {
+        if (entry.connection_id == 1) {return entry.bulk.write_in_progress;}
+      }
+      return false;
+  }));
+  ASSERT_TRUE(manager.send_to_topic(1, "/mesh", std::vector<uint8_t>(1000, 2)));
+  EXPECT_FALSE(manager.send_to_topic(1, "/mesh", std::vector<uint8_t>(1000, 3)));
+  EXPECT_TRUE(wait_for_peer_close(slow.realtime.get()));
+  ASSERT_TRUE(manager.send_to_topic(2, "/tf", std::vector<uint8_t>{42}));
+  EXPECT_EQ(recv_frame(healthy.realtime.get()).payload, std::vector<uint8_t>{42});
+  manager.stop();
+}
+
+TEST(HorusLinkConnectionManagerTest, StopInterruptsIncompleteHelloPromptly)
+{
+  auto config = make_config();
+  HorusLinkConnectionManager manager(config);
+  ASSERT_TRUE(manager.start());
+  auto socket = connect_to(manager.realtime_port());
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  const auto begin = std::chrono::steady_clock::now();
+  manager.stop();
+  const double elapsed_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - begin).count();
+  EXPECT_LT(elapsed_ms, 500.0);
+}
+
+TEST(HorusLinkConnectionManagerTest, DisconnectedSessionsAreReapedWithoutAnotherConnection)
+{
+  auto descriptor_count = []() {
+      size_t count = 0;
+      auto * dir = opendir("/proc/self/fd");
+      if (!dir) {return size_t{0};}
+      while (readdir(dir)) {++count;}
+      closedir(dir);
+      return count;
+    };
+  auto config = make_config();
+  config.keepalive_ms = 0;
+  HorusLinkConnectionManager manager(config);
+  ASSERT_TRUE(manager.start());
+  const auto baseline = descriptor_count();
+  ASSERT_GT(baseline, 0u);
+  {
+    TestPeer peer(manager, config, 105);
+    EXPECT_GE(descriptor_count(), baseline + 4);
+  }
+  EXPECT_TRUE(wait_until([&]() {return descriptor_count() <= baseline;}));
+  manager.stop();
 }
 
 }  // namespace horus_unity_bridge::horuslink

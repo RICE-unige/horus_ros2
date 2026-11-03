@@ -8,7 +8,7 @@
 #else
 namespace horus_backend
 {
-class Nav2ActionAdapte
+class Nav2ActionAdapter
 {
 public:
   explicit Nav2ActionAdapter(rclcpp::Node *) {}
@@ -124,6 +124,7 @@ void BackendNode::shutdown()
   if (tcp_server_) {
     tcp_server_->stop();
   }
+  nav2_adapter_.reset();
 
   RCLCPP_INFO(get_logger(), "HORUS Backend shutdown complete");
 }
@@ -190,8 +191,7 @@ void BackendNode::status_callback(
   RCLCPP_DEBUG(
     get_logger(), "Received status from robot: %s",
     msg->robot_id.c_str());
-  // Forward status to connected SDK clients via TCP
-  // This will be implemented when we add the TCP message processing
+  status_publisher_->publish(*msg);
 }
 
 void BackendNode::connect_robot_callback(
@@ -202,6 +202,11 @@ void BackendNode::connect_robot_callback(
     get_logger(), "Connect robot request: %s (type: %s)",
     request->robot_id.c_str(), request->robot_type.c_str());
 
+  if (!plugin_manager_) {
+    response->success = false;
+    response->message = "Backend has not been initialized";
+    return;
+  }
   bool success =
     plugin_manager_->connect_robot(request->robot_id, request->robot_type);
   response->success = success;
@@ -218,10 +223,11 @@ void BackendNode::execute_command_callback(
     get_logger(), "Execute command for robot: %s, command: %s",
     request->robot_id.c_str(), request->command_type.c_str());
 
-  // For now, just acknowledge the command
-  response->success = true;
-  response->result_data = "Command executed";
-  response->message = "Command processed successfully";
+  // This legacy endpoint has no command executor. Never claim robot execution.
+  response->success = false;
+  response->result_data.clear();
+  response->message =
+    "Unsupported command endpoint: use the robot's registered topic, service, or action interface";
 }
 
 void BackendNode::display_startup_info()
@@ -302,11 +308,10 @@ bool BackendNode::check_unity_endpoint_status()
 
 std::string BackendNode::process_message(const std::string & message)
 {
-  // Basic message processing - will be expanded later
   RCLCPP_DEBUG(get_logger(), "Received TCP message: %s", message.c_str());
 
-  // For now, just echo back a simple response
-  return "{\"status\": \"ok\", \"message\": \"Backend received: " + escape_json_string(message) +
+  // Diagnostic echo only; robot control uses the registered ROS interfaces.
+  return "{\"status\": \"unsupported\", \"message\": \"No command executed. Received: " + escape_json_string(message) +
          "\"}";
 }
 

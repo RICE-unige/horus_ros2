@@ -22,6 +22,7 @@
 #include <rosidl_typesupport_introspection_cpp/message_introspection.hpp>
 
 #include <deque>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -81,7 +82,8 @@ public:
     const std::string & message_type,
     int client_fd,
     MessageCallback callback,
-    const rclcpp::QoS & qos = rclcpp::QoS(10));
+    const rclcpp::QoS & qos = rclcpp::QoS(10),
+    bool live_map = false);
 
   /**
    * @brief Register a HorusLink subscriber that receives Unity-facing payload bytes.
@@ -94,7 +96,8 @@ public:
     const std::string & message_type,
     int client_fd,
     MessageCallback callback,
-    const rclcpp::QoS & qos = rclcpp::QoS(10));
+    const rclcpp::QoS & qos = rclcpp::QoS(10),
+    bool live_map = false);
 
   /**
    * @brief Fetch the cached retained-state payloads for a topic (Unity-facing bytes).
@@ -106,6 +109,9 @@ public:
    * channel-active gate and re-delivered to already-synced clients).
    */
   std::vector<std::vector<uint8_t>> get_retained_payloads(const std::string & topic) const;
+  bool register_inprocess_subscriber(const std::string & topic, const std::string & message_type,
+    int client_fd, MessageCallback callback);
+  void publish_inprocess_snapshot(const std::string & topic, const std::vector<uint8_t> & body);
 
   /**
    * @brief Publish a message from Unity to ROS
@@ -174,11 +180,16 @@ public:
     uint64_t active_subscribers = 0;
   };
 
-  const TopicStatistics & get_statistics() const {return stats_;}
+  TopicStatistics get_statistics() const
+  {
+    return TopicStatistics{
+      stats_.messages_published.load(), stats_.messages_received.load(),
+      stats_.publish_errors.load(), stats_.active_publishers.load(),
+      stats_.active_subscribers.load()};
+  }
 
 private:
   rclcpp::Node * node_;
-  rclcpp::CallbackGroup::SharedPtr subscriber_callback_group_;
 
   // Generic publisher/subscriber holders
   struct GenericPublisherInfo
@@ -191,7 +202,11 @@ private:
 
   struct GenericSubscriberInfo
   {
+    bool live_map = false;
+    rclcpp::CallbackGroup::SharedPtr callback_group;
     std::shared_ptr<rclcpp::GenericSubscription> subscription;
+    // Occupancy maps may be a retained one-shot snapshot or a volatile stream.
+    std::shared_ptr<rclcpp::GenericSubscription> snapshot_subscription;
     std::string message_type;
     std::unordered_map<int, MessageCallback> client_callbacks;
     const rosidl_message_type_support_t * type_support;
@@ -212,7 +227,14 @@ private:
   mutable std::mutex subscribers_mutex_;
   bool protocol_logging_enabled_ = false;
 
-  TopicStatistics stats_;
+  struct AtomicTopicStatistics
+  {
+    std::atomic<uint64_t> messages_published{0};
+    std::atomic<uint64_t> messages_received{0};
+    std::atomic<uint64_t> publish_errors{0};
+    std::atomic<uint64_t> active_publishers{0};
+    std::atomic<uint64_t> active_subscribers{0};
+  } stats_;
 
   // Helper methods
   const rosidl_message_type_support_t * get_type_support(const std::string & message_type);

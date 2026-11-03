@@ -23,6 +23,22 @@
 namespace horus_unity_bridge::horuslink
 {
 
+TEST(HorusLinkControlMessages, LiveMapSubscriptionRoundTripsWithoutChangingLegacyEncoding)
+{
+  SubscribeRequest request{7, "/vendor/site/indexed", "std_msgs/msg/UInt8MultiArray",
+    Lane::Bulk, Delivery::ReliableFifo};
+  const auto legacy = encode_subscribe_request(request);
+  request.live_map = true;
+  const auto live = encode_subscribe_request(request);
+  EXPECT_EQ(live.size(), legacy.size() + 5);
+  const auto decoded = decode_subscribe_request(live.data(), live.size());
+  ASSERT_TRUE(decoded.has_value());
+  EXPECT_EQ(*decoded, request);
+  const auto old = decode_subscribe_request(legacy.data(), legacy.size());
+  ASSERT_TRUE(old.has_value());
+  EXPECT_FALSE(old->live_map);
+}
+
 TEST(HorusLinkControlMessagesTest, HelloEncodesStableGoldenVector)
 {
   const auto encoded = encode_hello(HelloMessage{EndpointRole::UnityClient, 0x01020304, 1000});

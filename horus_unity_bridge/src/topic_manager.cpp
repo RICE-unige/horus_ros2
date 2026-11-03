@@ -66,18 +66,49 @@ bool is_robot_description_chunk_item_topic(const std::string & topic)
          topic.substr(topic.length() - 10) == "chunk_item");
 }
 
+bool is_static_indexed_mesh_topic(const std::string & topic)
+{
+  constexpr char kIndexedSuffix[] = "/indexed";
+  constexpr size_t kIndexedSuffixLength = sizeof(kIndexedSuffix) - 1u;
+  return topic.find("/horus/nvblox/") != 0 &&
+         topic.find("mesh") != std::string::npos &&
+         topic.length() >= kIndexedSuffixLength &&
+         topic.compare(
+    topic.length() - kIndexedSuffixLength,
+    kIndexedSuffixLength,
+    kIndexedSuffix) == 0;
+}
+
+bool is_live_nvblox_mesh_topic(const std::string & topic)
+{
+  constexpr char kIndexedSuffix[] = "/indexed";
+  constexpr size_t kIndexedSuffixLength = sizeof(kIndexedSuffix) - 1u;
+  return topic.find("/horus/nvblox/") == 0 &&
+         topic.length() >= kIndexedSuffixLength &&
+         topic.compare(
+    topic.length() - kIndexedSuffixLength,
+    kIndexedSuffixLength,
+    kIndexedSuffix) == 0;
+}
+
 bool is_horus_retained_state_topic(const std::string & topic)
 {
   return topic == "/horus/registration" ||
-         topic == "/horus/multi_operator/sdk_registry_replay_begin" ||
+         is_robot_description_chunk_topic(topic) ||
+         is_static_indexed_mesh_topic(topic);
+}
+
+bool is_sdk_registry_replay_topic(const std::string & topic)
+{
+  return topic == "/horus/multi_operator/sdk_registry_replay_begin" ||
          topic == "/horus/multi_operator/sdk_registry_replay_item" ||
-         topic == "/horus/multi_operator/sdk_registry_replay_end" ||
-         is_robot_description_chunk_topic(topic);
+         topic == "/horus/multi_operator/sdk_registry_replay_end";
 }
 
 rclcpp::QoS horus_retained_state_qos(const std::string & topic)
 {
-  const size_t depth = is_robot_description_chunk_item_topic(topic) ? 2048u : 256u;
+  const size_t depth = is_robot_description_chunk_item_topic(topic) ? 2048u :
+    (is_static_indexed_mesh_topic(topic) ? 512u : 256u);
   return rclcpp::QoS(rclcpp::KeepLast(depth))
          .reliability(rclcpp::ReliabilityPolicy::Reliable)
          .durability(rclcpp::DurabilityPolicy::TransientLocal);
@@ -100,6 +131,9 @@ RetainedCacheLimits retained_cache_limits_for(const std::string & topic)
   if (is_robot_description_chunk_topic(topic)) {
     return RetainedCacheLimits{1024u, 8u * 1024u * 1024u};
   }
+  if (is_static_indexed_mesh_topic(topic)) {
+    return RetainedCacheLimits{256u, 256u * 1024u * 1024u};
+  }
   return RetainedCacheLimits{512u, 16u * 1024u * 1024u};
 }
 
@@ -114,12 +148,10 @@ bool is_cacheable_retained_topic(const std::string & topic)
 {
   return is_tf_static_topic(topic) ||
          topic == "/horus/registration" ||
-         topic == "/horus/multi_operator/sdk_registry_replay_begin" ||
-         topic == "/horus/multi_operator/sdk_registry_replay_item" ||
-         topic == "/horus/multi_operator/sdk_registry_replay_end" ||
          topic == "/horus/robot_description/chunk_begin" ||
          topic == "/horus/robot_description/chunk_item" ||
-         topic == "/horus/robot_description/chunk_end";
+         topic == "/horus/robot_description/chunk_end" ||
+         is_static_indexed_mesh_topic(topic);
 }
 
 template<typename MessageT>
@@ -138,9 +170,6 @@ std::vector<uint8_t> serialize_ros_message(MessageT message)
 TopicManager::TopicManager(rclcpp::Node * node)
 : node_(node)
 {
-  subscriber_callback_group_ =
-    node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
-  stats_ = TopicStatistics{};
 }
 
 bool TopicManager::register_publisher(
@@ -216,13 +245,25 @@ bool TopicManager::register_subscriber(
   const std::string & message_type,
   int client_fd,
   MessageCallback callback,
-  const rclcpp::QoS & qos)
+  const rclcpp::QoS & qos,
+  bool live_map)
 {
+  const bool explicit_live_map = live_map;
+  // Older clients selected this same policy implicitly for nvblox topics.
+  live_map = live_map || is_live_nvblox_mesh_topic(topic);
   std::lock_guard<std::mutex> lock(subscribers_mutex_);
 
   // Check if already registered
   auto it = subscribers_.find(topic);
   if (it != subscribers_.end()) {
+    if (it->second.message_type != normalize_message_type(message_type)) {
+      RCLCPP_ERROR(node_->get_logger(), "Conflicting subscription message type: %s", topic.c_str());
+      return false;
+    }
+    if (it->second.live_map != live_map) {
+      RCLCPP_ERROR(node_->get_logger(), "Conflicting live-map subscription policy: %s", topic.c_str());
+      return false;
+    }
     // A shared ROS subscription already exists for this topic. Add (or refresh) this
     // client's callback without disturbing existing subscribers. Late-joiner and reconnect
     // re-delivery of retained state is handled deterministically by the bridge-side retained
@@ -241,6 +282,11 @@ bool TopicManager::register_subscriber(
     // Normalize message type
     std::string normalized_type = normalize_message_type(message_type);
 
+    if (explicit_live_map && normalized_type != "std_msgs/msg/UInt8MultiArray") {
+      return false;
+    }
+
+    const bool occupancy = normalized_type == "nav_msgs/msg/OccupancyGrid";
     // Create generic subscription with callback
     // PATCH: Force Transient Local QoS for tf_static topics
     rclcpp::QoS final_qos = qos;
@@ -248,7 +294,19 @@ bool TopicManager::register_subscriber(
       topic.find("server_signal") != std::string::npos &&
       (topic.find("webrtc") != std::string::npos ||
       topic.find("remote_render") != std::string::npos);
-    if (is_tf_static_topic(topic)) {
+    if (live_map) {
+      final_qos = rclcpp::QoS(rclcpp::KeepLast(64)).reliable().durability_volatile();
+      retained_payload_cache_.erase(topic);
+      retained_payload_cache_bytes_.erase(topic);
+    } else if (occupancy) {
+      final_qos = rclcpp::QoS(1).best_effort().durability_volatile();
+    } else if (normalized_type == "sensor_msgs/msg/Image" ||
+      normalized_type == "sensor_msgs/msg/CompressedImage")
+    {
+      // A best-effort reader matches both sensor-data and reliable publishers.
+      // Keep only the newest image; HorusLink delivery is negotiated separately.
+      final_qos = rclcpp::QoS(1).best_effort().durability_volatile();
+    } else if (is_tf_static_topic(topic)) {
       final_qos.transient_local();
       RCLCPP_INFO(node_->get_logger(), "Forcing Transient Local QoS for static TF topic: %s",
           topic.c_str());
@@ -267,16 +325,19 @@ bool TopicManager::register_subscriber(
       RCLCPP_INFO(node_->get_logger(),
           "Forcing retained-state QoS (reliable+transient_local) for topic: %s",
           topic.c_str());
-    } else if (is_webrtc_signal_topic) {
+    } else if (is_webrtc_signal_topic || is_sdk_registry_replay_topic(topic)) {
       // The client subscribes before publishing its offer. Request volatile
       // durability so a new session cannot receive cached answers or ICE from
-      // an older session. MessageRouter's transient-local publisher remains
+      // an older session. Registry replay replies likewise belong only to the
+      // request that produced them; replaying old transactions can overflow the
+      // reliable queue and cause an endless reconnect/replay cycle.
+      // MessageRouter's transient-local publisher remains
       // QoS-compatible and protects publication during DDS discovery.
       final_qos = rclcpp::QoS(rclcpp::KeepLast(100))
         .reliability(rclcpp::ReliabilityPolicy::Reliable)
         .durability(rclcpp::DurabilityPolicy::Volatile);
       RCLCPP_INFO(node_->get_logger(),
-          "Forcing WebRTC signal QoS (reliable+volatile) for topic: %s", topic.c_str());
+          "Forcing request-scoped response QoS (reliable+volatile) for topic: %s", topic.c_str());
     }
 
     // Retained/transient-local samples can be delivered as soon as the ROS
@@ -284,19 +345,48 @@ bool TopicManager::register_subscriber(
     // registration and robot-description data cannot arrive into an empty
     // callback table during reconnect.
     GenericSubscriberInfo info;
+    info.live_map = live_map;
+    // Different topics can run concurrently; messages from one topic must not
+    // overtake each other while copying/fanning out reliable mesh deltas.
+    info.callback_group =
+      node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     info.message_type = normalized_type;
     info.client_callbacks[client_fd] = std::move(callback);
     info.type_support = nullptr;  // Not needed for subscription
     subscribers_[topic] = std::move(info);
 
     rclcpp::SubscriptionOptions subscription_options;
-    subscription_options.callback_group = subscriber_callback_group_;
+    subscription_options.callback_group = subscribers_[topic].callback_group;
 
-    auto sub = node_->create_generic_subscription(
-      topic,
-      normalized_type,
-      final_qos,
-      [this, topic](std::shared_ptr<rclcpp::SerializedMessage> msg) {
+    // Shared by the two occupancy readers, serialized by the topic callback group.
+    // DDS publication identity prevents duplicate delivery and an older retained
+    // sample replacing a newer live sample. Publisher restarts have a new GID.
+    auto map_sequences = std::make_shared<
+      std::unordered_map<std::string, std::pair<uint64_t, int64_t>>>();
+    auto receive = [this, topic, live_map, occupancy, map_sequences](
+      std::shared_ptr<rclcpp::SerializedMessage> msg, const rclcpp::MessageInfo & message_info) {
+        if (occupancy) {
+          const auto & identity = message_info.get_rmw_message_info();
+          const std::string gid(reinterpret_cast<const char *>(identity.publisher_gid.data),
+            RMW_GID_STORAGE_SIZE);
+          const auto previous = map_sequences->find(gid);
+          if (previous != map_sequences->end()) {
+            const auto [sequence, stamp] = previous->second;
+            if (identity.publication_sequence_number != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED &&
+              sequence != RMW_MESSAGE_INFO_SEQUENCE_NUMBER_UNSUPPORTED)
+            {
+              const uint64_t distance = identity.publication_sequence_number - sequence;
+              if (distance == 0 || distance > UINT64_MAX / 2) {return;}
+            } else if (identity.source_timestamp != 0 && stamp != 0 &&
+              identity.source_timestamp <= stamp)
+            {
+              return;
+            }
+          } else if (map_sequences->size() >= 128) {
+            map_sequences->clear();
+          }
+          (*map_sequences)[gid] = {identity.publication_sequence_number, identity.source_timestamp};
+        }
         // Convert serialized message to vector
         const auto & rcl_msg = msg->get_rcl_serialized_message();
 
@@ -321,15 +411,22 @@ bool TopicManager::register_subscriber(
 
         // Cache latched retained-state payloads (Unity-facing bytes) so a late-joining or
         // reconnecting client can be re-synced deterministically after its channel is active.
-        if (is_cacheable_retained_topic(topic)) {
+        if (!live_map && (occupancy || is_cacheable_retained_topic(topic))) {
           std::vector<uint8_t> cache_payload = detail::strip_cdr_header(data);
           const size_t payload_bytes = cache_payload.size();
-          const auto limits = retained_cache_limits_for(topic);
+          const auto limits = occupancy ? RetainedCacheLimits{1u, 32u * 1024u * 1024u} :
+            retained_cache_limits_for(topic);
           std::lock_guard<std::mutex> cache_lock(subscribers_mutex_);
           auto & cached = retained_payload_cache_[topic];
           auto & cached_bytes = retained_payload_cache_bytes_[topic];
-          cached.push_back(std::move(cache_payload));
-          cached_bytes += payload_bytes;
+          // Registration retries are identical state, not new history. Keep
+          // live callback delivery unchanged but replay each exact state once.
+          if (topic != "/horus/registration" ||
+            std::find(cached.begin(), cached.end(), cache_payload) == cached.end())
+          {
+            cached.push_back(std::move(cache_payload));
+            cached_bytes += payload_bytes;
+          }
           while (cached.size() > limits.max_messages ||
           (cached_bytes > limits.max_bytes && cached.size() > 1))
           {
@@ -390,9 +487,23 @@ bool TopicManager::register_subscriber(
         }
 
         stats_.messages_received++;
-      },
-      subscription_options
-    );
+      };
+
+    auto sub = node_->create_generic_subscription(
+      topic, normalized_type, final_qos, receive, subscription_options);
+    if (occupancy) {
+      // Keep the volatile reader: forcing transient-local alone excludes live
+      // volatile map publishers. The second reader supplies old snapshots even
+      // when their publisher is discovered after the headset subscribes.
+      auto snapshot_options = subscription_options;
+      // Incompatibility on this auxiliary reader is expected for volatile sources;
+      // the primary reader still receives those sources and keeps its diagnostics.
+      snapshot_options.event_callbacks.incompatible_qos_callback =
+        [](rclcpp::QOSRequestedIncompatibleQoSInfo &) {};
+      subscribers_[topic].snapshot_subscription = node_->create_generic_subscription(
+        topic, normalized_type, rclcpp::QoS(1).reliable().transient_local(),
+        receive, snapshot_options);
+    }
 
     subscribers_[topic].subscription = sub;
     stats_.active_subscribers++;
@@ -422,7 +533,8 @@ bool TopicManager::register_horuslink_subscriber(
   const std::string & message_type,
   int client_fd,
   MessageCallback callback,
-  const rclcpp::QoS & qos)
+  const rclcpp::QoS & qos,
+  bool live_map)
 {
   return register_subscriber(
     topic,
@@ -434,7 +546,42 @@ bool TopicManager::register_horuslink_subscriber(
       const auto payload = detail::strip_cdr_header(data);
       callback(callback_topic, payload);
     },
-    qos);
+    qos, live_map);
+}
+
+bool TopicManager::register_inprocess_subscriber(
+  const std::string & topic, const std::string & message_type, int client_fd, MessageCallback callback)
+{
+  std::lock_guard<std::mutex> lock(subscribers_mutex_);
+  auto found = subscribers_.find(topic);
+  if (found != subscribers_.end() && found->second.message_type != message_type) {return false;}
+  if (found == subscribers_.end()) {
+    GenericSubscriberInfo value{};
+    value.message_type = message_type;
+    found = subscribers_.emplace(topic, std::move(value)).first;
+    ++stats_.active_subscribers;
+  }
+  found->second.client_callbacks[client_fd] = [callback = std::move(callback)](
+    const std::string & topic, const std::vector<uint8_t> & raw) {
+      callback(topic, detail::strip_cdr_header(raw));
+    };
+  return true;
+}
+
+void TopicManager::publish_inprocess_snapshot(const std::string & topic, const std::vector<uint8_t> & body)
+{
+  std::vector<MessageCallback> callbacks;
+  {
+    std::lock_guard<std::mutex> lock(subscribers_mutex_);
+    retained_payload_cache_[topic] = {body};
+    retained_payload_cache_bytes_[topic] = body.size();
+    auto found = subscribers_.find(topic);
+    if (found != subscribers_.end()) {
+      for (const auto & entry : found->second.client_callbacks) {callbacks.push_back(entry.second);}
+    }
+  }
+  const auto raw = detail::add_cdr_header(body);
+  for (const auto & callback : callbacks) {callback(topic, raw);}
 }
 
 std::vector<std::vector<uint8_t>> TopicManager::get_retained_payloads(

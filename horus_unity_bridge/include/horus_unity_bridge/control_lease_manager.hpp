@@ -27,6 +27,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <functional>
 
 namespace horus_unity_bridge
 {
@@ -50,6 +51,9 @@ public:
     std::string * robot_name = nullptr);
 
   void on_client_disconnected(int client_fd);
+  bool owns_active_remote_lease(int client_fd, const std::string & topic);
+  std::vector<std::string> protected_topics();
+  void set_snapshot_sink(std::function<void(const std::string &)> sink, bool publish_ros = true);
 
   static const std::string & lease_request_topic();
   static const std::string & control_topic_catalog_topic();
@@ -70,6 +74,7 @@ private:
     bool task_active = false;
     std::string task_kind = "none";
     uint64_t lease_version = 0;
+    std::string authority_generation;
   };
 
   struct LeaseRequestResult
@@ -99,10 +104,13 @@ private:
   rclcpp::Node * node_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr lease_state_pub_;
   rclcpp::TimerBase::SharedPtr lease_expiry_timer_;
+  std::function<void(const std::string &)> snapshot_sink_;
 
   mutable std::mutex mutex_;
   std::unordered_map<std::string, RobotControlLease> leases_by_robot_;
   std::unordered_map<std::string, std::string> protected_topic_to_robot_;
+  std::unordered_map<int, std::unordered_map<std::string, std::string>> catalogs_by_client_;
+  bool rebuild_catalog_locked();
   std::unordered_map<DeniedRateLimitKey, uint64_t,
     DeniedRateLimitKeyHash> denied_publish_event_last_ms_;
 

@@ -22,6 +22,10 @@
 #include <vector>
 
 #include "horus_unity_bridge/remote_render_auxiliary.hpp"
+#include "horus_unity_bridge/remote_render_media_metadata.hpp"
+#ifdef ENABLE_WEBRTC
+#include "horus_unity_bridge/webrtc_manager.hpp"
+#endif
 
 namespace
 {
@@ -29,6 +33,119 @@ namespace
 using horus_unity_bridge::remote_render::chunk_auxiliary_payload;
 using horus_unity_bridge::remote_render::kAuxiliaryChunkHeaderSize;
 using horus_unity_bridge::remote_render::read_u32_le;
+using horus_unity_bridge::remote_render::append_media_metadata;
+using horus_unity_bridge::remote_render::is_h264_compressed_format;
+using horus_unity_bridge::remote_render::split_media_metadata;
+
+#ifdef ENABLE_WEBRTC
+TEST(RemoteRenderKeyframes, PreencodedRecoveryReachesSourceAndCoalescesBurst)
+{
+  horus_unity_bridge::WebRTCManager manager;
+  horus_unity_bridge::WebRTCManager::Settings settings;
+  settings.preencoded_h264 = true;
+  int requests = 0;
+  settings.request_preencoded_keyframe = [&requests]() {++requests;};
+  ASSERT_TRUE(manager.initialize(settings));
+  manager.request_keyframe();
+  EXPECT_EQ(requests, 1);
+  for (int i = 0; i < 100; ++i) {
+    manager.request_keyframe();
+  }
+  EXPECT_EQ(requests, 1);
+}
+#endif
+
+TEST(RemoteRenderMediaMetadata, RecoversPredictionChainOnlyAtIdr)
+{
+  horus_unity_bridge::remote_render::H264Continuity gate;
+  const std::vector<uint8_t> pframe{0, 0, 1, 0x41, 0x88};
+  const std::vector<uint8_t> idr{0, 0, 0, 1, 0x65, 0x88};
+  EXPECT_FALSE(gate.accept(pframe, 10));
+  EXPECT_TRUE(gate.accept(idr, 11));
+  EXPECT_TRUE(gate.accept(pframe, 12));
+  EXPECT_FALSE(gate.accept(pframe, 14));
+  EXPECT_FALSE(gate.accept(pframe, 15));
+  EXPECT_TRUE(gate.accept(idr, 16));
+  gate.reset();
+  EXPECT_FALSE(gate.accept(pframe, 17));
+  EXPECT_TRUE(gate.accept(idr, 18));
+  EXPECT_TRUE(gate.accept(pframe, 19));
+}
+
+TEST(RemoteRenderMediaMetadata, RoundTripsThroughH264SeiNal)
+{
+  std::vector<uint8_t> encoded = {0, 0, 0, 1, 0x65, 0x88, 0x84};
+  const auto original = encoded;
+  const std::string metadata = R"({"version":"horus.remote_render.frame.v3","frame_id":42})";
+
+  append_media_metadata(encoded, metadata);
+
+  std::size_t encoded_size = 0;
+  std::string decoded;
+  ASSERT_TRUE(split_media_metadata(encoded, encoded_size, decoded));
+  EXPECT_EQ(decoded, metadata);
+  EXPECT_EQ(encoded_size, encoded.size());
+  ASSERT_GT(encoded.size(), original.size());
+  EXPECT_EQ(encoded[4] & 0x1fU, 6U);
+  EXPECT_TRUE(std::equal(original.begin(), original.end(), encoded.end() - original.size()));
+}
+
+TEST(RemoteRenderMediaMetadata, KeepsResolutionHeadersBeforeMetadata)
+{
+  const std::vector<uint8_t> headers{
+    0, 0, 0, 1, 0x09, 0xf0,
+    0, 0, 0, 1, 0x67, 0x64, 0, 0x33, 0xac,
+    0, 0, 1, 0x68, 0xee, 0x3c,
+    0, 0, 1, 0x06, 0x05, 0x01, 0x55, 0x80};
+  const std::vector<uint8_t> slices{0, 0, 1, 0x65, 0x88, 0x84};
+  auto encoded = headers;
+  encoded.insert(encoded.end(), slices.begin(), slices.end());
+  append_media_metadata(encoded, "{\"frame_id\":42}");
+
+  ASSERT_GT(encoded.size(), headers.size() + slices.size());
+  EXPECT_TRUE(std::equal(headers.begin(), headers.end(), encoded.begin()));
+  EXPECT_EQ(encoded[headers.size() + 4U], 0x06U);
+  EXPECT_TRUE(std::equal(slices.begin(), slices.end(), encoded.end() - slices.size()));
+  std::size_t size = 0U;
+  std::string metadata;
+  ASSERT_TRUE(split_media_metadata(encoded, size, metadata));
+  EXPECT_EQ(metadata, "{\"frame_id\":42}");
+}
+
+TEST(RemoteRenderMediaMetadata, EscapesAndRestoresRbspBytes)
+{
+  std::vector<uint8_t> encoded = {0, 0, 0, 1, 0x41, 0x9a};
+  const std::string metadata("a\0\0\1b\0\0\3c", 10U);
+
+  append_media_metadata(encoded, metadata);
+
+  std::size_t encoded_size = 0;
+  std::string decoded;
+  ASSERT_TRUE(split_media_metadata(encoded, encoded_size, decoded));
+  EXPECT_EQ(decoded, metadata);
+  EXPECT_EQ(encoded_size, encoded.size());
+}
+
+TEST(RemoteRenderMediaMetadata, LeavesOrdinaryH264Untouched)
+{
+  const std::vector<uint8_t> encoded = {0, 0, 0, 1, 0x41, 0x9a};
+  std::size_t encoded_size = 0;
+  std::string metadata;
+
+  EXPECT_FALSE(split_media_metadata(encoded, encoded_size, metadata));
+  EXPECT_EQ(encoded_size, encoded.size());
+  EXPECT_TRUE(metadata.empty());
+}
+
+TEST(RemoteRenderMediaMetadata, RecognizesPreencodedH264Formats)
+{
+  EXPECT_TRUE(is_h264_compressed_format("h264"));
+  EXPECT_TRUE(is_h264_compressed_format(
+      "H264; stream-format=byte-stream; alignment=au"));
+  EXPECT_TRUE(is_h264_compressed_format(" video/h264 ; alignment=au"));
+  EXPECT_FALSE(is_h264_compressed_format("jpeg"));
+  EXPECT_FALSE(is_h264_compressed_format("png"));
+}
 
 std::vector<uint8_t> make_remote_frame(std::size_t size, uint32_t sequence)
 {

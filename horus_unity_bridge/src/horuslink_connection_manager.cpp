@@ -16,6 +16,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "horus_unity_bridge/horuslink_connection_manager.hpp"
+#include "horus_unity_bridge/input_timing.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -46,22 +47,26 @@ HorusLinkConnectionManager::Connection::Connection(
   std::string remote_ip,
   size_t max_payload_size,
   size_t realtime_queue_depth,
-  size_t bulk_queue_depth)
+  size_t bulk_queue_depth,
+  size_t realtime_queue_bytes,
+  size_t bulk_queue_bytes)
 : id(connection_id),
   realtime_fd(realtime_socket),
   bulk_fd(bulk_socket),
   ip(std::move(remote_ip)),
   realtime_parser(max_payload_size),
   bulk_parser(max_payload_size),
-  outbound(realtime_queue_depth, bulk_queue_depth)
+  outbound(realtime_queue_depth, bulk_queue_depth, realtime_queue_bytes, bulk_queue_bytes)
 {
 }
 
 HorusLinkConnectionManager::Connection::~Connection()
 {
   connected = false;
-  close_fd(realtime_fd);
-  close_fd(bulk_fd);
+  realtime_ready.notify_all();
+  bulk_ready.notify_all();
+  if (realtime_fd >= 0) {shutdown(realtime_fd, SHUT_RDWR);}
+  if (bulk_fd >= 0) {shutdown(bulk_fd, SHUT_RDWR);}
 
   const auto current_thread = std::this_thread::get_id();
   if (realtime_thread.joinable()) {
@@ -85,6 +90,17 @@ HorusLinkConnectionManager::Connection::~Connection()
       keepalive_thread.join();
     }
   }
+  for (auto * thread : {&realtime_writer_thread, &bulk_writer_thread}) {
+    if (thread->joinable()) {
+      if (thread->get_id() == current_thread) {
+        thread->detach();
+      } else {
+        thread->join();
+      }
+    }
+  }
+  close_fd(realtime_fd);
+  close_fd(bulk_fd);
 }
 
 HorusLinkConnectionManager::HorusLinkConnectionManager(Config config)
@@ -122,20 +138,17 @@ void HorusLinkConnectionManager::stop()
     return;
   }
 
-  close_fd(realtime_server_fd_);
-  close_fd(bulk_server_fd_);
-
   if (accept_thread_.joinable()) {
     accept_thread_.join();
   }
+  close_fd(realtime_server_fd_);
+  close_fd(bulk_server_fd_);
 
   std::vector<std::shared_ptr<Connection>> connections;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto & entry : connections_) {
-      entry.second->connected = false;
-      close_fd(entry.second->realtime_fd);
-      close_fd(entry.second->bulk_fd);
+      stop_connection(entry.second);
       connections.push_back(entry.second);
     }
     connections_.clear();
@@ -144,15 +157,7 @@ void HorusLinkConnectionManager::stop()
   }
 
   for (auto & connection : connections) {
-    if (connection->realtime_thread.joinable()) {
-      connection->realtime_thread.join();
-    }
-    if (connection->bulk_thread.joinable()) {
-      connection->bulk_thread.join();
-    }
-    if (connection->keepalive_thread.joinable()) {
-      connection->keepalive_thread.join();
-    }
+    join_connection(connection);
   }
 }
 
@@ -162,37 +167,7 @@ bool HorusLinkConnectionManager::send_to_topic(
   const uint8_t * payload,
   size_t size)
 {
-  auto connection = find_connection(connection_id);
-  if (!connection || !connection->connected.load()) {
-    return false;
-  }
-
-  while (connection->connected.load()) {
-    OutboundFrameRouteResult result;
-    {
-      std::lock_guard<std::mutex> lock(connection->mutex);
-      result = connection->outbound.enqueue_data(
-        connection->session.channel_table(),
-        topic,
-        payload,
-        size);
-    }
-    if (!result.accepted) {
-      if (result.error == "channel is not active") {
-        std::cerr << "HorusLink dropped frame (channel not active): connection=" <<
-          connection_id << " topic=" << topic << std::endl;
-      }
-      if (should_retry_reliable_overflow(result) && drain_lane(connection, result.lane)) {
-        std::this_thread::yield();
-        continue;
-      }
-      return false;
-    }
-
-    return drain_lane(connection, result.lane);
-  }
-
-  return false;
+  return enqueue_payload(connection_id, topic, MessageType::Data, 0, payload, size);
 }
 
 bool HorusLinkConnectionManager::send_to_topic(
@@ -209,35 +184,47 @@ bool HorusLinkConnectionManager::send_service_response(
   uint32_t corr_id,
   const std::vector<uint8_t> & payload)
 {
+  return enqueue_payload(
+    connection_id, service_name, MessageType::ServiceResponse, corr_id, payload.data(),
+      payload.size());
+}
+
+bool HorusLinkConnectionManager::enqueue_payload(
+  int connection_id, const std::string & topic, MessageType type, uint32_t corr_id,
+  const uint8_t * payload, size_t size)
+{
   auto connection = find_connection(connection_id);
-  if (!connection || !connection->connected.load()) {
+  if (!connection || !connection->connected.load() || size > config_.max_payload_size ||
+    size > std::numeric_limits<uint32_t>::max() || (size > 0 && payload == nullptr))
+  {
     return false;
   }
-
-  while (connection->connected.load()) {
-    OutboundFrameRouteResult result;
-    {
-      std::lock_guard<std::mutex> lock(connection->mutex);
-      result = connection->outbound.enqueue_payload(
-        connection->session.channel_table(),
-        service_name,
-        MessageType::ServiceResponse,
-        corr_id,
-        payload.data(),
-        payload.size());
-    }
-    if (!result.accepted) {
-      if (should_retry_reliable_overflow(result) && drain_lane(connection, result.lane)) {
-        std::this_thread::yield();
-        continue;
-      }
-      return false;
-    }
-
-    return drain_lane(connection, result.lane);
+  // Copy outside the session lock: a large map must not hold up TF admission.
+  std::vector<uint8_t> owned;
+  if (size > 0) {owned.assign(payload, payload + size);}
+  OutboundFrameRouteResult result;
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    if (!connection->connected.load()) {return false;}
+    result = connection->outbound.enqueue_owned_payload(
+      connection->session.channel_table(), topic, type, corr_id, std::move(owned));
+    auto & stats = connection->lane_statistics[result.lane == Lane::Bulk ? 1 : 0];
+    stats.frames_accepted += result.accepted;
+    stats.frames_replaced += result.replaced;
+    stats.frames_rejected += !result.accepted;
+    stats.peak_queued_bytes = std::max(stats.peak_queued_bytes,
+        connection->outbound.bytes(result.lane));
   }
-
-  return false;
+  if (result.accepted) {
+    (result.lane == Lane::Bulk ? connection->bulk_ready : connection->realtime_ready).notify_one();
+  } else if (result.overflow && result.delivery == Delivery::ReliableFifo) {
+    // Never silently lose a mesh delta/command or block all executor workers.
+    // A persistently slow client must reconnect/replay, independently of others.
+    std::cerr << "HorusLink reliable queue exhausted: connection=" << connection_id <<
+      " topic=" << topic << "; closing session for resynchronization" << std::endl;
+    disconnect_connection(connection_id);
+  }
+  return result.accepted;
 }
 
 void HorusLinkConnectionManager::broadcast_to_topic(
@@ -336,6 +323,8 @@ bool HorusLinkConnectionManager::setup_server_socket(
 void HorusLinkConnectionManager::accept_loop()
 {
   while (running_.load()) {
+    // Reclaim stopped sessions even when no replacement client ever connects.
+    prune_disconnected_connections();
     pollfd fds[2]{};
     fds[0].fd = realtime_server_fd_;
     fds[0].events = POLLIN;
@@ -495,18 +484,23 @@ bool HorusLinkConnectionManager::read_exact_with_timeout(
   int timeout_ms) const
 {
   size_t offset = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (offset < size && running_.load()) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+      deadline - std::chrono::steady_clock::now()).count();
+    if (remaining <= 0) {return false;}
     pollfd poll_fd{};
     poll_fd.fd = fd;
     poll_fd.events = POLLIN;
-    const int ready = poll(&poll_fd, 1, timeout_ms);
+    const int ready = poll(&poll_fd, 1, static_cast<int>(std::min<int64_t>(remaining, 100)));
     if (ready < 0) {
       if (errno == EINTR) {
         continue;
       }
       return false;
     }
-    if (ready == 0 || (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+    if (ready == 0) {continue;}
+    if ((poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
       return false;
     }
 
@@ -546,7 +540,9 @@ void HorusLinkConnectionManager::start_connection(
     realtime_socket.ip.empty() ? bulk_socket.ip : realtime_socket.ip,
     config_.max_payload_size,
     config_.realtime_queue_depth,
-    config_.bulk_queue_depth);
+    config_.bulk_queue_depth,
+    config_.realtime_queue_bytes,
+    config_.bulk_queue_bytes);
 
   realtime_socket.fd = -1;
   bulk_socket.fd = -1;
@@ -564,12 +560,17 @@ void HorusLinkConnectionManager::start_connection(
   {
     std::lock_guard<std::mutex> lock(connection->mutex);
     hello_frame = connection->session.make_hello_frame(
-      HelloMessage{EndpointRole::Bridge, max_payload_bytes, config_.keepalive_ms});
+      HelloMessage{EndpointRole::Bridge, max_payload_bytes, config_.keepalive_ms,
+        Lane::Realtime, 0, kTimedInputFeature});
   }
   if (!send_frame(connection, Lane::Realtime, hello_frame)) {
     return;
   }
 
+  connection->realtime_writer_thread = std::thread(
+    &HorusLinkConnectionManager::write_loop, this, connection, Lane::Realtime);
+  connection->bulk_writer_thread = std::thread(
+    &HorusLinkConnectionManager::write_loop, this, connection, Lane::Bulk);
   connection->realtime_thread = std::thread(
     &HorusLinkConnectionManager::read_loop,
     this,
@@ -710,7 +711,7 @@ void HorusLinkConnectionManager::handle_received_frame(
   }
 
   for (const auto & response : responses) {
-    if (response.header.msg_type == MessageType::Control) {
+    if (response.header.msg_type == MessageType::Control || response.header.msg_type == MessageType::Keepalive) {
       send_frame(connection, Lane::Realtime, response);
     }
   }
@@ -739,7 +740,8 @@ bool HorusLinkConnectionManager::handle_subscribe_request(
       request.topic,
       request.type_name,
       request.lane,
-      request.delivery);
+      request.delivery,
+      request.live_map);
     if (reserved) {
       channel = connection->session.channel_table().get(request.channel_id);
     }
@@ -912,6 +914,7 @@ bool HorusLinkConnectionManager::handle_channel_close_request(
     }
 
     connection->session.channel_table().remove(request.channel_id);
+    connection->outbound.remove_channel(request.channel_id);
   }
 
   if (channel_close_callback_ && registration_kind.has_value()) {
@@ -959,7 +962,8 @@ bool HorusLinkConnectionManager::send_frame(
   std::mutex & lane_send_mutex =
     lane == Lane::Bulk ? connection->bulk_send_mutex : connection->realtime_send_mutex;
   std::lock_guard<std::mutex> send_lock(lane_send_mutex);
-  if (!send_all(fd, header_bytes.data(), header_bytes.size()) ||
+  if (!send_all(fd, header_bytes.data(), header_bytes.size(),
+      frame.payload.empty() ? 0 : MSG_MORE) ||
     !send_all(fd, frame.payload.data(), frame.payload.size()))
   {
     disconnect_connection(connection->id);
@@ -969,31 +973,93 @@ bool HorusLinkConnectionManager::send_frame(
   return true;
 }
 
-bool HorusLinkConnectionManager::drain_lane(
-  const std::shared_ptr<Connection> & connection,
-  Lane lane)
+void HorusLinkConnectionManager::write_loop(std::shared_ptr<Connection> connection, Lane lane)
 {
-  std::vector<Frame> frames;
-  {
-    std::lock_guard<std::mutex> lock(connection->mutex);
-    while (auto routed = connection->outbound.pop(lane)) {
-      frames.push_back(std::move(routed->frame));
+  auto & ready = lane == Lane::Bulk ? connection->bulk_ready : connection->realtime_ready;
+  while (connection->connected.load()) {
+    std::optional<RoutedOutboundFrame> routed;
+    {
+      std::unique_lock<std::mutex> lock(connection->mutex);
+      ready.wait(lock, [&]() {
+          return !connection->connected.load() ||
+                 (lane == Lane::Bulk ? connection->outbound.bulk_depth() :
+                 connection->outbound.realtime_depth()) != 0;
+        });
+      if (!connection->connected.load()) {break;}
+      routed = connection->outbound.pop(lane);
+      connection->lane_statistics[lane ==
+        Lane::Bulk ? 1 : 0].write_in_progress = routed.has_value();
     }
-  }
-
-  for (const auto & frame : frames) {
-    if (!send_frame(connection, lane, frame)) {
-      return false;
+    // Exactly one consumer per lane preserves sequence order and leaves queued
+    // replaceable samples available for coalescing while a socket is stalled.
+    if (!routed) {continue;}
+    const auto started = std::chrono::steady_clock::now();
+    const bool sent = send_frame(connection, lane, routed->frame);
+    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - started).count();
+    {
+      std::lock_guard<std::mutex> lock(connection->mutex);
+      auto & stats = connection->lane_statistics[lane == Lane::Bulk ? 1 : 0];
+      stats.write_in_progress = false;
+      stats.max_send_microseconds = std::max(stats.max_send_microseconds,
+          static_cast<uint64_t>(elapsed));
+      if (sent) {
+        ++stats.frames_sent;
+        stats.bytes_sent += FrameHeader::kSize + routed->frame.payload.size();
+      }
     }
+    if (!sent) {break;}
   }
-
-  return true;
 }
 
-bool HorusLinkConnectionManager::should_retry_reliable_overflow(
-  const OutboundFrameRouteResult & result)
+std::vector<HorusLinkConnectionManager::ConnectionStatistics>
+HorusLinkConnectionManager::statistics() const
 {
-  return result.overflow && result.delivery == Delivery::ReliableFifo;
+  std::vector<std::shared_ptr<Connection>> connections;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto & item : connections_) {
+      connections.push_back(item.second);
+    }
+  }
+  std::vector<ConnectionStatistics> result;
+  for (const auto & connection : connections) {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    if (!connection->connected.load()) {continue;}
+    ConnectionStatistics snapshot;
+    snapshot.connection_id = connection->id;
+    snapshot.realtime = connection->lane_statistics[0];
+    snapshot.bulk = connection->lane_statistics[1];
+    snapshot.realtime.queued_frames = connection->outbound.realtime_depth();
+    snapshot.bulk.queued_frames = connection->outbound.bulk_depth();
+    snapshot.realtime.queued_bytes = connection->outbound.bytes(Lane::Realtime);
+    snapshot.bulk.queued_bytes = connection->outbound.bytes(Lane::Bulk);
+    result.push_back(snapshot);
+  }
+  return result;
+}
+
+void HorusLinkConnectionManager::stop_connection(const std::shared_ptr<Connection> & connection)
+{
+  {
+    std::lock_guard<std::mutex> lock(connection->mutex);
+    connection->connected = false;
+  }
+  connection->realtime_ready.notify_all();
+  connection->bulk_ready.notify_all();
+  // Do not close/reuse descriptors until every socket thread has exited.
+  if (connection->realtime_fd >= 0) {shutdown(connection->realtime_fd, SHUT_RDWR);}
+  if (connection->bulk_fd >= 0) {shutdown(connection->bulk_fd, SHUT_RDWR);}
+}
+
+void HorusLinkConnectionManager::join_connection(const std::shared_ptr<Connection> & connection)
+{
+  for (auto * thread : {&connection->realtime_thread, &connection->bulk_thread,
+      &connection->keepalive_thread, &connection->realtime_writer_thread,
+      &connection->bulk_writer_thread})
+  {
+    if (thread->joinable() && thread->get_id() != std::this_thread::get_id()) {thread->join();}
+  }
 }
 
 void HorusLinkConnectionManager::disconnect_connection(int connection_id)
@@ -1012,8 +1078,7 @@ void HorusLinkConnectionManager::disconnect_connection(int connection_id)
     return;
   }
 
-  close_fd(connection->realtime_fd);
-  close_fd(connection->bulk_fd);
+  stop_connection(connection);
 
   if (disconnection_callback_) {
     disconnection_callback_(connection_id, connection->ip);
@@ -1036,23 +1101,8 @@ void HorusLinkConnectionManager::prune_disconnected_connections()
     }
   }
 
-  const auto current_thread = std::this_thread::get_id();
   for (auto & connection : disconnected) {
-    if (connection->realtime_thread.joinable() &&
-      connection->realtime_thread.get_id() != current_thread)
-    {
-      connection->realtime_thread.join();
-    }
-    if (connection->bulk_thread.joinable() &&
-      connection->bulk_thread.get_id() != current_thread)
-    {
-      connection->bulk_thread.join();
-    }
-    if (connection->keepalive_thread.joinable() &&
-      connection->keepalive_thread.get_id() != current_thread)
-    {
-      connection->keepalive_thread.join();
-    }
+    join_connection(connection);
   }
 }
 
@@ -1145,11 +1195,11 @@ bool HorusLinkConnectionManager::set_nonblocking(int fd)
   return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
-bool HorusLinkConnectionManager::send_all(int fd, const uint8_t * data, size_t size)
+bool HorusLinkConnectionManager::send_all(int fd, const uint8_t * data, size_t size, int flags)
 {
   size_t offset = 0;
   while (offset < size) {
-    const ssize_t sent = send(fd, data + offset, size - offset, MSG_NOSIGNAL);
+    const ssize_t sent = send(fd, data + offset, size - offset, MSG_NOSIGNAL | flags);
     if (sent < 0) {
       if (errno == EINTR) {
         continue;

@@ -25,6 +25,7 @@ SOURCE_DIR = Path(sys.argv[1]) if len(sys.argv) > 1 else None
 
 
 class HorusLinkFrameInspectorTest(unittest.TestCase):
+
     def setUp(self):
         if SOURCE_DIR is None:
             raise RuntimeError('expected source directory argument')

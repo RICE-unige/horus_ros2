@@ -35,6 +35,7 @@
 #include <mutex>
 #include <future>
 #include <chrono>
+#include <atomic>
 
 namespace horus_unity_bridge
 {
@@ -60,7 +61,9 @@ public:
   using RosServiceResponseCallback = std::function<void(uint32_t srv_id,
       const std::vector<uint8_t> & response)>;
 
-  explicit ServiceManager(rclcpp::Node * node);
+  explicit ServiceManager(
+    rclcpp::Node * node,
+    std::chrono::milliseconds request_timeout = std::chrono::seconds(10));
   ~ServiceManager() = default;
 
   /**
@@ -77,7 +80,7 @@ public:
    * @brief Call a ROS service from Unity (async)
    * @param srv_id Service request ID from Unity
    * @param service_name Service name
-   * @param request Serialized service request
+   * @param request HorusLink little-endian CDR payload without the encapsulation header
    * @return True if call was initiated
    */
   bool call_ros_service_async(
@@ -97,6 +100,7 @@ public:
     const std::string & service_type,
     UnityServiceRequestCallback request_callback);
   bool unregister_ros_service(const std::string & service_name);
+  bool cancel_ros_service_call(uint32_t srv_id);
   bool unregister_unity_service(const std::string & service_name);
 
   /**
@@ -116,6 +120,11 @@ public:
     ros_response_callback_ = callback;
   }
 
+  void set_failure_callback(std::function<void(uint32_t)> callback)
+  {
+    ros_failure_callback_ = std::move(callback);
+  }
+
   /**
    * @brief Process pending service responses (called periodically)
    */
@@ -133,42 +142,35 @@ public:
     uint64_t errors = 0;
   };
 
-  const ServiceStatistics & get_statistics() const {return stats_;}
-
-  // Clean up all pending service calls (useful on client disconnect if we tracked it)
-  // For now, timeouts handle this.
+  ServiceStatistics get_statistics() const
+  {
+    return ServiceStatistics{
+      stats_.ros_services_called.load(), stats_.unity_services_called.load(),
+      stats_.responses_sent.load(), stats_.timeouts.load(), stats_.errors.load()};
+  }
 
 private:
   rclcpp::Node * node_;
+  const std::chrono::milliseconds request_timeout_;
 
   // Wrapper for Generic Client
   struct GenericServiceClientWrapper
   {
+    // Type support and client outlive native messages retained in pending futures.
+    std::shared_ptr<rcpputils::SharedLibrary> type_support_library;
+    const rosidl_service_type_support_t * type_support = nullptr;
+    std::string type_name;
     std::shared_ptr<rclcpp::GenericClient> client;
     struct PendingCall
     {
       std::shared_future<std::shared_ptr<void>> future;
-      rclcpp::Time start_time;
+      std::chrono::steady_clock::time_point start_time;
       int64_t request_id = -1;
     };
     std::unordered_map<uint32_t, PendingCall> pending;
 
-    explicit GenericServiceClientWrapper(std::shared_ptr<rclcpp::GenericClient> c)
-    : client(c) {}
+    ~GenericServiceClientWrapper();
   };
-
-  struct RosServiceClientBase
-  {
-    virtual ~RosServiceClientBase() = default;
-
-    virtual bool call(
-      uint32_t srv_id,
-      const std::vector<uint8_t> & request,
-      RosServiceResponseCallback response_callback) = 0;
-  };
-
-  template<typename ServiceT>
-  struct TypedRosServiceClient;
 
   // Base class for Unity service servers
   struct UnityServiceServerBase
@@ -193,7 +195,6 @@ private:
 
   std::unordered_map<std::string,
     std::shared_ptr<GenericServiceClientWrapper>> ros_service_clients_;
-  std::unordered_map<std::string, std::shared_ptr<RosServiceClientBase>> typed_ros_service_clients_;
   std::unordered_map<uint32_t, std::string> pending_service_names_;  // srv_id -> service_name
   std::mutex ros_clients_mutex_;
 
@@ -204,8 +205,16 @@ private:
   uint32_t next_service_id_ = 1000;
 
   RosServiceResponseCallback ros_response_callback_;
+  std::function<void(uint32_t)> ros_failure_callback_;
 
-  ServiceStatistics stats_;
+  struct AtomicServiceStatistics
+  {
+    std::atomic<uint64_t> ros_services_called{0};
+    std::atomic<uint64_t> unity_services_called{0};
+    std::atomic<uint64_t> responses_sent{0};
+    std::atomic<uint64_t> timeouts{0};
+    std::atomic<uint64_t> errors{0};
+  } stats_;
 
   // Helper to normalize service types
   std::string normalize_service_type(const std::string & type);

@@ -54,7 +54,10 @@ struct OutboundFrameRouteResult
 class OutboundFrameRouter
 {
 public:
-  OutboundFrameRouter(size_t realtime_depth, size_t bulk_depth);
+  OutboundFrameRouter(
+    size_t realtime_depth, size_t bulk_depth,
+    size_t realtime_bytes = std::numeric_limits<size_t>::max(),
+    size_t bulk_bytes = std::numeric_limits<size_t>::max());
 
   OutboundFrameRouteResult enqueue_data(
     const ChannelTable & channel_table,
@@ -71,10 +74,15 @@ public:
     size_t size);
 
   std::optional<RoutedOutboundFrame> pop(Lane lane);
+  OutboundFrameRouteResult enqueue_owned_payload(
+    const ChannelTable & channel_table, const std::string & topic,
+    MessageType message_type, uint32_t corr_id, std::vector<uint8_t> payload);
   void clear();
+  void remove_channel(uint16_t channel_id);
 
   size_t realtime_depth() const {return realtime_queue_.size();}
   size_t bulk_depth() const {return bulk_queue_.size();}
+  size_t bytes(Lane lane) const {return queue_for(lane).bytes();}
 
 private:
   OutboundLaneQueue & queue_for(Lane lane);

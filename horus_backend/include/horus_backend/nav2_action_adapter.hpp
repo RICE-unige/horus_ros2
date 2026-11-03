@@ -56,10 +56,14 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr goal_sub;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr cancel_sub;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub;
+    rclcpp::Publisher<NavigateToPose::Feedback>::SharedPtr feedback_pub;
 
     // Track current goal to allow cancellation
-    std::shared_future<GoalHandleNav2::SharedPtr> future_goal_handle;
     GoalHandleNav2::SharedPtr active_goal_handle;
+    uint64_t generation = 0;
+    bool awaiting_acceptance = false;
+    bool cancel_requested = false;
+    bool retired = false;
     std::mutex goal_mutex;
   };
 
@@ -68,27 +72,32 @@ private:
   std::mutex adapters_mutex_;
 
   void setup_adapter(std::shared_ptr<RobotAdapter> adapter);
-  void handle_goal(
+  static void retire_adapter(const std::shared_ptr<RobotAdapter> & adapter);
+  static void cancel_active_goal(const std::shared_ptr<RobotAdapter> & adapter);
+  static void handle_goal(
     std::shared_ptr<RobotAdapter> adapter,
     const geometry_msgs::msg::PoseStamped::SharedPtr msg);
-  void handle_cancel(
+  static void handle_cancel(
     std::shared_ptr<RobotAdapter> adapter,
     const std_msgs::msg::String::SharedPtr msg);
 
-  void goal_response_callback(
+  static void goal_response_callback(
     std::shared_ptr<RobotAdapter> adapter,
+    uint64_t generation,
     const GoalHandleNav2::SharedPtr & goal_handle);
 
-  void feedback_callback(
+  static void feedback_callback(
     std::shared_ptr<RobotAdapter> adapter,
+    uint64_t generation,
     GoalHandleNav2::SharedPtr,
     const std::shared_ptr<const NavigateToPose::Feedback> feedback);
 
-  void result_callback(
+  static void result_callback(
     std::shared_ptr<RobotAdapter> adapter,
+    uint64_t generation,
     const GoalHandleNav2::WrappedResult & result);
 
-  void publish_status(std::shared_ptr<RobotAdapter> adapter, const std::string & status);
+  static void publish_status(std::shared_ptr<RobotAdapter> adapter, const std::string & status);
 };
 
 }  // namespace horus_backend

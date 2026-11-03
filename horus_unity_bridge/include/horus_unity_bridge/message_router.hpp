@@ -26,6 +26,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <nlohmann/json.hpp>
+#include <atomic>
 #include <memory>
 #include <functional>
 #include <unordered_map>
@@ -35,13 +36,14 @@
 
 #ifdef ENABLE_WEBRTC
 #include "horus_unity_bridge/webrtc_manager.hpp"
+#include "horus_unity_bridge/native_media_relay.hpp"
+#include "horus_unity_bridge/control_link.hpp"
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <condition_variable>
 #include <variant>
 #include <deque>
 #include <thread>
-#include <atomic>
 #include <chrono>
 #endif
 
@@ -75,6 +77,7 @@ public:
         const std::vector<uint8_t> & response)>;
 
   explicit MessageRouter(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
+  MessageRouter(const rclcpp::NodeOptions & options, bool media_only);
   ~MessageRouter();
 
   /**
@@ -187,7 +190,13 @@ public:
     uint64_t routing_errors = 0;
   };
 
-  const Statistics & get_statistics() const {return stats_;}
+  Statistics get_statistics() const
+  {
+    return Statistics{
+      stats_.messages_routed.load(), stats_.messages_published.load(),
+      stats_.messages_received.load(), stats_.system_commands_processed.load(),
+      stats_.routing_errors.load()};
+  }
   void set_log_protocol_messages(bool enabled);
 
 private:
@@ -201,14 +210,27 @@ private:
     sensor_msgs::msg::Image::SharedPtr,
     sensor_msgs::msg::CompressedImage::SharedPtr>;
 
+  struct SharedEncoderGroup;
   struct WebRtcSession
   {
     std::string session_id;
+    std::string offer_identity;
+    std::mutex signaling_mutex;
+    nlohmann::json last_answer;
     int owner_client_fd = -1;
     std::string stream_topic;
     std::string auxiliary_topic;
     std::string image_type;
+    bool preencoded_h264 = false;
+    bool packet_relay = false;
+    std::atomic<bool> h264_queue_discontinuity{false};
     std::shared_ptr<WebRTCManager> manager;
+    std::shared_ptr<SharedEncoderGroup> encoder_group;
+    std::mutex encoder_delivery_mutex;
+    WebRTCManager::Settings source_settings;
+    std::atomic<int> requested_bitrate{2000}, requested_framerate{30}, capacity_bitrate{100000};
+    std::atomic<int> budget_bitrate{100000}, media_priority{1};
+    std::atomic<int64_t> last_encoder_rebind_ms{0};
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr raw_sub;
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_sub;
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr auxiliary_sub;
@@ -218,7 +240,7 @@ private:
     std::thread worker_thread;
     std::atomic<bool> running{false};
     std::chrono::steady_clock::time_point session_start_time{};
-    std::chrono::steady_clock::time_point last_activity;
+    std::atomic<int64_t> last_peer_ready_ms{0};
     uint64_t incoming_frames = 0;
     uint64_t pushed_frames = 0;
     uint64_t dropped_queue_frames = 0;
@@ -233,6 +255,32 @@ private:
     std::chrono::steady_clock::time_point last_telemetry_log_time{};
     bool waned_unsupported_encoding = false;
   };
+  struct SharedEncoderGroup
+  {
+    std::string key, topic;
+    std::shared_ptr<WebRtcSession> worker;
+    std::mutex mutex;
+    std::unordered_map<std::string, std::weak_ptr<WebRtcSession>> consumers;
+  };
+  bool share_encoders_ = false;
+  size_t max_shared_encoder_groups_ = 24;
+  size_t max_webrtc_sessions_ = 64;
+  size_t max_shared_encoder_groups_per_camera_ = 3;
+  int media_link_budget_kbps_ = 0, media_reserved_kbps_ = 512, media_bulk_floor_kbps_ = 256;
+  std::string media_bulk_budget_file_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr media_budget_status_;
+  std::mutex shared_encoder_mutex_;
+  std::unordered_map<std::string, std::shared_ptr<SharedEncoderGroup>> shared_encoder_groups_;
+  rclcpp::TimerBase::SharedPtr shared_encoder_timer_;
+  bool attach_shared_encoder(const std::shared_ptr<WebRtcSession> & session);
+  void release_shared_encoder(const std::shared_ptr<WebRtcSession> & session);
+  void refresh_shared_encoders();
+  void stop_shared_encoder(const std::shared_ptr<SharedEncoderGroup> & group);
+
+  std::mutex owned_media_signals_mutex_;
+  std::deque<std_msgs::msg::String::SharedPtr> owned_media_signals_;
+  rclcpp::CallbackGroup::SharedPtr media_signaling_group_;
+  rclcpp::TimerBase::SharedPtr owned_media_signals_timer_;
 
   bool webrtc_enabled_ = false;
   std::string webrtc_client_signal_topic_ = "/horus/webrtc/client_signal";
@@ -241,9 +289,16 @@ private:
   int webrtc_default_framerate_ = 30;
   std::string webrtc_default_encoder_ = "x264enc";
   std::string webrtc_default_pipeline_;
+  std::vector<std::string> webrtc_preencoded_topics_;
   std::vector<std::string> webrtc_default_stun_servers_;
   int webrtc_session_timeout_sec_ = 20;
   size_t webrtc_max_queue_size_ = 2;
+  std::unique_ptr<NativeMediaRelay> native_media_relay_;
+  rclcpp::TimerBase::SharedPtr native_media_relay_timer_;
+  rclcpp::TimerBase::SharedPtr native_media_status_timer_;
+  rclcpp::TimerBase::SharedPtr media_health_timer_;
+  std::unique_ptr<ControlLink> control_link_;
+  rclcpp::TimerBase::SharedPtr control_link_timer_;
 
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr webrtc_signal_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr webrtc_signal_pub_;
@@ -283,11 +338,24 @@ private:
   HorusLinkServiceResponseCallback horuslink_service_response_callback_;
 
   // Statistics
-  Statistics stats_;
+  struct AtomicStatistics
+  {
+    std::atomic<uint64_t> messages_routed{0};
+    std::atomic<uint64_t> messages_published{0};
+    std::atomic<uint64_t> messages_received{0};
+    std::atomic<uint64_t> system_commands_processed{0};
+    std::atomic<uint64_t> routing_errors{0};
+  } stats_;
 
-  // Map HorusLink service correlation IDs to requesting connections for responses
-  std::unordered_map<uint32_t, int> service_response_connection_by_corr_id_;
-  std::unordered_map<uint32_t, std::string> service_response_topic_by_corr_id_;
+  struct ServiceResponseRoute
+  {
+    int connection_id = -1;
+    uint32_t correlation_id = 0;
+    std::string service_name;
+  };
+  // Wire IDs are connection-local. Only bridge-generated IDs reach ServiceManager.
+  std::unordered_map<uint32_t, ServiceResponseRoute> service_response_routes_;
+  uint32_t next_ros_service_request_id_ = 0;
   std::mutex service_response_mutex_;
   bool log_protocol_messages_ = true;
 
